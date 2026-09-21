@@ -1,0 +1,92 @@
+# name: sensitive-core
+# version: 2026-07-23.1
+# source: JR/T 0171-2020 字段名提炼 + maybe-sensitive-words 高置信子集（2026-07-23 全量分类迁移）
+# maintainer: 安全合规组
+# 说明: 高置信金融敏感词，日志/字段命中即判 SENSITIVE 违规。
+#       匹配方式为字段名驼峰/下划线拆分后的"单词精确匹配"，请使用单词形式。
+# ---- 身份鉴别信息（C3）----
+password
+passwd
+pwd
+pin
+pins
+otp
+captcha
+cvn
+cvv
+passkey
+passkeys
+passphrase
+passphrases
+mnemonic
+mnemonics
+authcode
+securitycode
+# ---- 生物识别信息（C3）----
+biometric
+biometrics
+biometry
+fingerprint
+fingerprints
+iris
+irises
+retina
+retinas
+face
+faces
+facial
+voiceprint
+handprint
+handprints
+palm
+palms
+dna
+genetic
+genetics
+genome
+genomes
+# ---- 金融账户信息（C3/C2）----
+cardno
+cardnum
+cardholder
+cardholders
+account
+accounts
+accountno
+balance
+balances
+bankcard
+# ---- 证件信息（C3/C2）----
+idcard
+passport
+passports
+ssn
+socialsecurity
+dob
+dobs
+birthday
+birthdays
+birthplace
+# ---- 密钥与凭据（C3）----
+secret
+secrets
+token
+tokens
+credential
+credentials
+cred
+creds
+privatekey
+secretkey
+masterkey
+workkey
+bearer
+bearers
+ssh
+pgp
+salt
+salts
+session
+cookie
+cookies
+nonce

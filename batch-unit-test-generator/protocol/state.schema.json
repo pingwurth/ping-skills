@@ -1,0 +1,160 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/skills/batch-unit-test-generator/protocol/state.schema.json",
+  "title": "batch-unit-test-generator state.json",
+  "description": "断点续跑状态文档, 由 StateStore 原子写入 <workdir>/state.json。所有流程进度、覆盖率轨迹与迭代预算计数持久化于此。加载时对缺失键填默认值, 因此向后兼容旧版本。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "project_root",
+    "threshold",
+    "target_class",
+    "module",
+    "iteration",
+    "global_iteration",
+    "methods"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "state.json schema 版本号, 用于顺序迁移; 旧文件缺失时视为 1"
+    },
+    "project_root": { "type": "string", "description": "选定工作树根目录绝对路径" },
+    "workdir": { "type": "string", "description": ".agent/batch-unit-test-generator 绝对路径" },
+    "threshold": { "type": "number", "description": "行覆盖率门槛(百分比), 默认 80.0" },
+    "target_class": { "type": "string", "description": "目标类 FQCN" },
+    "target_method": { "type": ["string", "null"], "description": "限定的单个方法名(method 模式)" },
+    "source_file": { "type": ["string", "null"], "description": "目标类源文件绝对路径" },
+    "module": { "type": "string", "description": "目标类所属 Maven 模块, 根模块为 '.'" },
+    "jacoco_version": { "type": "string", "description": "pom 未配置 jacoco 时挂载的插件版本" },
+    "coverage_excludes": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "覆盖率排除模式列表(fnmatch: * 跨 '.' 与 '$' 段); 对完整类名 pkg.Outer$Inner 在内部类聚合前匹配, 命中的类不进入方法表与类级统计。init 经 --coverage-exclude 写入, 终验未显式传入时沿用 init 轮取值"
+    },
+    "mvn_log": { "type": "string", "description": "最近一次 mvn 执行日志绝对路径" },
+    "git_baseline": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "init 时快照的 src/main/java 既有变更 {相对路径: 文件内容 SHA-256 哈希}; 旧 state.json 为 list[str], from_dict 兼容"
+    },
+    "iteration": { "type": "integer", "minimum": 0, "description": "当前方法迭代轮次(切换方法时清零)" },
+    "global_iteration": { "type": "integer", "minimum": 0, "description": "全局迭代轮次(永不重置), 支撑全局预算" },
+    "current_method": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["name", "desc"],
+      "properties": {
+        "name": { "type": "string" },
+        "desc": { "type": "string", "description": "人读化参数描述, 与 name 共同构成方法唯一键" }
+      }
+    },
+    "class_coverage": { "$ref": "#/definitions/classCoverage" },
+    "methods": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/methodCoverage" }
+    },
+    "coverage_history": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "test_history": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true }
+    },
+    "final_checked": { "type": "boolean", "description": "仅终验真正通过(含测试全绿)才置 true" },
+    "final_check_fail_streak": { "type": "integer", "minimum": 0, "description": "终验连续不绿计数, 防终验空转死循环" },
+    "worktree_branch": {
+      "type": ["string", "null"],
+      "description": "工作树所在分支(init 阶段经 git rev-parse --abbrev-ref HEAD 查询); detached HEAD 或 git 不可用为 null"
+    },
+    "final_test_summary": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "达标轮(init 即达标或终验通过)的 surefire 汇总 {tests, failures, errors, skipped}, finish 报告数据源"
+    },
+    "test_class_file": { "type": "string", "description": "测试类文件绝对路径" },
+    "test_class_simple": { "type": "string", "description": "测试类简单名, 如 FooServiceTest" },
+    "plan": { "type": ["object", "null"], "additionalProperties": true },
+    "method_round_bonus": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "单方法预算追加窗口(make_plan --grant-rounds 落地; 切换方法时清零)"
+    },
+    "global_round_bonus": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "全局预算追加窗口(终验延续)"
+    },
+    "validate_fail_streak": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "validate_rules 连续违规计数(通过/切换方法/用户决策落地时清零)"
+    },
+    "jacoco_config_cache": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "JaCoCo 配置探测缓存 {result: bool, pom_mtimes: {path: mtime}}"
+    },
+    "batch_mode": {
+      "type": "boolean",
+      "default": false,
+      "description": "是否处于批量模式(影响 decide_after_plan/decide_after_verify 路由; batch_init 生成 state.json 时置 true)"
+    },
+    "class_round_used": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "类级已耗轮次(每轮 verify_coverage._record_observation 递增; 供升级判定, BATCH_CLASS_ROUND_BUDGET 上限内自动继续)"
+    }
+  },
+  "definitions": {
+    "classCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["covered", "missed", "rate"],
+      "properties": {
+        "covered": { "type": "integer", "minimum": 0 },
+        "missed": { "type": "integer", "minimum": 0 },
+        "rate": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "methodCoverage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["name", "desc", "covered", "missed", "status"],
+      "properties": {
+        "name": { "type": "string" },
+        "desc": { "type": "string" },
+        "covered": { "type": "integer", "minimum": 0 },
+        "missed": { "type": "integer", "minimum": 0 },
+        "status": { "type": "string", "enum": ["pending", "done", "skipped"] },
+        "initial_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "init 基线快照的方法行覆盖率(finish 报告的 before 值); 旧版本 state.json 可能缺失"
+        },
+        "round_rates": {
+          "type": "array",
+          "items": { "type": "number" },
+          "description": "本方法历轮覆盖率轨迹, 用于无提升升级判定"
+        },
+        "round_test_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["failures", "errors"],
+            "properties": {
+              "failures": { "type": "integer", "minimum": 0 },
+              "errors": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "description": "本方法历轮测试结果轨迹, 用于连续失败升级判定"
+        }
+      }
+    }
+  }
+}

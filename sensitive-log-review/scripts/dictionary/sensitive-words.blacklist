@@ -1,0 +1,12 @@
+# name: sensitive-words-blacklist
+# version: 2026-07-21.1
+# source: 评审确认的敏感词（最高优先级，命中即判 SENSITIVE）
+# maintainer: 安全合规组
+# 说明: 支持完整字段名（忽略大小写）或拆分后单词两种命中方式。
+pwd
+cardNum
+cardNo
+smsCode
+verifyCode
+idCard
+password

@@ -1,0 +1,90 @@
+[
+  {
+    "query": "我们有个 Vue3 项目，神策 SDK 接入三年了，埋点散落在各种组件和 composable 里。想梳理一下每个页面到底上报了哪些 page_name 和 biz_id，能不能帮我分析整个仓库的埋点调用链路，从功能页一直追到 sensors.track",
+    "should_trigger": true
+  },
+  {
+    "query": "帮我把 ~/work/mall-app 代码库里所有的 sensors.track 和 trackEvent 调用找出来，记录文件:行号，然后逐条确认每条最终上报的 first_biz_id / second_biz_id / first_biz_name / second_biz_name 取值，输出成 csv",
+    "should_trigger": true
+  },
+  {
+    "query": "接手了一个 Spring Boot 老项目，里面有 @TrackEvent 注解埋点也有直接调 DataTrackClient.track() 的，两种方式混着用。我想搞清楚每种埋点范式的完整调用链路和最终上报字段",
+    "should_trigger": true
+  },
+  {
+    "query": "产品要我牵头做埋点治理，第一步先盘点现有埋点：每个调用点的 page_name/first_biz_id/second_biz_id/first_biz_name/second_biz_name/event 五个字段分别是什么，从哪来的。仓库在 ~/code/finance-web，React+TS，SDK 是自研 @analytics/track",
+    "should_trigger": true
+  },
+  {
+    "query": "GrowingIO 全埋点 + 我们自己封了一层 reportEvent，还有几个页面直接调 gio.track，三种范式混用。帮我系统定位所有埋点代码位置并逐条确认上报字段",
+    "should_trigger": true
+  },
+  {
+    "query": "这个微信小程序的埋点 SDK 是自研的，入口是 reportEvent 函数和 wxml 里的 data-track 指令。帮我枚举埋点开发范式、定位所有调用点，并分析每条的 page_name 和 biz 取值",
+    "should_trigger": true
+  },
+  {
+    "query": "埋点需求文档丢了，现在只能从代码反推每个埋点上报了什么字段。仓库主要框架是 React18 + TS，埋点接的是 @sensorsdata/analytics，帮我生成一份 sensors.json 把范式和调用链路记下来",
+    "should_trigger": true
+  },
+  {
+    "query": "我想让 LLM 先分析代码库生成 sensors.json 描述埋点范式和 SDK API，再用 python 脚本按入口函数定位调用点，最后人工逐条确认 page_name 等字段写 csv",
+    "should_trigger": true
+  },
+  {
+    "query": "数据团队要埋点字典但代码里没统一规范，有装饰器埋点、有 v-track 指令、有直调 sensors.track 的，帮我梳理一遍所有埋点的调用链路和五个业务字段的实际取值",
+    "should_trigger": true
+  },
+  {
+    "query": "小程序埋点上报到神策，我想确认 src/pages 下每个页面埋点的 page_name 是不是都填对了，biz_id 层级有没有传错，帮我逐条核对",
+    "should_trigger": true
+  },
+  {
+    "query": "我们项目用 Sentry 做错误监控，最近线上报错多，帮我看看 src/utils/errorReporter.ts 里捕获异常上报给 Sentry 的逻辑能不能优化下，有些 error 没带上下文",
+    "should_trigger": false
+  },
+  {
+    "query": "我在给一个 IoT 温湿度传感器设备写固件，需要读取 sensor 数据上报到 MQTT broker，帮我看下 main.c 的代码结构合不合理",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我写个 useRenderTracker hook 跟踪 React 组件渲染次数和耗时，做性能分析用，要能画出火焰图",
+    "should_trigger": false
+  },
+  {
+    "query": "后端日志系统用的 logback，想梳理一下各处 log.info / log.warn 调用链路，看哪些日志带了 traceId 哪些没带，统一一下规范",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我写个 A/B 测试 SDK，按实验配置给用户分桶返回不同变体，要支持缓存和异步加载实验规则",
+    "should_trigger": false
+  },
+  {
+    "query": "项目里有个车辆 GPS 轨迹追踪模块，帮我把 track 车辆位置、上传坐标的调用链路画出来，看下上报频率合不合理",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我分析这个仓库的整体代码调用图，找出核心模块和它们的依赖关系，生成一份架构文档，不用关心具体业务字段",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我把 ~/Downloads/q4_sales.csv 里的销售数据按 page_name 列汇总，算每个页面的转化率和 GMV，输出新的 csv",
+    "should_trigger": false
+  },
+  {
+    "query": "最近埋点上报丢失率高，但这是 nginx 层的问题，帮我看下 access.log 统计哪些 /track 请求返回了 5xx，不用动业务代码",
+    "should_trigger": false
+  },
+  {
+    "query": "帮我给埋点 SDK 加个新事件类型 click_banner，函数签名 trackBanner(pageName, bizId)，需要透传这两个参数到 sensors.track，写一下实现",
+    "should_trigger": false
+  },
+  {
+    "query": "梳理所有功能的埋点信息",
+    "should_trigger": true
+  },
+  {
+    "query": "更新埋点信息",
+    "should_trigger": true
+  }
+]

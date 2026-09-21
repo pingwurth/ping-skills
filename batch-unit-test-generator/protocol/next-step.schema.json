@@ -1,0 +1,183 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/skills/batch-unit-test-generator/protocol/next-step.schema.json",
+  "title": "NEXT_STEP protocol payload",
+  "description": "batch-unit-test-generator 每个脚本结束时在 stdout 末尾输出的唯一协议块(被 :::NEXT_STEP_BEGIN::: / :::NEXT_STEP_END::: 包裹的 JSON)。调用方只解析标记块中的 JSON。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "script",
+    "status",
+    "exit_code",
+    "summary",
+    "artifacts",
+    "next_step"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "script": {
+      "type": "string",
+      "description": "产出本协议块的脚本文件名, 如 verify_coverage.py"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "empty", "failed", "needs_input"]
+    },
+    "exit_code": {
+      "type": "integer",
+      "description": "0=正常完成; 1=需要继续处理; 2=脚本执行错误; 3=状态/协议错误",
+      "enum": [0, 1, 2, 3]
+    },
+    "summary": {
+      "type": "string",
+      "description": "面向调用方的一句话结论"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["path", "kind"],
+        "properties": {
+          "path": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "description": "产物类型",
+            "examples": [
+              "worktree",
+              "coverage",
+              "mvn_log",
+              "surefire_report",
+              "test_file"
+            ]
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "可选的量化指标(覆盖率、轮次、测试计数等)",
+      "additionalProperties": true
+    },
+    "next_step": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "reason"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["run_script", "write_code", "ask_user", "finish"]
+        },
+        "reason": { "type": "string" },
+        "script": {
+          "type": "string",
+          "description": "type=run_script 时, 下一个脚本的绝对路径"
+        },
+        "params": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "type=run_script 时的命令行参数"
+        },
+        "instructions": {
+          "type": "string",
+          "description": "type=write_code 时, 交给 LLM 的完整提示词"
+        },
+        "question": {
+          "type": "string",
+          "description": "type=ask_user 时, 向用户提出的问题"
+        },
+        "resume": {
+          "type": "array",
+          "description": "type=ask_user 时的用户选项恢复指引。用户答复后, 调用方应选取匹配的选项: 有 script 者逐字执行其 script+params; terminate 选项无命令, 直接结束任务",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["option", "label"],
+            "properties": {
+              "option": {
+                "type": "string",
+                "description": "选项标识",
+                "enum": ["continue", "skip_method", "adjust_threshold", "retry", "terminate"]
+              },
+              "label": {
+                "type": "string",
+                "description": "人读选项名, 与 question 中列出的选项一致"
+              },
+              "script": {
+                "type": "string",
+                "description": "恢复脚本绝对路径(已含 --workdir 参数; terminate 无此项)"
+              },
+              "params": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "恢复脚本命令行参数; 占位符 N 表示需替换为用户给定的值"
+              },
+              "note": {
+                "type": "string",
+                "description": "需用户补充值(如新门槛 N)或动作说明"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "option": { "not": { "const": "terminate" } }
+                  }
+                },
+                "then": { "required": ["script", "params"] }
+              }
+            ]
+          }
+        },
+        "deliverables": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "type=finish 时的交付物路径列表"
+        },
+        "report": {
+          "type": "string",
+          "description": "type=finish 时由脚本生成的完整收尾报告(覆盖率对比、测试汇总、分支名与收尾命令); 调用方须逐字转述, 不得改写数字、路径、分支名或命令。select_worktree 的 finish 不携带本字段(阶段完成, 继续工作流下一步)"
+        },
+        "on_complete": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["script", "params"],
+          "description": "type=write_code 时由脚本给出的'完成后命令'; 调用方保存测试文件后逐字执行 script+params, 不得增删参数。默认 validate_rules.py --workdir <wd>; 终验失败全在目标类的修复路径为 make_plan.py(自动路由回终验)",
+          "properties": {
+            "script": {
+              "type": "string",
+              "description": "完成后应执行的脚本绝对路径"
+            },
+            "params": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "命令行参数(含 --workdir)"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "run_script" } } },
+          "then": { "required": ["script", "params"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "write_code" } } },
+          "then": { "required": ["instructions", "on_complete"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "ask_user" } } },
+          "then": { "required": ["question"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "finish" } } },
+          "then": { "required": ["report"] }
+        }
+      ]
+    }
+  }
+}

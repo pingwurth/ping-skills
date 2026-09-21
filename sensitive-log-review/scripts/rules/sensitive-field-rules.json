@@ -1,0 +1,44 @@
+[
+  {
+    "category": "身份鉴别信息",
+    "level": "C3",
+    "patterns": ["password", "passwd", "pwd", "cvn\\d*", "cvv\\d*", "otp", "sms.?code", "verify.?code", "captcha"],
+    "reason": "身份鉴别信息 - C3（密码/验证码/卡片验证值）"
+  },
+  {
+    "category": "生物识别信息",
+    "level": "C3",
+    "patterns": ["face", "fingerprint", "iris", "voiceprint", "palm", "retina", "handprint"],
+    "reason": "生物识别信息 - C3"
+  },
+  {
+    "category": "金融账户信息",
+    "level": "C3/C2",
+    "patterns": ["card.?no", "card.?num", "account.?no", "acct", "balance", "bank.?card"],
+    "reason": "金融账户信息 - C3/C2（卡号/账号/余额）"
+  },
+  {
+    "category": "财产与信用信息",
+    "level": "C2/C3",
+    "patterns": ["income", "credit.?score", "loan", "debt", "asset", "salary", "mortgage"],
+    "reason": "财产与信用信息 - C2/C3"
+  },
+  {
+    "category": "基本资料",
+    "level": "C2/C3",
+    "patterns": ["id.?card", "identity", "passport", "phone", "mobile", "email", "address"],
+    "reason": "基本资料 - 证件/联系方式 C2/C3"
+  },
+  {
+    "category": "交易与行为信息",
+    "level": "C2",
+    "patterns": ["transaction", "order.?no", "trade", "payment"],
+    "reason": "交易与行为信息 - C2"
+  },
+  {
+    "category": "密钥与证书",
+    "level": "C3",
+    "patterns": ["private.?key", "secret.?key", "master.?key", "work.?key", "certificate", "token", "secret"],
+    "reason": "密码与密钥数据 - C3"
+  }
+]

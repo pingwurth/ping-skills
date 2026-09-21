@@ -1,0 +1,40 @@
+# name: en_US-whitelist
+# version: 2026-07-21.1
+# source: 技术缩写补充（视为合格命名，不进入 unqualified.fields）
+# maintainer: 安全合规组
+# 说明: 配合 en_US-large.txt 使用；英文词典缺失的常用技术缩写在此登记。
+uid
+uuid
+cdcs
+seq
+sys
+num
+dto
+vo
+bo
+po
+dao
+api
+url
+uri
+json
+xml
+http
+https
+config
+param
+req
+resp
+impl
+svc
+repo
+msg
+jdbc
+oss
+cos
+sms
+mqtt
+grpc
+rpc
+sdk
+ids

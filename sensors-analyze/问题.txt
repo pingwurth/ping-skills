@@ -1,0 +1,17 @@
+✔ 字段 eventName 也要记录，但可为空
+✔ 不要依赖第三方包，如：jsonschema
+✔ sensors.json 的 entry_functions 缺少 sensorsdataInit
+
+✔ 工程中所有埋点方式分析遗漏
+✔ entry.txt 缺少 sensorsdataInit, 实际应该有三种：sensorsdataInit, sensorsdataInitV1, sensorsCodeTrack
+✔ entry.txt 没有人工确认复核
+
+✔ 生成结果（csv）格式调整 ———— 文件名:start,end
+✔ 生成结果（csv）含动态引用需要继续分析所有引用，直到找到每一处具体值
+
+✔ next_step 防漂移
+
+✔ 绝对不允许修改代码
+
+✔ 调用点复核 ———— 数量、非空、真的能在代码中找到，发现遗漏就补充
+✔ 与上一版本对比，差异列出，人工复核

@@ -1,0 +1,261 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Sensors Analysis Report",
+  "description": "LLM 对代码库埋点实现的静态分析报告。枚举每一种埋点开发范式，为每种范式给出参考代码位置、完整调用链路（功能页 → 埋点 SDK API）、入口函数与所用 SDK API（含参数说明）。后续 python 脚本据此提取入口函数、定位调用点，再由 LLM 逐条确认最终上报字段。",
+  "type": "object",
+  "required": ["meta", "paradigms"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "description": "项目级元信息",
+      "required": ["project_path", "language", "analyzed_at", "sdk_summary"],
+      "additionalProperties": false,
+      "properties": {
+        "project_path": {
+          "type": "string",
+          "description": "项目根路径（绝对或相对均可）"
+        },
+        "language": {
+          "type": "string",
+          "description": "主要语言/技术栈，如 Vue3+TS、Spring Boot、Flutter、微信小程序"
+        },
+        "analyzed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "分析时间，ISO 8601"
+        },
+        "sdk_summary": {
+          "type": "string",
+          "description": "埋点 SDK 总览，如『神策 Web JS SDK 1.x + 自研 @/sensors 封装层』"
+        },
+        "global_sdk_apis": {
+          "type": "array",
+          "description": "代码中出现过的所有埋点 SDK API 汇总（去重），便于全局检索",
+          "items": { "$ref": "#/definitions/sdkApi" }
+        }
+      }
+    },
+    "paradigms": {
+      "type": "array",
+      "description": "代码库中存在的每一种埋点开发范式。至少 1 条。",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/paradigm" }
+    }
+  },
+  "definitions": {
+    "location": {
+      "type": "object",
+      "description": "代码位置（文件:行号）",
+      "required": ["file", "start_line"],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "相对项目根的路径"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "可选；未提供时等于 start_line"
+        }
+      }
+    },
+    "callChainStep": {
+      "type": "object",
+      "description": "调用链路中的一层",
+      "required": ["order", "layer", "symbol", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "从功能页侧起算的顺序，1 为最贴近用户交互的一层"
+        },
+        "layer": {
+          "type": "string",
+          "description": "层名，如 功能页组件 / 业务封装函数 / 通用埋点工具 / SDK API / 网络上报"
+        },
+        "symbol": {
+          "type": "string",
+          "description": "该层关键符号名：组件名/hook 名/函数名/指令名/API 名"
+        },
+        "location": { "$ref": "#/definitions/location" },
+        "description": {
+          "type": "string",
+          "description": "这一层做了什么、如何衔接到下一层"
+        },
+        "data_flow": {
+          "type": "array",
+          "description": "该层的字段流转标注。显式说明目标字段（page_name/first_biz_id/second_biz_id/first_biz_name/second_biz_name/event）在这一层是『从哪来』『如何变换』『传给谁』，供第 4 步 LLM 追踪取值。无字段流转时可留空数组。",
+          "items": {
+            "type": "object",
+            "required": ["field", "action"],
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "description": "字段名，如 page_name、first_biz_id"
+              },
+              "action": {
+                "type": "string",
+                "enum": ["source", "transform", "pass", "merge", "drop"],
+                "description": "source=在本层由字面量/配置/上下文产生；transform=在本层变换/映射；pass=透传给下一层；merge=与默认值或全局属性合并；drop=在本层丢弃未上报"
+              },
+              "from": {
+                "type": "string",
+                "description": "字段值的来源，如『路由 meta.sensors.page』『常量 CONF.PAGE』『父组件 prop bizId』『上一层入参』"
+              },
+              "to": {
+                "type": "string",
+                "description": "流向，如『传入 trackEvent 的 props.page_name』『写入 sensors.registerPage 的默认属性』"
+              },
+              "value_hint": {
+                "type": "string",
+                "description": "取值线索/示例，如『固定 home_page』『取当前路由 name』"
+              }
+            }
+          }
+        }
+      }
+    },
+    "entryFunction": {
+      "type": "object",
+      "description": "埋点追踪的『入口函数/标识』。第 2 步 python 据此提取候选，第 3 步据此 grep 定位所有调用点。",
+      "required": ["name", "kind", "location", "grep_pattern"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "入口的可读名称：函数名/方法名/指令名/装饰器名/hook 名"
+        },
+        "grep_pattern": {
+          "type": "string",
+          "description": "第 3 步 python 用于定位调用点的正则表达式（需考虑调用形式：函数调用、JSX 属性、指令、装饰器等）。示例：纯函数调用用 '\\btrackEvent\\s*\\('；指令用 'v-track(?:-[\\w-]+)?\\s*=\\s*[\"\\']'；装饰器用 '@TrackEvent\\b'；SDK 直调用 '\\bsensors\\.track\\s*\\('。须保证在代码库中能命中该范式的调用点且误报率低。"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "wrapper",
+            "sdk_direct",
+            "directive",
+            "decorator",
+            "hook",
+            "autoTrack_config"
+          ],
+          "description": "wrapper=自研封装函数；sdk_direct=直接调 SDK；directive=模板指令(v-track 等)；decorator=装饰器；hook=组合式 hook；autoTrack_config=全埋点配置项"
+        },
+        "signature": {
+          "type": "string",
+          "description": "调用签名，如 trackEvent(name: string, props?: Record<string, unknown>): void"
+        },
+        "location": { "$ref": "#/definitions/location" },
+        "note": {
+          "type": "string",
+          "description": "可选补充说明，如该入口的常见误判点"
+        }
+      }
+    },
+    "sdkApi": {
+      "type": "object",
+      "description": "埋点 SDK API 及其参数说明",
+      "required": ["name", "purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "API 全名，如 sensors.track、sensors.quick('autoTrack')、profileSet"
+        },
+        "signature": {
+          "type": "string",
+          "description": "调用形式/函数签名"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "作用：发送事件 / 设置用户属性 / 全埋点开关 等"
+        },
+        "parameters": {
+          "type": "array",
+          "description": "参数列表",
+          "items": {
+            "type": "object",
+            "required": ["name", "description"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string" },
+              "type": { "type": "string" },
+              "required": { "type": "boolean" },
+              "description": {
+                "type": "string",
+                "description": "参数含义；若该参数承载 page_name/first_biz_id 等目标字段，须显式指出"
+              }
+            }
+          }
+        },
+        "usage_location": {
+          "description": "该 API 在本范式调用链中的使用位置",
+          "$ref": "#/definitions/location"
+        }
+      }
+    },
+    "paradigm": {
+      "type": "object",
+      "description": "一种埋点开发范式",
+      "required": [
+        "id",
+        "name",
+        "category",
+        "reference_location",
+        "call_chain",
+        "entry_functions",
+        "sdk_apis"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "唯一标识，kebab-case，如 code-hook-vue3、autotrack-global、decorator-spring"
+        },
+        "name": {
+          "type": "string",
+          "description": "范式名称，如『Vue3 组合式 Hook 代码埋点』『Spring AOP 注解埋点』"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["code", "autotrack", "visual", "declarative", "hybrid"],
+          "description": "code=代码埋点；autotrack=全埋点；visual=可视化圈选；declarative=声明式指令/注解；hybrid=混合"
+        },
+        "description": {
+          "type": "string",
+          "description": "范式说明：何时触发、谁来写、字段如何注入"
+        },
+        "reference_location": {
+          "description": "该范式的一个开发参考示例位置（文件:行号）",
+          "$ref": "#/definitions/location"
+        },
+        "call_chain": {
+          "type": "array",
+          "description": "完整调用链路：从功能页到埋点 SDK API，按 order 升序",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/callChainStep" }
+        },
+        "entry_functions": {
+          "type": "array",
+          "description": "该范式的埋点追踪入口函数/标识（可能多个）",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/entryFunction" }
+        },
+        "sdk_apis": {
+          "type": "array",
+          "description": "该范式最终调用到的埋点 SDK API（去重）",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/sdkApi" }
+        }
+      }
+    }
+  }
+}

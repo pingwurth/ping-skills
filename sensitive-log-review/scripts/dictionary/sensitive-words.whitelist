@@ -1,0 +1,11 @@
+# name: sensitive-words-whitelist
+# version: 2026-07-21.1
+# source: 评审确认的非敏感词（命中即豁免敏感判定）
+# maintainer: 安全合规组
+# 说明: 仅按完整字段名匹配（忽略大小写），用于豁免易误报的字段名。
+channelCode
+cardType
+cardName
+logId
+accountType
+tokenType

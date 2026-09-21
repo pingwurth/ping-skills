@@ -1,0 +1,6 @@
+{
+  "_comment": "java_log_scanner 检测配置（P2-1）。logger_names 决定识别哪些日志变量名；detect_system_out/print_stack_trace 默认关闭（噪音大），需要时可开启。",
+  "logger_names": ["log", "logger", "LOG", "LOGGER", "LogHelper", "LogUtil"],
+  "detect_system_out": false,
+  "detect_print_stack_trace": false
+}
