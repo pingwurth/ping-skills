@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: sensitive_log_review
+title: 敏感信息日志审查工具（Java 项目合规流水线）
+scope:
+    - sensitive-log-review/
+source_files: []
+depends_on: []
+related_to: []

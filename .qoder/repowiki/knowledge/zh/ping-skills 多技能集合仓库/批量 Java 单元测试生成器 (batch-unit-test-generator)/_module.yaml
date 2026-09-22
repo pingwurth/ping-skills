@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: batch_unit_test_generator
+title: 批量 Java 单元测试生成器 (batch-unit-test-generator)
+scope:
+    - batch-unit-test-generator/
+source_files: []
+depends_on: []
+related_to: []

@@ -1,0 +1,14 @@
+schema_version: 1
+module_path: ""
+title: ping-skills 多技能集合仓库
+scope:
+    - README.md
+    - AGENTS.md
+    - CLAUDE.md
+    - install.sh
+    - .gitignore
+    - LICENSE
+    - 问题.txt
+source_files: []
+depends_on: []
+related_to: []

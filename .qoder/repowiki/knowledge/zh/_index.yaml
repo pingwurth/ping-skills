@@ -1,0 +1,62 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main
+nodes_managed: true
+exported_at: "2026-09-22T15:19:44Z"
+modules:
+    "":
+        dir_name: ping-skills 多技能集合仓库
+        title: ping-skills 多技能集合仓库
+        scope:
+            - README.md
+            - AGENTS.md
+            - CLAUDE.md
+            - install.sh
+            - .gitignore
+            - LICENSE
+            - 问题.txt
+        source_files: []
+        children:
+            - batch_unit_test_generator
+            - java_unit_test_generator
+            - sensitive_log_review
+            - sensors_analyze
+        depends_on: []
+        related_to: []
+    batch_unit_test_generator:
+        dir_name: 批量 Java 单元测试生成器 (batch-unit-test-generator)
+        title: 批量 Java 单元测试生成器 (batch-unit-test-generator)
+        scope:
+            - batch-unit-test-generator/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    java_unit_test_generator:
+        dir_name: Java 单元测试生成技能 (JAut)
+        title: Java 单元测试生成技能 (JAut)
+        scope:
+            - java-unit-test-generator/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    sensitive_log_review:
+        dir_name: 敏感信息日志审查工具（Java 项目合规流水线）
+        title: 敏感信息日志审查工具（Java 项目合规流水线）
+        scope:
+            - sensitive-log-review/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    sensors_analyze:
+        dir_name: 埋点分析 Skill（sensors-analyze）
+        title: 埋点分析 Skill（sensors-analyze）
+        scope:
+            - sensors-analyze/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

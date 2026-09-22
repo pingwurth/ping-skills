@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: java_unit_test_generator
+title: Java 单元测试生成技能 (JAut)
+scope:
+    - java-unit-test-generator/
+source_files: []
+depends_on: []
+related_to: []
