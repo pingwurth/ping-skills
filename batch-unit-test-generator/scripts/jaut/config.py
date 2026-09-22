@@ -39,7 +39,7 @@ NEXT_STEP_END_MARKER = ":::NEXT_STEP_END:::"
 # status 取值
 NEXT_STEP_STATUSES = ("success", "empty", "failed", "needs_input")
 # next_step.type 取值
-NEXT_STEP_TYPES = ("run_script", "write_code", "ask_user", "finish")
+NEXT_STEP_TYPES = ("run_script", "write_code", "ask_user", "finish", "abort")
 
 # 退出码契约(SKILL.md §2 Exit Code)
 EXIT_OK = 0        # 脚本正常完成

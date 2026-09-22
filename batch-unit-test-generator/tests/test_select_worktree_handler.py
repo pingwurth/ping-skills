@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +12,9 @@ import pytest
 from jaut import config, worktree as wt
 from jaut.cli import StepError
 from jaut.models import Decision, Route
-from scripts.select_worktree import handler
+from jaut.proc import CommandResult
+import scripts.select_worktree as sw
+from scripts.select_worktree import handler, main as select_main
 
 
 def _make_args(work_dir: str, **overrides) -> argparse.Namespace:
@@ -21,13 +24,30 @@ def _make_args(work_dir: str, **overrides) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
+def _make_repo(path: Path) -> Path:
+    """创建模拟工程根目录, 并带上 select_worktree 前置检查所需的 .codegraph 索引。"""
+    path.mkdir()
+    (path / ".codegraph").mkdir()
+    return path
+
+
+# 真实实现引用: autouse fixture 默认 stub 掉 MCP 检查, MCP 专项用例需还原
+_ORIG_MCP_CONNECTED = sw._codegraph_mcp_connected
+
+
+@pytest.fixture(autouse=True)
+def _codegraph_mcp_connected_stub(monkeypatch):
+    """既有用例聚焦 worktree 逻辑: 默认 codegraph MCP 已连接(MCP 检查见专项用例)。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", lambda: (True, ""))
+
+
 # --------------------------------------------------------------------------- #
 # 成功场景
 # --------------------------------------------------------------------------- #
 def test_handler_auto_creates_when_no_existing(tmp_path):
     """无参数且无已有 worktree: 先询问用户是否新建。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir))
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -55,7 +75,7 @@ def test_handler_auto_creates_when_no_existing(tmp_path):
 def test_handler_auto_creates_with_force_when_no_existing(tmp_path):
     """无参数且无已有 worktree 且 --force: 直接新建(用户已确认)。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), force=True)
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -78,7 +98,7 @@ def test_handler_auto_creates_with_force_when_no_existing(tmp_path):
 def test_handler_list_reports_existing(tmp_path):
     """--list: 报告已存在的 worktree。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), list=True)
     existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
 
@@ -97,7 +117,7 @@ def test_handler_list_reports_existing(tmp_path):
 def test_handler_choice_selects_existing(tmp_path):
     """--choice 2: 选择第 2 个已有 worktree。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), choice=2)
     existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
 
@@ -116,7 +136,7 @@ def test_handler_choice_selects_existing(tmp_path):
 def test_handler_new_creates_named_worktree(tmp_path):
     """--new my-feature: 新建指定名称的 worktree。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), new="my-feature")
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -137,7 +157,7 @@ def test_handler_new_creates_named_worktree(tmp_path):
 def test_handler_no_args_asks_user_when_existing(tmp_path):
     """无参数且有已有 worktree: ask_user 请求选择。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir))
     existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
 
@@ -168,10 +188,330 @@ def test_handler_raises_when_work_dir_missing(tmp_path):
     assert "不存在" in exc_info.value.decision.summary
 
 
+def test_handler_requires_codegraph_index(tmp_path):
+    """工程根目录缺少 .codegraph: 在一切 worktree 操作前彻底中断(failed + abort, exit 2)。"""
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()  # 故意不建 .codegraph
+    args = _make_args(str(repo_dir))
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir") as mock_parent:
+        with pytest.raises(StepError) as exc_info:
+            handler(args)
+
+    decision = exc_info.value.decision
+    assert decision.status == "failed"
+    assert decision.exit_code == config.EXIT_ERROR
+    assert decision.route == Route.ABORT
+    assert ".codegraph" in decision.summary
+    assert "codegraph init" in decision.question
+    assert decision.resume == []   # abort 无 resume(不等待答复)
+    # 前置检查先于任何 worktree 领域逻辑
+    mock_parent.assert_not_called()
+
+
+def test_main_missing_codegraph_emits_abort_protocol(tmp_path, capsys):
+    """端到端: 缺少 .codegraph 时输出 failed + abort(exit 2) 协议块, message 提示 codegraph init。"""
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()  # 故意不建 .codegraph
+
+    rc = select_main([str(repo_dir)])
+
+    out = capsys.readouterr().out
+    assert rc == config.EXIT_ERROR
+    body = out.split(":::NEXT_STEP_BEGIN:::")[1].split(":::NEXT_STEP_END:::")[0]
+    payload = json.loads(body)
+    assert payload["status"] == "failed"
+    assert payload["exit_code"] == 2
+    assert payload["next_step"]["type"] == "abort"
+    assert "codegraph init" in payload["next_step"]["message"]
+    assert "resume" not in payload["next_step"]   # abort 不等待答复
+
+
+# --------------------------------------------------------------------------- #
+# 前置检查 2: opencode 的 codegraph MCP 必须已连接
+# --------------------------------------------------------------------------- #
+def test_mcp_cli_name_derived_from_script_third_parent(monkeypatch):
+    """_mcp_cli_name: 由脚本第 3 层上级目录(.claude 等)推断 CLI; 非 '.' 目录返回 None。"""
+    for host, expected in [(".claude", "claude"), (".opencode", "opencode"),
+                           (".qoder", "qoder"), (".qwen", "qwen"), (".codex", "codex")]:
+        monkeypatch.setattr(sw, "__file__",
+                            f"/p/{host}/skills/java-unit-test-generator/scripts/select_worktree.py")
+        assert sw._mcp_cli_name() == expected
+    # 源码仓内直接运行(上级目录非 '.' 开头) -> 无法推断
+    monkeypatch.setattr(sw, "__file__",
+                        "/p/ping-skills/java-unit-test-generator/scripts/select_worktree.py")
+    assert sw._mcp_cli_name() is None
+
+
+def test_mcp_connected_when_opencode_reports_connected(monkeypatch):
+    """_codegraph_mcp_connected: 输出判定 codegraph 条目 connected(大小写不敏感)-> 已连接。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
+    fake = CommandResult(ok=True, returncode=0,
+                         stdout="CodeGraph            CONNECTED\n", stderr="")
+    with patch("scripts.select_worktree.run_command", return_value=fake) as mock_run:
+        connected, detail = sw._codegraph_mcp_connected()
+
+    assert connected is True
+    assert detail == ""
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0] == ["opencode", "mcp", "list"]
+    assert mock_run.call_args.kwargs["timeout"] == 5
+
+
+def test_mcp_not_connected_when_no_match(monkeypatch):
+    """_codegraph_mcp_connected: 输出无 codegraph connected 匹配 -> 重试耗尽后判定未连接。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
+    fake = CommandResult(ok=True, returncode=0,
+                         stdout="other-mcp            connected\n", stderr="")
+    with patch("scripts.select_worktree.run_command", return_value=fake) as mock_run, \
+         patch("scripts.select_worktree.time.sleep") as mock_sleep:
+        connected, detail = sw._codegraph_mcp_connected()
+
+    assert connected is False
+    assert "codegraph connected" in detail
+    assert "连续 3 次" in detail
+    assert mock_run.call_count == 3          # 重试至 _MCP_LIST_ATTEMPTS 次
+    assert mock_sleep.call_count == 2
+
+
+def test_mcp_not_connected_when_opencode_missing(monkeypatch):
+    """_codegraph_mcp_connected: CLI 命令无法启动(launch_failed)-> 未连接并带原因。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
+    fake = CommandResult(ok=False, returncode=None)   # launch_failed
+    with patch("scripts.select_worktree.run_command", return_value=fake) as mock_run:
+        connected, detail = sw._codegraph_mcp_connected()
+
+    assert connected is False
+    assert "opencode" in detail
+    mock_run.assert_called_once()
+
+
+def test_mcp_not_connected_when_cli_undiscoverable(monkeypatch):
+    """_codegraph_mcp_connected: 第 3 层上级目录无法推断 CLI -> 不执行 mcp list, 直接判定未连接。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: None)
+    with patch("scripts.select_worktree.run_command") as mock_run:
+        connected, detail = sw._codegraph_mcp_connected()
+
+    assert connected is False
+    assert "推断 MCP CLI" in detail
+    mock_run.assert_not_called()
+
+
+def test_mcp_launch_failed_no_retry(monkeypatch):
+    """launch_failed(命令缺失/无法启动)立即判定未连接, 不重试不 sleep。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
+    fake = CommandResult(ok=False, returncode=None)   # launch_failed
+    with patch("scripts.select_worktree.run_command", return_value=fake) as mock_run, \
+         patch("scripts.select_worktree.time.sleep") as mock_sleep:
+        connected, detail = sw._codegraph_mcp_connected()
+
+    assert connected is False
+    assert "不存在或无法执行" in detail
+    mock_run.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+def test_mcp_timed_out_no_retry(monkeypatch):
+    """timed_out 立即判定未连接(挂起重试无益), 不重试不 sleep。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
+    fake = CommandResult(ok=False, returncode=None, timed_out=True)
+    with patch("scripts.select_worktree.run_command", return_value=fake) as mock_run, \
+         patch("scripts.select_worktree.time.sleep") as mock_sleep:
+        connected, detail = sw._codegraph_mcp_connected()
+
+    assert connected is False
+    assert "超时" in detail
+    mock_run.assert_called_once()
+    mock_sleep.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# _mcp_output_says_connected: codegraph 条目状态判定(段内首个状态词定段)
+# --------------------------------------------------------------------------- #
+def test_mcp_output_says_connected_table_uppercase():
+    assert sw._mcp_output_says_connected("CodeGraph            CONNECTED\n") is True
+
+
+def test_mcp_output_rejects_not_connected_phrase():
+    assert sw._mcp_output_says_connected("codegraph: http://x - not connected") is False
+
+
+def test_mcp_output_rejects_codegraph_disconnected_token():
+    assert sw._mcp_output_says_connected("codegraph_disconnected") is False
+
+
+def test_mcp_output_accepts_multiline_json_status():
+    assert sw._mcp_output_says_connected(
+        '{\n  "codegraph": {\n    "status": "connected"\n  }\n}') is True
+
+
+def test_mcp_output_true_when_other_server_disconnected():
+    """他段状态不串扰: codegraph connected 不因其他 server disconnected 被误杀。"""
+    assert sw._mcp_output_says_connected(
+        "CodeGraph            CONNECTED\nother-mcp            disconnected\n") is True
+
+
+def test_mcp_output_false_when_codegraph_disconnected_other_connected():
+    assert sw._mcp_output_says_connected(
+        "codegraph            disconnected\nother-mcp            connected\n") is False
+
+
+def test_mcp_output_reads_stderr_content(monkeypatch):
+    """stdout 为空、状态仅出现在 stderr 时判已连接(调用方拼接 stdout+stderr)。"""
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
+    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
+    fake = CommandResult(ok=True, returncode=0,
+                         stdout="", stderr="CodeGraph            CONNECTED\n")
+    with patch("scripts.select_worktree.run_command", return_value=fake):
+        connected, _ = sw._codegraph_mcp_connected()
+    assert connected is True
+
+
+def test_mcp_output_accepts_codegraph_connected_underscore():
+    assert sw._mcp_output_says_connected("codegraph_connected") is True
+
+
+def test_mcp_output_false_on_empty_or_unrelated():
+    assert sw._mcp_output_says_connected("") is False
+    assert sw._mcp_output_says_connected("other-mcp            connected\n") is False
+
+
+def test_handler_requires_connected_codegraph_mcp(monkeypatch, tmp_path):
+    """codegraph MCP 未连接: 在一切 worktree 操作前彻底中断(failed + abort), 提示 codegraph install。"""
+    repo_dir = _make_repo(tmp_path / "myrepo")
+    args = _make_args(str(repo_dir))
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected",
+                        lambda: (False, "opencode 命令不存在"))
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir") as mock_parent:
+        with pytest.raises(StepError) as exc_info:
+            handler(args)
+
+    decision = exc_info.value.decision
+    assert decision.status == "failed"
+    assert decision.exit_code == config.EXIT_ERROR
+    assert decision.route == Route.ABORT
+    assert "codegraph install" in decision.question
+    assert decision.resume == []   # abort 无 resume(不等待答复)
+    mock_parent.assert_not_called()
+
+
+def test_mcp_check_runs_before_codegraph_dir_check(monkeypatch, tmp_path):
+    """两条件都缺失时先报 MCP 未连接(执行顺序: MCP 检查 -> .codegraph 检查)。"""
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()  # 故意不建 .codegraph
+    args = _make_args(str(repo_dir))
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected",
+                        lambda: (False, "opencode 命令不存在"))
+
+    with patch("scripts.select_worktree.setup_logger"):
+        with pytest.raises(StepError) as exc_info:
+            handler(args)
+
+    question = exc_info.value.decision.question
+    assert "codegraph install" in question   # MCP 检查先触发
+    assert "codegraph init" not in question
+
+
+def test_main_mcp_disconnected_emits_abort_protocol(monkeypatch, tmp_path, capsys):
+    """端到端: MCP 未连接时输出 failed + abort(exit 2) 协议块, message 提示 codegraph install。"""
+    repo_dir = _make_repo(tmp_path / "myrepo")
+    monkeypatch.setattr(sw, "_codegraph_mcp_connected",
+                        lambda: (False, "opencode 命令不存在"))
+
+    rc = select_main([str(repo_dir)])
+
+    out = capsys.readouterr().out
+    assert rc == config.EXIT_ERROR
+    body = out.split(":::NEXT_STEP_BEGIN:::")[1].split(":::NEXT_STEP_END:::")[0]
+    payload = json.loads(body)
+    assert payload["status"] == "failed"
+    assert payload["exit_code"] == 2
+    assert payload["next_step"]["type"] == "abort"
+    assert "codegraph install" in payload["next_step"]["message"]
+    assert "resume" not in payload["next_step"]   # abort 不等待答复
+
+
+# --------------------------------------------------------------------------- #
+# 前置检查按模式门控: --list/--choice 不创建 worktree, 跳过 CodeGraph 前置检查
+# --------------------------------------------------------------------------- #
+def test_handler_list_skips_codegraph_prereqs(tmp_path):
+    """--list 只读不创建: 跳过 CodeGraph 前置检查(即使缺 .codegraph/MCP 未连接)。"""
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()   # 故意不建 .codegraph
+    args = _make_args(str(repo_dir), list=True)
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree._require_codegraph_mcp") as mock_mcp, \
+         patch("scripts.select_worktree._require_codegraph") as mock_idx, \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container",
+               return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=None):
+        decision, _ = handler(args)
+
+    assert decision.route == Route.FINISH
+    mock_mcp.assert_not_called()
+    mock_idx.assert_not_called()
+
+
+def test_handler_choice_skips_codegraph_prereqs(tmp_path):
+    """--choice 选择已有 worktree 不创建: 跳过 CodeGraph 前置检查。"""
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()   # 故意不建 .codegraph
+    args = _make_args(str(repo_dir), choice=1)
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree._require_codegraph_mcp") as mock_mcp, \
+         patch("scripts.select_worktree._require_codegraph") as mock_idx, \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container",
+               return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container",
+               return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.list_worktrees",
+               return_value=[str(tmp_path / "wt1"), str(tmp_path / "wt2")]):
+        decision, _ = handler(args)
+
+    assert decision.route == Route.FINISH
+    mock_mcp.assert_not_called()
+    mock_idx.assert_not_called()
+
+
+def test_handler_new_still_runs_codegraph_prereqs(tmp_path):
+    """--new 创建意图模式: 仍执行 CodeGraph 前置检查(缺 .codegraph -> abort)。"""
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()   # 故意不建 .codegraph
+    args = _make_args(str(repo_dir), new="x", force=True)
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree._require_codegraph_mcp",
+               wraps=sw._require_codegraph_mcp) as mock_mcp, \
+         patch("scripts.select_worktree._require_codegraph",
+               wraps=sw._require_codegraph) as mock_idx:
+        with pytest.raises(StepError) as exc_info:
+            handler(args)
+
+    assert exc_info.value.decision.route == Route.ABORT
+    assert "codegraph init" in exc_info.value.decision.question
+    mock_mcp.assert_called_once()
+    mock_idx.assert_called_once()
+
+
 def test_handler_raises_when_choice_out_of_range(tmp_path):
     """--choice 超出范围时应抛出 StepError。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), choice=5)
     existing = [str(tmp_path / "wt1")]
 
@@ -191,7 +531,7 @@ def test_handler_raises_when_choice_out_of_range(tmp_path):
 def test_handler_raises_when_new_name_invalid(tmp_path):
     """--new 目录名非法时应抛出 StepError。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), new="../bad-name")
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -213,7 +553,7 @@ def test_handler_raises_when_new_name_invalid(tmp_path):
 def test_handler_new_with_force_creates_despite_dirty(tmp_path):
     """--new --force 时有未提交变更: 应直接创建并携带警告信息。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), new="feature-x", force=True)
     dirty_files = ["src/Main.java", "README.md"]
 
@@ -239,7 +579,7 @@ def test_handler_new_with_force_creates_despite_dirty(tmp_path):
 def test_handler_new_asks_user_when_dirty(tmp_path):
     """--new 时有未提交变更且无 --force: 应 ask_user 询问用户。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), new="feature-x")
     dirty_files = ["src/Main.java", "README.md"]
 
@@ -260,7 +600,7 @@ def test_handler_new_asks_user_when_dirty(tmp_path):
 def test_handler_new_creates_when_dirty_with_force(tmp_path):
     """--new 时有未提交变更但有 --force: 应直接创建。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), new="feature-x", force=True)
     dirty_files = ["src/Main.java", "README.md"]
 
@@ -282,7 +622,7 @@ def test_handler_new_creates_when_dirty_with_force(tmp_path):
 def test_handler_no_args_asks_user_with_base(tmp_path):
     """无参数 + --base 且无已有 worktree: ask_user 的 resume 应包含 --base。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), base="refs/heads/develop")
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -304,7 +644,7 @@ def test_handler_no_args_asks_user_with_base(tmp_path):
 def test_handler_no_args_asks_user_when_dirty(tmp_path):
     """无参数自动新建时有未提交变更且无 --force: 应 ask_user 询问用户(含未提交变更警告)。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir))
     dirty_files = ["src/Main.java"]
 
@@ -332,7 +672,7 @@ def test_handler_no_args_asks_user_when_dirty(tmp_path):
 def test_handler_new_with_base_ref(tmp_path):
     """--new --base refs/heads/develop: 应将 base_ref 传递给 create_new_worktree。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), new="feature-x", base="refs/heads/develop")
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -358,7 +698,7 @@ def test_handler_new_with_base_ref(tmp_path):
 def test_handler_no_args_existing_offers_full_resume(tmp_path):
     """无参数且有历史 worktree: 选已有/默认新建/清理均附 resume 机读条目。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir))
     existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
 
@@ -393,7 +733,7 @@ def test_handler_no_args_existing_offers_full_resume(tmp_path):
 def test_handler_no_args_existing_clear_resume_carries_base(tmp_path):
     """无参数 + --base 且有历史 worktree: 新建与清理的 resume 应携带 --base。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), base="refs/heads/develop")
     existing = [str(tmp_path / "wt1")]
 
@@ -416,7 +756,7 @@ def test_handler_no_args_existing_clear_resume_carries_base(tmp_path):
 def test_handler_clear_history_creates_default(tmp_path):
     """--clear-history 主工作区干净: 预检 -> 清理 -> 新建, 输出 finish。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), clear_history=True, base="refs/heads/develop")
     created = str(tmp_path / "myrepo.worktrees" / "myrepo.worktree20260908")
     order = []
@@ -446,7 +786,7 @@ def test_handler_clear_history_creates_default(tmp_path):
 def test_handler_clear_history_main_dirty_asks_user(tmp_path):
     """--clear-history 主工作区脏且无 --force: ask_user 确认, resume 携带 WORK_DIR + --clear-history --force。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), clear_history=True)
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -473,7 +813,7 @@ def test_handler_clear_history_main_dirty_asks_user(tmp_path):
 def test_handler_clear_history_main_dirty_with_force_creates(tmp_path):
     """--clear-history 主工作区脏但带 --force: 跳过确认, 预检后清理并新建。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), clear_history=True, force=True)
     created = str(tmp_path / "myrepo.worktrees" / "myrepo.worktree20260908")
 
@@ -500,7 +840,7 @@ def test_handler_clear_history_main_dirty_with_force_creates(tmp_path):
 def test_handler_clear_history_without_existing_still_creates(tmp_path):
     """零历史 worktree 时 --clear-history 幂等跳过清理, 照常新建并 finish。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), clear_history=True, force=True)
     created = str(tmp_path / "myrepo.worktrees" / "myrepo.worktree20260908")
 
@@ -531,7 +871,7 @@ def test_handler_clear_history_without_existing_still_creates(tmp_path):
 def test_handler_all_resume_params_carry_work_dir(tmp_path):
     """菜单/D/A 脏确认路径: 所有带 script 的 resume params[0] 均为 WORK_DIR 且无 --workdir。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     wd = str(repo_dir)
     existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
 
@@ -580,7 +920,7 @@ def test_handler_all_resume_params_carry_work_dir(tmp_path):
 def test_handler_clear_history_preflight_failure_blocks_clear(tmp_path):
     """预检失败: 不 clear、不 create, StepError 透出预检错误。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), clear_history=True, force=True, base="no-such-ref")
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -606,7 +946,7 @@ def test_handler_clear_history_preflight_failure_blocks_clear(tmp_path):
 def test_handler_clear_history_create_failure_states_history_cleared(tmp_path):
     """预检+清理成功但 create 失败: 错误信息注明历史已清除。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), clear_history=True, force=True)
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -631,7 +971,7 @@ def test_handler_clear_history_create_failure_states_history_cleared(tmp_path):
 def test_handler_menu_clear_option_warns_permanent_deletion(tmp_path):
     """菜单 [N+2] 与 clear resume label 均含永久删除警示且字符串一致。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -650,7 +990,7 @@ def test_handler_menu_clear_option_warns_permanent_deletion(tmp_path):
 def test_handler_new_dirty_uses_effective_base_description(tmp_path):
     """--new 脏确认: question/label 使用 effective_base_description, 不硬编码基于 HEAD。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     sentinel = "已有分支 worktreeX 的当前 tip"
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -672,7 +1012,7 @@ def test_handler_new_dirty_uses_effective_base_description(tmp_path):
 def test_handler_no_args_base_line_uses_effective_base_description(tmp_path):
     """D 路径 基于: 行使用 effective_base_description。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     sentinel = "已有分支 worktreeY 的当前 tip"
 
     with patch("scripts.select_worktree.setup_logger"), \
@@ -692,7 +1032,7 @@ def test_handler_no_args_base_line_uses_effective_base_description(tmp_path):
 def test_handler_list_wins_over_clear_history(tmp_path):
     """--list 优先于 --clear-history(模式分派优先级 list > choice > clear-history > new)。"""
     repo_dir = tmp_path / "myrepo"
-    repo_dir.mkdir()
+    _make_repo(repo_dir)
     args = _make_args(str(repo_dir), list=True, clear_history=True)
 
     with patch("scripts.select_worktree.setup_logger"), \

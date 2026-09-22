@@ -77,7 +77,8 @@ python scripts/batch_finish.py --project-root <worktree> [--skip-mvn] [--workdir
 
 - 协议块以 `:::NEXT_STEP_BEGIN:::` / `:::NEXT_STEP_END:::` 标记包裹的 JSON 输出。
 - `exit_code` 契约：0 = 正常完成；1 = 需继续处理（未达标等）；2 = 执行错误；3 = 状态/协议错误。
-- `next_step.type`：`run_script` / `write_code` / `ask_user` / `finish`。
+- `next_step.type`：`run_script` / `write_code` / `ask_user` / `finish` / `abort`。
+- `next_step.type == "abort"`：将 `message` **逐字**转述给用户后**立即终止本技能**——禁止执行任何后续脚本、禁止重试、禁止代为执行 message 中的修复命令；修复命令**由用户手动执行**，执行完毕后**由用户重新调用本技能**。兼容兜底（**仅限旧版协议块形态**）：`exit_code == 2` 且 `resume` **存在且恰好只含一个 `terminate` 选项**（数组长度 1）时，转述 question 后直接终止，不得重试。**禁止扩大解释**：`exit_code == 2` 且 `type == "ask_user"`、`resume` 为空数组或**缺失**，是**正常提问路径**——转述 question 并等待用户答复后继续，**不得终止、不得重试**。新版协议中，直接终止**只认** `next_step.type == "abort"`。
 
 ---
 

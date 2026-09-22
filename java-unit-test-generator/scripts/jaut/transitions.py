@@ -3,7 +3,8 @@
 将 Decision.route 解析为具体 next_step 对象: run_script 路由在此集中解析目标脚本
 绝对路径与参数, 消除各入口脚本硬编码 SCRIPTS_DIR/"xxx.py" 的分散。write_code /
 finish / ask_user 路由直接由 Decision 携带的 instructions / deliverables / question
-组装; ask_user 的 resume(用户选项恢复命令)在此补全脚本绝对路径与 --workdir。
+组装; ask_user 的 resume(用户选项恢复命令)在此补全脚本绝对路径与 --workdir;
+abort(立即终止)路由把 Decision.question 作为 message 输出, 不带 resume。
 """
 
 from __future__ import annotations
@@ -56,6 +57,12 @@ def build_next_step(decision: Decision, rc: RouteContext) -> dict:
         if resume:
             step["resume"] = resume
         return step
+    if route == Route.ABORT:
+        # 立即终止: Decision.question 承载须逐字转述给用户的 message(question 空时
+        # 依次兜底 summary/reason, 保证 message 非空); 不带 resume —— 不等待用户答复,
+        # 调用方转述 message 后即结束本技能
+        return make_next_step("abort", decision.reason,
+                              message=decision.question or decision.summary or decision.reason)
 
     # run_script 路由
     script = str(rc.scripts_dir / _ROUTE_SCRIPT[route])

@@ -43,7 +43,7 @@ class MethodStatus(str, Enum):
 class Route(str, Enum):
     """决策产物的逻辑路由; 由 transitions(L4) 解析为具体 next_step。
 
-    前四个为 run_script, 后三个分别对应 write_code/finish/ask_user。
+    前四个为 run_script, 其余分别对应 write_code/finish/ask_user/abort。
     """
 
     MAKE_PLAN = "make_plan"
@@ -53,6 +53,8 @@ class Route(str, Enum):
     WRITE_CODE = "write_code"
     FINISH = "finish"
     ASK_USER = "ask_user"
+    # 立即终止本技能(question 作为 message 转述给用户, 无 resume)
+    ABORT = "abort"
 
 
 # next_step.type 由 Route 决定
@@ -64,6 +66,7 @@ _ROUTE_TO_NEXT_TYPE = {
     Route.WRITE_CODE: "write_code",
     Route.FINISH: "finish",
     Route.ASK_USER: "ask_user",
+    Route.ABORT: "abort",
 }
 
 

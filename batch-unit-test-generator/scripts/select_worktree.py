@@ -25,10 +25,26 @@
     python scripts/select_worktree.py <当前工作目录> --new [名称]
     python scripts/select_worktree.py <当前工作目录> --clear-history
 
+前置条件(仅创建意图模式 --new/--clear-history/无参数执行, 在一切 worktree 操作前
+按以下顺序检查, 任一缺失即彻底中断; --list/--choice 只列出/选择已有 worktree,
+不创建, 跳过前置检查):
+    1. `<cli> mcp list` 的 stdout+stderr 中必须能判定 codegraph 条目状态为
+       connected(codegraph MCP 已连接; 多行 JSON/表格/否定态判定见
+       _mcp_output_says_connected)。
+       <cli> 由脚本第 3 层上级目录决定: 安装布局为
+       <project>/.<tool>/skills/<skill>/scripts/本文件, 取 Path(__file__).parents[3]
+       (一般为 .opencode/.claude/.qoder/.qwen/.codex)去掉前导 '.', 如 .claude -> claude;
+       无法推断(非 '.' 开头目录, 如源码仓内直接运行)同样中止。
+    2. 工程根目录(位置参数 WORK_DIR)必须存在 CodeGraph 索引目录 .codegraph。
+    缺失时在一切 worktree 操作之前彻底中断任务 -> abort(exit 2, failed), message
+    分别提示用户执行 `codegraph install` / `codegraph init` 后重新运行本技能
+    (无 resume; 调用方转述 message 后立即终止本技能, 不得重试)。
+
 输出(NEXT_STEP):
     选定/新建成功 -> finish(exit 0), 工作树绝对路径见 deliverables 与
     artifacts[].kind == "worktree"; 需用户选择 -> ask_user(exit 1);
-    参数非法/git 失败 -> ask_user(exit 2, failed)。
+    参数非法/git 失败 -> ask_user(exit 2, failed);
+    缺少 .codegraph 索引/codegraph MCP 未连接 -> abort(exit 2, failed)。
 
 职责边界:
     容器定位/列举/名校验/派生/新建/预检等领域逻辑见 jaut/worktree.py;
@@ -40,7 +56,9 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+import time
 from pathlib import Path
 
 import _path_setup  # noqa: F401  — 初始化 sys.path 以导入 jaut 包
@@ -49,6 +67,7 @@ from jaut import config, worktree as wt  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
 from jaut.models import Decision, ResumeOption, Route  # noqa: E402
+from jaut.proc import run_command  # noqa: E402
 from jaut.state import default_workdir  # noqa: E402
 
 SCRIPT_NAME = "select_worktree"
@@ -147,8 +166,170 @@ def _dirty_confirm_decision(args, *, uncommitted: list[str], base_desc: str,
         question=question, resume=resume, metrics=merged_metrics)
 
 
+def _require_codegraph(repo_root: Path, logger) -> None:
+    """前置检查: 工程根目录必须存在 CodeGraph 索引目录 .codegraph, 缺失则彻底中断任务。
+
+    创建意图模式在 MCP 检查之后执行本检查(--list/--choice 不创建 worktree, 跳过);
+    缺失时在一切 worktree 操作之前抛 StepError.abort,
+    输出 failed + abort(exit 2), message 提示执行 `codegraph init`。
+
+    Args:
+        repo_root: 工程根目录(位置参数 WORK_DIR 解析后的绝对路径)。
+        logger: 文件日志器。
+
+    Raises:
+        StepError: .codegraph 目录不存在(exit 2, abort 路由, 无 resume)。
+    """
+    if (repo_root / ".codegraph").is_dir():
+        return
+    logger.error(f"工程根目录缺少 .codegraph 索引, 任务中止: {repo_root}")
+    question = (
+        f"工程根目录 {repo_root} 下不存在 .codegraph 目录(CodeGraph 索引未初始化), "
+        f"本任务已中止。\n"
+        f"请由用户手动在工程根目录执行以下命令完成索引初始化:\n"
+        f"    codegraph init\n"
+        f"命令由用户手动执行完毕后, 再由用户重新调用本技能"
+        f"(技能不会代为执行该命令, 也不会自动重试)。"
+    )
+    raise StepError.abort(
+        summary=f"工程根目录缺少 .codegraph 索引, 任务已中止: {repo_root}",
+        reason="缺少 CodeGraph 索引(.codegraph), 彻底中止任务",
+        message=question)
+
+
+# codegraph 条目切段: 从 "codegraph" 到下一个 "codegraph" 之间为一个服务条目
+_MCP_NAME = re.compile(r"codegraph", re.I)
+# 状态词: [not|dis|un] 可选前缀 + connected; 分隔符允许空白/下划线/连字符;
+# lookaround 用 [A-Za-z0-9] 而非 [\w-], 使 codegraph_connected / codegraph_disconnected 可入段
+_MCP_STATUS = re.compile(
+    r"(?<![A-Za-z0-9])(?:(?:not[\s_\-]+|dis[\s_\-]*|un[\s_\-]*))?connected(?![A-Za-z0-9])",
+    re.I)
+_MCP_LIST_TIMEOUT_SECONDS = 5
+# 无匹配时重试, 规避宿主 CLI 冷启动瞬态(如尚未进入 connected 状态)导致的误中止;
+# 连续全部落空才判定未连接(launch_failed/timed_out 不重试, 立即判定)
+_MCP_LIST_ATTEMPTS = 3
+_MCP_RETRY_DELAY_SECONDS = 1
+
+
+def _mcp_output_says_connected(output: str) -> bool:
+    """由 `<cli> mcp list` 输出判定 codegraph MCP 条目状态是否为 connected。
+
+    判定语义「段内首个状态词定段」: 先折叠全部空白(兼容多行 JSON 与表格),
+    再按 "codegraph" 出现位置切段(到下一个 codegraph 或文末), 段内首个状态词
+    为独立 connected(不含 not/dis/un 前缀)才判已连接; 任一段命中即 True。
+
+    代表场景:
+        "CodeGraph  CONNECTED"                         -> True (表格行)
+        "codegraph: http://... - not connected"        -> False(否定短语)
+        "codegraph_disconnected"                       -> False(复合词否定)
+        多行 JSON {"status": "connected"}               -> True (折叠后可入段)
+        codegraph connected 且其他 server disconnected  -> True (他段状态不串扰)
+        codegraph disconnected 且其他 server connected  -> False(段内首词定段)
+        仅 stderr 命中                                  -> True (调用方拼接 stdout+stderr)
+        "codegraph_connected" 复合词                    -> True (对称放行)
+    残留边界(fail-closed): "codegraph was disconnected, now connected" 判 False。
+    """
+    text = re.sub(r"\s+", " ", output or "")
+    for seg in re.split(_MCP_NAME, text)[1:]:  # parts[0] 是首个 codegraph 之前, 丢弃
+        m = _MCP_STATUS.search(seg)  # 段内首个状态词定段
+        if m and m.group(0).lower() == "connected":
+            return True
+    return False
+
+
+def _host_dir_name() -> str:
+    """脚本第 3 层上级目录名: 安装布局 <project>/.<tool>/skills/<skill>/scripts/本文件 中的 <project>/.<tool>。"""
+    try:
+        return Path(__file__).resolve().parents[3].name
+    except IndexError:
+        return ""
+
+
+def _mcp_cli_for_host_dir(host_dir_name: str) -> str | None:
+    """宿主目录名 -> MCP CLI 名: `.claude` -> `claude`, `.opencode` -> `opencode`, ...。
+
+    Args:
+        host_dir_name: 第 3 层上级目录名(一般为 .opencode/.claude/.qoder/.qwen/.codex)。
+
+    Returns:
+        去掉前导 '.' 的 CLI 名; 非 '.' 开头(如源码仓目录)时返回 None(无法推断)。
+    """
+    if host_dir_name.startswith(".") and len(host_dir_name) > 1:
+        return host_dir_name[1:]
+    return None
+
+
+def _mcp_cli_name() -> str | None:
+    """按脚本第 3 层上级目录推断 MCP CLI 名(`.claude` -> `claude`); 推断失败返回 None。"""
+    return _mcp_cli_for_host_dir(_host_dir_name())
+
+
+def _codegraph_mcp_connected() -> tuple[bool, str]:
+    """执行 `<cli> mcp list`, 由 stdout+stderr 判定 codegraph MCP 是否已连接。
+
+    <cli> 由 _mcp_cli_name() 从脚本第 3 层上级目录推断(.claude -> claude 等)。
+    判定语义见 _mcp_output_says_connected。无匹配时最多尝试 `_MCP_LIST_ATTEMPTS`
+    次(间隔 `_MCP_RETRY_DELAY_SECONDS` 秒, 规避宿主 CLI 冷启动瞬态); CLI 无法
+    推断/命令不存在(launch_failed)/执行超时(timed_out)不重试, 立即判定。
+
+    Returns:
+        (connected, detail): connected=True 表示已连接; detail 为未连接原因(供报错)。
+    """
+    cli = _mcp_cli_name()
+    if cli is None:
+        return False, (f"无法由脚本第 3 层上级目录名 {_host_dir_name()!r} 推断 MCP CLI"
+                       f"(期望 .opencode/.claude/.qoder/.qwen/.codex 等 '.' 开头目录)")
+    detail = ""
+    for attempt in range(1, _MCP_LIST_ATTEMPTS + 1):
+        result = run_command([cli, "mcp", "list"], timeout=_MCP_LIST_TIMEOUT_SECONDS)
+        if result.launch_failed:
+            return False, f"{cli} 命令不存在或无法执行"
+        if result.timed_out:
+            return False, f"{cli} mcp list 执行超时({_MCP_LIST_TIMEOUT_SECONDS}s)"
+        if _mcp_output_says_connected(f"{result.stdout or ''}\n{result.stderr or ''}"):
+            return True, ""
+        # 非零退出码不算硬失败(宿主 CLI 可能带非零退出打印状态表), 仅无匹配才重试
+        detail = (f"`{cli} mcp list` 输出无 codegraph connected 匹配"
+                  f"(退出码 {result.returncode})")
+        if attempt < _MCP_LIST_ATTEMPTS:
+            time.sleep(_MCP_RETRY_DELAY_SECONDS)
+    return False, f"{detail}; 连续 {_MCP_LIST_ATTEMPTS} 次均未连接"
+
+
+def _require_codegraph_mcp(logger) -> None:
+    """前置检查 1: 宿主 MCP 客户端(opencode/claude/...)的 codegraph MCP 必须已连接, 否则彻底中断任务。
+
+    创建意图模式在 .codegraph 目录检查之前、一切 worktree 操作之前执行
+    (--list/--choice 不创建 worktree, 跳过); 未连接时抛 StepError.abort,
+    输出 failed + abort(exit 2), message 提示执行 `codegraph install`。
+
+    Args:
+        logger: 文件日志器。
+
+    Raises:
+        StepError: codegraph MCP 未连接(exit 2, abort 路由, 无 resume)。
+    """
+    connected, detail = _codegraph_mcp_connected()
+    if connected:
+        return
+    logger.error(f"codegraph MCP 未连接, 任务中止: {detail}")
+    question = (
+        f"宿主 MCP 客户端({_mcp_cli_name() or '未知 CLI'}) 的 codegraph MCP 未连接, "
+        f"本任务已中止。\n"
+        f"原因: {detail}\n"
+        f"请由用户手动执行以下命令完成 MCP 配置:\n"
+        f"    codegraph install\n"
+        f"命令由用户手动执行完毕后, 再由用户重新调用本技能"
+        f"(技能不会代为执行该命令, 也不会自动重试)。"
+    )
+    raise StepError.abort(
+        summary=f"codegraph MCP 未连接, 任务已中止: {detail}",
+        reason="codegraph MCP 未连接(需 codegraph install), 彻底中止任务",
+        message=question)
+
+
 def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
-    """校验工作目录、定位容器并分派到具体操作模式。
+    """校验工作目录与创建意图模式的 CodeGraph 前置条件, 定位容器并分派到具体操作模式。
 
     Args:
         args: 已解析的命令行参数(WORK_DIR 与 --list/--choice/--new)。
@@ -157,12 +338,19 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         (Decision, EmitContext): 决策与路由上下文(本脚本无 workdir/state, 用默认 EmitContext)。
 
     Raises:
-        StepError: 当前工作目录不存在, 或 worktree 操作失败(WorktreeError 转 exit 2)。
+        StepError: 当前工作目录不存在, codegraph MCP 未连接,
+            工程根目录缺少 .codegraph 索引, 或 worktree 操作失败(WorktreeError 转 exit 2)。
+            CodeGraph 前置检查仅创建意图模式(--new/--clear-history/无参数)执行;
+            --list/--choice 不创建 worktree, 跳过前置检查。
     """
     repo_root = Path(args.work_dir).resolve()
     if not repo_root.is_dir():
         raise StepError.exec_error(f"当前工作目录不存在: {repo_root}")
     logger = setup_logger(SCRIPT_NAME, default_workdir(repo_root))
+    # 前置检查仅创建意图模式执行: --list/--choice 只列出/选择已有 worktree, 不创建, 跳过
+    if not (args.list or args.choice is not None):
+        _require_codegraph_mcp(logger)   # 前置检查 1: MCP 连接
+        _require_codegraph(repo_root, logger)   # 前置检查 2: .codegraph 索引目录
 
     base_dir = wt.parent_dir(args.work_dir)
     dir_name = wt.current_dir_name(args.work_dir)

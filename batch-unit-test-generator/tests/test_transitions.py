@@ -66,6 +66,33 @@ def test_write_code_finish_ask_user(tmp_path: Path):
     assert ask["type"] == "ask_user" and ask["question"] == "q?"
 
 
+def test_abort_route_emits_message_without_resume(tmp_path: Path):
+    """abort 路由: question 作为 message 输出, 不带 resume(转述后立即终止)。"""
+    step = transitions.build_next_step(
+        _decision(Route.ABORT, question="请执行 codegraph install"), _rc(tmp_path))
+    assert step["type"] == "abort"
+    assert step["message"] == "请执行 codegraph install"
+    assert "resume" not in step
+
+
+def test_abort_route_message_falls_back_to_summary(tmp_path: Path):
+    """abort 路由: question 缺失时 message 兜底 summary, 仍不带 resume。"""
+    step = transitions.build_next_step(
+        _decision(Route.ABORT, question=None, summary="工程根缺少索引"), _rc(tmp_path))
+    assert step["type"] == "abort"
+    assert step["message"] == "工程根缺少索引"
+    assert "resume" not in step
+
+
+def test_abort_route_message_falls_back_to_reason(tmp_path: Path):
+    """abort 路由: question/summary 均空时兜底 reason, message 恒非空。"""
+    step = transitions.build_next_step(
+        _decision(Route.ABORT, question="", summary="", reason="R"), _rc(tmp_path))
+    assert step["type"] == "abort"
+    assert step["message"] == "R"
+    assert "resume" not in step
+
+
 def test_finish_route_carries_report(tmp_path: Path):
     step = transitions.build_next_step(
         _decision(Route.FINISH, deliverables=["/a"], report="REPORT"), _rc(tmp_path))

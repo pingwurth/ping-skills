@@ -40,7 +40,7 @@ Per-skill CLI entry points accept `--help` for full flags (e.g. `python scripts/
 Scripts drive the workflow; the LLM only writes test code at designated steps and otherwise executes whatever the protocol says **verbatim**:
 
 - Each script ends stdout with a `:::NEXT_STEP_BEGIN:::` / `:::NEXT_STEP_END:::` JSON block (`protocol/next-step.schema.json`). Exit codes: 0 = done, 1 = continue (normal flow signal, not failure), 2 = script error, 3 = state/protocol error.
-- `next_step.type` is one of `run_script` / `write_code` / `ask_user` / `finish`. On `write_code`, run the `on_complete` script from the protocol block afterwards.
+- `next_step.type` is one of `run_script` / `write_code` / `ask_user` / `finish` / `abort`. On `write_code`, run the `on_complete` script from the protocol block afterwards.
 - State lives in `<workdir>/state.json` (atomic writes); workdir is `<worktree>/.agent/<skill-name>/` (batch: per-class subdirs under `classes/`). Resume via `make_plan.py --workdir <workdir>`.
 - Authority on conflict: **Schema > Rules (`references/UnitTestRules.md`) > SKILL.md > LLM judgment**.
 - Typical loop: `select_worktree → init_coverage → make_plan → build_prompt → LLM write_code → validate_rules → verify_coverage` (batch wraps this with `batch_diff → batch_init → batch_next → batch_update → batch_finish`).

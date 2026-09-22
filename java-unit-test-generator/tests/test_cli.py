@@ -61,6 +61,23 @@ def test_step_error_exec_error_default_artifacts():
     assert err.decision.artifacts == []
 
 
+def test_step_error_abort_factory():
+    err = StepError.abort("缺少索引", "缺少 CodeGraph 索引, 彻底中止任务",
+                          message="请执行 codegraph init")
+    assert err.decision.status == "failed"
+    assert err.decision.exit_code == config.EXIT_ERROR
+    assert err.decision.route == Route.ABORT
+    assert err.decision.reason == "缺少 CodeGraph 索引, 彻底中止任务"
+    assert err.decision.question == "请执行 codegraph init"
+    assert err.decision.resume == []   # abort 无 resume
+
+
+def test_step_error_abort_message_fallback_to_summary():
+    for empty in (None, ""):
+        err = StepError.abort("summary 文案", "reason 文案", message=empty)
+        assert err.decision.question == "summary 文案"
+
+
 # --------------------------------------------------------------------------- #
 # EmitContext
 # --------------------------------------------------------------------------- #

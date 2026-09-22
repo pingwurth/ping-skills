@@ -45,6 +45,14 @@ class StepError(Exception):
                             route=Route.ASK_USER, reason=summary,
                             question=question or summary, artifacts=artifacts or []))
 
+    @classmethod
+    def abort(cls, summary: str, reason: str,
+              message: Optional[str] = None) -> "StepError":
+        """彻底中止(exit 2): route=abort, 无 resume; message 空时兜底 summary。"""
+        return cls(Decision(status="failed", exit_code=config.EXIT_ERROR, summary=summary,
+                            route=Route.ABORT, reason=reason,
+                            question=message or summary))
+
 
 @dataclass
 class EmitContext:

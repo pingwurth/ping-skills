@@ -24,7 +24,7 @@ select_worktree → init_coverage → make_plan → build_prompt → LLM write_c
 
 ## 2. NEXT_STEP 协议
 
-每个脚本结束时，在 stdout 末尾输出唯一协议块（`:::NEXT_STEP_BEGIN:::` / `:::NEXT_STEP_END:::`），只解析标记块中的 JSON。详细格式见 `protocol/next-step.schema.json`。退出码：0=正常完成，1=需要继续处理，2=脚本执行错误，3=状态/协议错误。**退出码 1 是正常流转信号，不是脚本失败。** 协议块缺失时，读 `<workdir>/logs/<script>.log` 尾部（约 50 行）与 summary，向用户报告错误并终止本技能执行。
+每个脚本结束时，在 stdout 末尾输出唯一协议块（`:::NEXT_STEP_BEGIN:::` / `:::NEXT_STEP_END:::`），只解析标记块中的 JSON。详细格式见 `protocol/next-step.schema.json`。退出码：0=正常完成，1=需要继续处理，2=脚本执行错误，3=状态/协议错误。**退出码 1 是正常流转信号，不是脚本失败。** 协议块缺失时，读 `<workdir>/logs/<script>.log` 尾部（约 50 行）与 summary，向用户报告错误并终止本技能执行。收到 `next_step.type == "abort"`：将 `next_step.message` **逐字**转述给用户后**立即终止本技能**——禁止执行任何后续脚本、禁止重试、禁止代为执行 message 中的修复命令；修复命令**由用户手动执行**，执行完毕后**由用户重新调用本技能**。兼容兜底（**仅限旧版协议块形态**）：`exit_code == 2` 且 `resume` **存在且恰好只含一个 `terminate` 选项**（数组长度 1）时，转述 question 后直接终止，不得重试。**禁止扩大解释**：`exit_code == 2` 且 `type == "ask_user"`、`resume` 为空数组或**缺失**，是**正常提问路径**——转述 question 并等待用户答复后继续，**不得终止、不得重试**。新版协议中，直接终止**只认** `next_step.type == "abort"`。
 
 ## 3. 全局约束
 

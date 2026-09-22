@@ -72,7 +72,7 @@ python scripts/init_coverage.py --project-root <worktree> --class <FQCN 或源�
   "artifacts": [],
   "metrics": {},
   "next_step": {
-    "type": "run_script|write_code|ask_user|finish"
+    "type": "run_script|write_code|ask_user|finish|abort"
   }
 }
 :::NEXT_STEP_END:::
@@ -86,6 +86,7 @@ python scripts/init_coverage.py --project-root <worktree> --class <FQCN 或源�
 - `write_code`：LLM 编写/修改测试代码
 - `ask_user`：需要用户决策
 - `finish`：任务完成或阶段完成
+- `abort`：**立即终止本技能**——将 `message` 逐字转述给用户后结束，禁止执行任何后续脚本、禁止重试、禁止代为执行 message 中的修复命令；修复命令**由用户手动执行**，执行完毕后**由用户重新调用本技能**；无 `resume`（不等待用户答复）
 
 ### 特殊字段
 
@@ -108,7 +109,7 @@ python scripts/init_coverage.py --project-root <worktree> --class <FQCN 或源�
 
 ### 重要说明
 
-> **退出码 1 是正常流转信号，不是脚本失败。** Bash 工具对非零退出码会红字报错，这不构成失败判定。禁止因非零退出码而中止、盲目重试或向用户报告"脚本出错"。一切以协议块的 `status + next_step` 为准。`status="failed"`（exit 2）同样按协议块路由处理（通常 `ask_user`），禁止盲目重试。
+> **退出码 1 是正常流转信号，不是脚本失败。** Bash 工具对非零退出码会红字报错，这不构成失败判定。禁止因非零退出码而中止、盲目重试或向用户报告"脚本出错"。一切以协议块的 `status + next_step` 为准。`status="failed"`（exit 2）同样按协议块路由处理（通常 `ask_user`），禁止盲目重试。**例外（直接终止）**：`next_step.type == "abort"`；或旧版协议块中 `exit_code == 2` 且 `resume` **存在且恰好只含一个 `terminate` 选项**（数组长度 1）——转述 `message`/question 后立即终止本技能，不得执行任何后续脚本、不得重试。**禁止扩大解释**：`exit_code == 2` 且 `type == "ask_user"`、`resume` 为空数组或**缺失**，是**正常提问路径**，须转述 question 并等待用户答复后继续，不得终止。
 
 ---
 
