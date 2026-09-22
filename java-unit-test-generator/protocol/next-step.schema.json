@@ -101,7 +101,7 @@
               "option": {
                 "type": "string",
                 "description": "选项标识",
-                "enum": ["continue", "skip_method", "adjust_threshold", "retry", "terminate"]
+                "enum": ["continue", "custom", "choice", "clear_history", "skip_method", "adjust_threshold", "retry", "terminate"]
               },
               "label": {
                 "type": "string",
@@ -109,12 +109,12 @@
               },
               "script": {
                 "type": "string",
-                "description": "恢复脚本绝对路径(已含 --workdir 参数; terminate 无此项)"
+                "description": "恢复脚本绝对路径; terminate 选项无此项"
               },
               "params": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "恢复脚本命令行参数; 占位符 N 表示需替换为用户给定的值"
+                "description": "恢复脚本命令行参数; 发出方携带 workdir 时已前缀 --workdir; select_worktree 的 params 以位置参数 WORK_DIR(当前工作目录)开头, 且不接受 --workdir; 占位符 N 表示需替换为用户给定的值"
               },
               "note": {
                 "type": "string",
@@ -140,7 +140,7 @@
         },
         "report": {
           "type": "string",
-          "description": "type=finish 时由脚本生成的完整收尾报告(覆盖率对比、测试汇总、分支名与收尾命令); 调用方须逐字转述, 不得改写数字、路径、分支名或命令。select_worktree 的 finish 不携带本字段(阶段完成, 继续工作流下一步)"
+          "description": "type=finish 时由脚本生成的完整收尾报告(覆盖率对比、测试汇总、分支名与收尾命令); 调用方须逐字转述, 不得改写数字、路径、分支名或命令。可选; select_worktree 的 finish 不携带本字段(阶段完成, 继续工作流下一步)"
         },
         "on_complete": {
           "type": "object",
@@ -172,12 +172,23 @@
         {
           "if": { "properties": { "type": { "const": "ask_user" } } },
           "then": { "required": ["question"] }
-        },
-        {
-          "if": { "properties": { "type": { "const": "finish" } } },
-          "then": { "required": ["report"] }
         }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["script", "next_step"],
+        "properties": {
+          "script": { "not": { "enum": ["select_worktree.py"] } },
+          "next_step": {
+            "required": ["type"],
+            "properties": { "type": { "const": "finish" } }
+          }
+        }
+      },
+      "then": { "properties": { "next_step": { "required": ["report"] } } }
+    }
+  ]
 }

@@ -14,7 +14,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -216,3 +216,15 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# JaCoCo 工具 jar 随 skill 分发：
+# 父目录 lib/ 不能整棵忽略，否则 Git 无法 re-include 其中文件
+!**/jacoco/lib/
+!**/jacoco/lib/**
+!**/jacocoagent.jar
+!**/jacococli.jar
+.codegraph
+.repowise
+.mimocode
+.agent
+.understand-anything

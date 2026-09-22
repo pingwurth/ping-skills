@@ -291,7 +291,7 @@ class ResumeOption:
     (transitions 统一前缀); 需用户提供值时以占位符(如 "N")标注并写 note 说明。
     """
 
-    option: str      # 选项标识: continue/skip_method/adjust_threshold/retry/terminate
+    option: str      # 选项标识: continue/custom/choice/clear_history/skip_method/adjust_threshold/retry/terminate
     label: str       # 人读选项名(与 question 中的选项一致)
     script: str = ""                       # 恢复脚本文件名; 空 = 无命令(终止)
     params: list[str] = field(default_factory=list)

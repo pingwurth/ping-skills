@@ -539,25 +539,19 @@ def test_run_fast_single_cov_script_not_found(tmp_path):
 
 def test_run_fast_single_cov_jar_missing(tmp_path):
     """JaCoCo jar 缺失时应返回 ok=False。"""
-    # 创建脚本但不创建 jar
-    script_dir = Path(maven.__file__).resolve().parent.parent / "jacoco"
-    lib_dir = script_dir / "lib"
-    script = script_dir / "fast-single-cov.sh"
-    script_existed = script.is_file()
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    if not script_existed:
-        script.write_text("#!/bin/bash\nexit 0", encoding="utf-8")
-    # 确保 jar 不存在
-    (lib_dir / "jacocoagent.jar").unlink(missing_ok=True)
-    (lib_dir / "jacococli.jar").unlink(missing_ok=True)
-    try:
+    # 在 tmp_path 造假脚本、不放假 jar；patch __file__ 使解析落在临时目录，
+    # 永不触碰真实 scripts/jacoco/lib/ 下的 jar。
+    jacoco_dir = tmp_path / "jacoco"
+    jacoco_dir.mkdir()
+    (jacoco_dir / "fast-single-cov.sh").write_text("#!/bin/bash\nexit 0", encoding="utf-8")
+    fake_module = tmp_path / "jaut" / "fake_maven.py"
+    fake_module.parent.mkdir()
+    fake_module.touch()
+    with patch("jaut.maven.__file__", str(fake_module)):
         result = maven.run_fast_single_cov(
             tmp_path, "mod-a", "com.example.Foo", "com.example.FooTest",
             str(tmp_path / "mvn.log"))
-        assert result.ok is False
-    finally:
-        if not script_existed:
-            script.unlink(missing_ok=True)
+    assert result.ok is False
 
 
 def test_run_fast_single_cov_uses_config_timeout(tmp_path, _ensure_jacoco_script):

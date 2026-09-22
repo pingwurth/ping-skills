@@ -70,8 +70,10 @@ def _resume_entries(decision: Decision, rc: RouteContext) -> list[dict]:
     """把 Decision.resume 解析为 next_step.resume 条目。
 
     语义级 ResumeOption 只含脚本文件名与增量参数; 此处补全 scripts/ 绝对路径,
-    并统一前缀 --workdir(所有入口脚本均接受), 调用方可逐字执行。terminate 等
-    无脚本选项只输出 option/label(/note), 不携带 script/params。
+    发出方携带 workdir 时前缀 --workdir(select_worktree 的 params 自带位置参数
+    WORK_DIR, 不前缀 --workdir 亦不接受该参数),
+    调用方可逐字执行。terminate 等无脚本选项只输出 option/label(/note),
+    不携带 script/params。
     """
     entries: list[dict] = []
     for opt in decision.resume:
