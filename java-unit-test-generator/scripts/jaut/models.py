@@ -50,6 +50,9 @@ class Route(str, Enum):
     BUILD_PROMPT = "build_prompt"
     VERIFY_COVERAGE = "verify_coverage"
     FINAL_CHECK = "final_check"
+    # run_script 回到 select_worktree.py(参数由 Decision.route_params 携带,
+    # 以位置参数 WORK_DIR 开头, 不走 --workdir 前缀规则)
+    SELECT_WORKTREE = "select_worktree"
     WRITE_CODE = "write_code"
     FINISH = "finish"
     ASK_USER = "ask_user"
@@ -63,6 +66,7 @@ _ROUTE_TO_NEXT_TYPE = {
     Route.BUILD_PROMPT: "run_script",
     Route.VERIFY_COVERAGE: "run_script",
     Route.FINAL_CHECK: "run_script",
+    Route.SELECT_WORKTREE: "run_script",
     Route.WRITE_CODE: "write_code",
     Route.FINISH: "finish",
     Route.ASK_USER: "ask_user",
@@ -335,6 +339,9 @@ class Decision:
     # write_code 路由时携带的"完成后命令"(调用方保存测试文件后逐字执行);
     # 为 None 时 transitions 注入默认 validate_rules.py --workdir <wd>
     on_complete: Optional[NextCommand] = None
+    # run_script 路由时决策自带的完整命令参数(select_worktree 以位置参数
+    # WORK_DIR 开头, 逐字执行且不加 --workdir 前缀); 非空时优先于 transitions 默认组装
+    route_params: list[str] = field(default_factory=list)
     # 需由入口脚本落地到 state 的动作(决策本身不修改状态):
     mark_done: bool = False          # 当前方法达标, 标记 status=done
     reset_trajectory: bool = False   # 升级后复位轨迹, 用户继续时获得全新窗口

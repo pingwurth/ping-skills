@@ -12,7 +12,8 @@
                     均附 resume 命令可逐字执行, 自定义新建见 question 指引;
                     亦可 --choice/--new 重跑);
                     无 -> ask_user 确认是否新建(调用方带 --new --force 重跑)
-        --list    : 仅列出已存在的 worktree(信息型 finish)
+        --list    : 仅列出已存在的 worktree; 有 -> 信息型 finish, 无 -> run_script
+                    直接给出新建命令(params 以 WORK_DIR 开头, 可逐字执行)
         --choice N: 选择第 N 个已有 worktree(1-based) -> finish
         --new [名]: 新建(省略名称用默认名) -> finish
         --clear-history: 预检(base ref/目标路径/分支检出)通过后清理全部历史
@@ -26,8 +27,8 @@
     python scripts/select_worktree.py <当前工作目录> --clear-history
 
 前置条件(仅创建意图模式 --new/--clear-history/无参数执行, 在一切 worktree 操作前
-按以下顺序检查, 任一缺失即彻底中断; --list/--choice 只列出/选择已有 worktree,
-不创建, 跳过前置检查):
+按以下顺序检查, 任一缺失即彻底中断; --list 只读列出, 跳过前置检查;
+--choice 跳过前置检查但仍执行下述 worktree 索引复制+同步):
     1. `<cli> mcp list` 的 stdout+stderr 中必须能判定 codegraph 条目状态为
        connected(codegraph MCP 已连接; 多行 JSON/表格/否定态判定见
        _mcp_output_says_connected)。
@@ -40,11 +41,22 @@
     分别提示用户执行 `codegraph install` / `codegraph init` 后重新运行本技能
     (无 resume; 调用方转述 message 后立即终止本技能, 不得重试)。
 
+worktree CodeGraph 索引(--choice 与创建意图模式选定/新建成功返回前执行,
+见 _ensure_worktree_codegraph):
+    目标 worktree 已有 .codegraph -> 跳过(不重复复制/同步);
+    否则复制主工程 .codegraph(剔除 daemon.pid/daemon.sock/daemon.log 与
+    *.db-shm/*.db-wal 运行时文件)并在 worktree 根目录执行 `codegraph sync -q`;
+    主工程缺 .codegraph -> 提示 `codegraph init`;复制或同步失败 ->
+    abort(exit 2, failed), message 提示手动 cp + codegraph sync 后重新调用本技能。
+
 输出(NEXT_STEP):
     选定/新建成功 -> finish(exit 0), 工作树绝对路径见 deliverables 与
     artifacts[].kind == "worktree"; 需用户选择 -> ask_user(exit 1);
+    --list 无已存在 worktree -> run_script(exit 1), 下一步为
+    select_worktree.py WORK_DIR --new <默认名> --force(新建命令, 可逐字执行);
     参数非法/git 失败 -> ask_user(exit 2, failed);
-    缺少 .codegraph 索引/codegraph MCP 未连接 -> abort(exit 2, failed)。
+    缺少 .codegraph 索引/codegraph MCP 未连接/worktree 索引复制或
+    codegraph sync 失败 -> abort(exit 2, failed)。
 
 职责边界:
     容器定位/列举/名校验/派生/新建/预检等领域逻辑见 jaut/worktree.py;
@@ -57,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -110,6 +123,27 @@ def _ready(path: str, summary: str,
     return Decision(status="success", exit_code=config.EXIT_OK, summary=f"{summary}: {path}",
                     route=Route.FINISH, reason="worktree 已就绪", deliverables=[path],
                     artifacts=[{"path": path, "kind": "worktree"}], metrics=metrics)
+
+
+def _ready_with_codegraph(path: str, summary: str, *, repo_root: str,
+                          logger, uncommitted: list[str] | None = None) -> Decision:
+    """确保 worktree 内 .codegraph 就绪(已有则跳过), 再构造 finish 决策。
+
+    Args:
+        path: 选定/新建的工作树绝对路径。
+        summary: 结论前缀。
+        repo_root: 主工程根目录(复制源 .codegraph 的所在)。
+        logger: 文件日志器。
+        uncommitted: 新建时检测到的未提交变更列表(透传 _ready)。
+
+    Returns:
+        Decision: finish 路由(同 _ready)。
+
+    Raises:
+        StepError: 主工程缺 .codegraph, 或复制/codegraph sync 失败(abort, exit 2)。
+    """
+    _ensure_worktree_codegraph(repo_root, path, logger)
+    return _ready(path, summary, uncommitted=uncommitted)
 
 
 def _base_params(args: argparse.Namespace) -> list[str]:
@@ -194,6 +228,81 @@ def _require_codegraph(repo_root: Path, logger) -> None:
     raise StepError.abort(
         summary=f"工程根目录缺少 .codegraph 索引, 任务已中止: {repo_root}",
         reason="缺少 CodeGraph 索引(.codegraph), 彻底中止任务",
+        message=question)
+
+
+def _ensure_worktree_codegraph(repo_root, worktree_path: str, logger) -> None:
+    """选定/新建返回前: 确保 worktree 根目录有可用的 CodeGraph 索引。
+
+    目标 worktree 已有 .codegraph -> 跳过(不重复复制/同步); 否则从主工程
+    repo_root 复制(剔除 daemon 运行时文件与 SQLite WAL/SHM 侧文件), 再在
+    worktree 根目录执行 `codegraph sync -q` 对齐该树检出的代码。
+
+    Args:
+        repo_root: 主工程根目录(复制源, Path 或 str)。
+        worktree_path: 目标 worktree 绝对路径。
+        logger: 文件日志器。
+
+    Raises:
+        StepError: 主工程缺 .codegraph(复用 _require_codegraph 的
+            `codegraph init` 指引), 或复制/codegraph sync 失败
+            (exit 2, abort 路由, 无 resume; 复制失败先清半成品再中止,
+             sync 失败保留已复制的副本)。
+    """
+    target_cg = Path(worktree_path) / ".codegraph"
+    if target_cg.is_dir():
+        logger.info(f"worktree 已有 .codegraph, 跳过复制与同步: {target_cg}")
+        return
+    src_root = Path(repo_root)
+    _require_codegraph(src_root, logger)  # 主工程缺索引 -> abort(codegraph init 指引)
+    src_cg = src_root / ".codegraph"
+    try:
+        shutil.copytree(src_cg, target_cg,
+                        ignore=shutil.ignore_patterns(
+                            "daemon.pid", "daemon.sock", "daemon.log",
+                            "*.db-shm", "*.db-wal"))
+    except (shutil.Error, OSError) as exc:
+        shutil.rmtree(target_cg, ignore_errors=True)  # 清半成品, 重跑不误入跳过分支
+        logger.error(f"复制 .codegraph 到 worktree 失败: {target_cg} <- {src_cg}: {exc}")
+        question = (
+            f"将工程根目录的 .codegraph 复制到 worktree 失败, 本任务已中止。\n"
+            f"源: {src_cg}\n目标: {target_cg}\n原因: {exc}\n"
+            f"请由用户手动执行以下命令完成索引复制与同步:\n"
+            f"    cp -a {src_cg} {target_cg}\n"
+            f"    cd {worktree_path} && codegraph sync\n"
+            f"命令由用户手动执行完毕后, 再由用户重新调用本技能"
+            f"(技能不会代为执行这些命令, 也不会自动重试)。"
+        )
+        raise StepError.abort(
+            summary=f"复制 .codegraph 到 worktree 失败, 任务已中止: {target_cg}",
+            reason="复制 CodeGraph 索引(.codegraph)失败, 彻底中止任务",
+            message=question) from exc
+    result = run_command(["codegraph", "sync", "-q"], cwd=str(worktree_path),
+                         timeout=config.CODEGRAPH_SYNC_TIMEOUT_SECONDS)
+    if result.launch_failed:
+        detail = "`codegraph` 命令不存在或无法执行"
+    elif result.timed_out:
+        detail = f"`codegraph sync` 执行超时({config.CODEGRAPH_SYNC_TIMEOUT_SECONDS}s)"
+    elif not result.ok:
+        err = (result.stderr or result.stdout or "").strip()
+        detail = (f"`codegraph sync` 失败(退出码 {result.returncode})"
+                  + (f": {err}" if err else ""))
+    else:
+        logger.info(f"codegraph sync 完成: {worktree_path}")
+        return
+    logger.error(f"worktree 内 codegraph sync 失败: {worktree_path}: {detail}")
+    question = (
+        f"在 worktree 中执行 `codegraph sync` 失败, 本任务已中止。\n"
+        f"worktree: {worktree_path}\n原因: {detail}\n"
+        f".codegraph 已复制到该 worktree, 仅索引同步失败。\n"
+        f"请由用户手动在该 worktree 目录执行以下命令完成索引同步:\n"
+        f"    codegraph sync\n"
+        f"命令由用户手动执行完毕后, 再由用户重新调用本技能"
+        f"(技能不会代为执行该命令, 也不会自动重试)。"
+    )
+    raise StepError.abort(
+        summary=f"worktree 内 codegraph sync 失败, 任务已中止: {worktree_path}",
+        reason="codegraph sync 失败, 彻底中止任务",
         message=question)
 
 
@@ -339,9 +448,11 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 
     Raises:
         StepError: 当前工作目录不存在, codegraph MCP 未连接,
-            工程根目录缺少 .codegraph 索引, 或 worktree 操作失败(WorktreeError 转 exit 2)。
+            工程根目录缺少 .codegraph 索引, 或 worktree 操作失败(WorktreeError 转 exit 2),
+            或选定/新建的 worktree 内 .codegraph 复制/codegraph sync 失败(abort, exit 2)。
             CodeGraph 前置检查仅创建意图模式(--new/--clear-history/无参数)执行;
-            --list/--choice 不创建 worktree, 跳过前置检查。
+            --list/--choice 不创建 worktree, 跳过前置检查(--choice 仍执行
+            worktree 索引复制+同步)。
     """
     repo_root = Path(args.work_dir).resolve()
     if not repo_root.is_dir():
@@ -379,7 +490,8 @@ def _dispatch(args, base_dir, dir_name, container, repo_cwd, logger) -> Decision
         logger: 文件日志器。
 
     Returns:
-        Decision: finish(选定/列出/清理新建) 或 ask_user(需用户选择/确认)。
+        Decision: finish(选定/列出/清理新建)、ask_user(需用户选择/确认),
+            或 run_script(--list 无已存在 worktree, 给出新建命令)。
 
     Raises:
         StepError: 编号越界或目录名非法(exit 2)。
@@ -387,16 +499,24 @@ def _dispatch(args, base_dir, dir_name, container, repo_cwd, logger) -> Decision
     """
     has_container = wt.find_container(base_dir, dir_name) is not None
 
-    # --list: 仅报告已存在的 worktree(信息型 finish)
+    # --list: 仅报告已存在的 worktree(信息型 finish);
+    # 无已存在 worktree -> run_script 直接给出新建命令(下一步可逐字执行)
     if args.list:
         worktrees = wt.list_worktrees(container, logger) if has_container else []
         if not worktrees:
             summary = (f"工作树目录 {container} 下没有已存在的 worktree" if has_container
                        else f"上级目录 {base_dir} 下不存在工作树目录 "
                             f"'{dir_name}{config.WORKTREE_CONTAINER_SUFFIX}'")
-            return Decision(status="success", exit_code=config.EXIT_OK, summary=summary,
-                            route=Route.FINISH, reason="无已存在 worktree", deliverables=[],
-                            metrics={"container": container, "worktrees": []})
+            target_name = wt.default_worktree_name(dir_name)
+            params = _resume_params(args, "--new", target_name, "--force")
+            logger.info(f"无已存在 worktree, 组装新建命令: select_worktree.py {params}")
+            return Decision(status="success", exit_code=config.EXIT_CONTINUE,
+                            summary=f"{summary}, 已给出新建 worktree 命令",
+                            route=Route.SELECT_WORKTREE,
+                            reason="无已存在 worktree, 执行新建 worktree 命令",
+                            route_params=params,
+                            metrics={"container": container, "worktrees": [],
+                                     "create_params": params})
         summary = f"在 {container} 下找到 {len(worktrees)} 个 worktree 目录"
         return Decision(status="success", exit_code=config.EXIT_OK, summary=summary,
                         route=Route.FINISH, reason="已列出 worktree", deliverables=worktrees,
@@ -410,7 +530,8 @@ def _dispatch(args, base_dir, dir_name, container, repo_cwd, logger) -> Decision
         if not 1 <= args.choice <= len(worktrees):
             raise StepError.exec_error(
                 f"编号超出范围: {args.choice}(共 {len(worktrees)} 个已有 worktree)")
-        return _ready(worktrees[args.choice - 1], "已选择 worktree")
+        return _ready_with_codegraph(worktrees[args.choice - 1], "已选择 worktree",
+                                     repo_root=repo_cwd, logger=logger)
 
     # --clear-history: 预检后强制清理全部历史 worktree(分支保留)后新建默认名
     if args.clear_history:
@@ -443,7 +564,8 @@ def _dispatch(args, base_dir, dir_name, container, repo_cwd, logger) -> Decision
         summary = (f"已清理 {len(cleared)} 个历史 worktree 并新建" if cleared
                    else "已新建 worktree(无历史 worktree)")
         logger.info(f"清理完成({len(cleared)} 个), 新建: {path}")
-        return _ready(path, summary, uncommitted=uncommitted)
+        return _ready_with_codegraph(path, summary, repo_root=repo_cwd,
+                                     logger=logger, uncommitted=uncommitted)
 
     # --new [NAME]: 新建 worktree(省略名称用默认名)
     if args.new is not None:
@@ -468,7 +590,8 @@ def _dispatch(args, base_dir, dir_name, container, repo_cwd, logger) -> Decision
                 logger=logger)
         path = wt.create_new_worktree(container, target_name, dir_name, repo_cwd, logger,
                                       base_ref=args.base)
-        return _ready(path, "已新建 worktree", uncommitted=uncommitted)
+        return _ready_with_codegraph(path, "已新建 worktree", repo_root=repo_cwd,
+                                     logger=logger, uncommitted=uncommitted)
 
     # 无参数: 有已有 worktree 则请求选择(ask_user), 否则请求用户确认是否新建
     worktrees = wt.list_worktrees(container, logger)
@@ -481,7 +604,8 @@ def _dispatch(args, base_dir, dir_name, container, repo_cwd, logger) -> Decision
             uncommitted = wt.has_uncommitted_changes(repo_cwd, logger)
             path = wt.create_new_worktree(container, target_name, dir_name, repo_cwd, logger,
                                           base_ref=args.base)
-            return _ready(path, "已新建 worktree", uncommitted=uncommitted)
+            return _ready_with_codegraph(path, "已新建 worktree", repo_root=repo_cwd,
+                                         logger=logger, uncommitted=uncommitted)
         # 否则先询问用户是否新建
         logger.info("无已存在 worktree, 请求用户确认是否新建")
         uncommitted = wt.has_uncommitted_changes(repo_cwd, logger)

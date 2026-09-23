@@ -29,6 +29,19 @@ def test_run_script_routes_resolve_script_and_workdir_param(tmp_path: Path):
         assert step["params"] == ["--workdir", str(tmp_path / "wd")]
 
 
+def test_select_worktree_route_uses_decision_route_params(tmp_path: Path):
+    """SELECT_WORKTREE 路由: route_params 逐字作为 params(位置 WORK_DIR 开头, 不加 --workdir)。"""
+    rc = transitions.RouteContext(scripts_dir=tmp_path, workdir=None)  # select_worktree 无 workdir
+    step = transitions.build_next_step(
+        _decision(Route.SELECT_WORKTREE,
+                  route_params=["/repo", "--new", "repo.worktree20260908", "--force"]),
+        rc)
+    assert step["type"] == "run_script"
+    assert step["script"] == str(tmp_path / "select_worktree.py")
+    assert step["params"] == ["/repo", "--new", "repo.worktree20260908", "--force"]
+    assert "--workdir" not in step["params"]
+
+
 def test_build_prompt_carries_instructions(tmp_path: Path):
     step = transitions.build_next_step(
         _decision(Route.BUILD_PROMPT, instructions="fix it"), _rc(tmp_path))

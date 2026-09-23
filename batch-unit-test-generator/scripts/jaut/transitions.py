@@ -27,6 +27,7 @@ _ROUTE_SCRIPT = {
     Route.FINAL_CHECK: "init_coverage.py",
     Route.BATCH_NEXT: "batch_next.py",
     Route.BATCH_FINISH: "batch_finish.py",
+    Route.SELECT_WORKTREE: "select_worktree.py",
 }
 
 
@@ -66,10 +67,11 @@ def build_next_step(decision: Decision, rc: RouteContext) -> dict:
         return make_next_step("abort", decision.reason,
                               message=decision.question or decision.summary or decision.reason)
 
-    # run_script 路由
+    # run_script 路由: 决策自带 route_params 时逐字使用(select_worktree 以位置参数
+    # WORK_DIR 开头, 不加 --workdir 前缀, 调用方可逐字执行); 否则按路由默认组装
     script = str(rc.scripts_dir / _ROUTE_SCRIPT[route])
-    step = make_next_step("run_script", decision.reason, script=script,
-                          params=_params_for(route, rc))
+    params = list(decision.route_params) or _params_for(route, rc)
+    step = make_next_step("run_script", decision.reason, script=script, params=params)
     if decision.instructions:
         step["instructions"] = decision.instructions
     return step

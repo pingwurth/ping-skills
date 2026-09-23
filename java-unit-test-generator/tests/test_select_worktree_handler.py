@@ -41,6 +41,16 @@ def _codegraph_mcp_connected_stub(monkeypatch):
     monkeypatch.setattr(sw, "_codegraph_mcp_connected", lambda: (True, ""))
 
 
+# 真实实现引用: autouse fixture 默认 stub 掉 .codegraph 复制+同步, 专项用例需还原
+_ORIG_ENSURE_CODEGRAPH = sw._ensure_worktree_codegraph
+
+
+@pytest.fixture(autouse=True)
+def _ensure_worktree_codegraph_stub(monkeypatch):
+    """既有用例聚焦 worktree 逻辑: 默认跳过 .codegraph 复制+同步(专项用例见下)。"""
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", lambda *a, **k: None)
+
+
 # --------------------------------------------------------------------------- #
 # 成功场景
 # --------------------------------------------------------------------------- #
@@ -112,6 +122,51 @@ def test_handler_list_reports_existing(tmp_path):
 
     assert decision.route == Route.FINISH
     assert len(decision.deliverables) == 2
+
+
+def test_handler_list_empty_returns_run_script_create_command(tmp_path):
+    """--list 无已存在 worktree: 直接组装新建命令, 路由 run_script(exit 1)。"""
+    repo_dir = tmp_path / "myrepo"
+    _make_repo(repo_dir)
+    args = _make_args(str(repo_dir), list=True)
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=None), \
+         patch("scripts.select_worktree.wt.list_worktrees", return_value=[]), \
+         patch("scripts.select_worktree.wt.default_worktree_name",
+               return_value="myrepo.worktree20260908"):
+        decision, _ = handler(args)
+
+    assert decision.route == Route.SELECT_WORKTREE
+    assert decision.next_type == "run_script"
+    assert decision.exit_code == config.EXIT_CONTINUE
+    assert decision.route_params == [str(repo_dir), "--new",
+                                     "myrepo.worktree20260908", "--force"]
+    assert decision.metrics["create_params"] == decision.route_params
+    assert decision.deliverables == []
+
+
+def test_main_list_empty_emits_run_script(tmp_path, capsys):
+    """端到端: --list 无 worktree 输出 run_script 协议块, script 为 select_worktree.py 绝对路径。"""
+    repo_dir = _make_repo(tmp_path / "myrepo")
+
+    rc = select_main([str(repo_dir), "--list"])
+
+    out = capsys.readouterr().out
+    assert rc == config.EXIT_CONTINUE
+    payload = json.loads(out.split(":::NEXT_STEP_BEGIN:::")[1].split(":::NEXT_STEP_END:::")[0])
+    assert payload["exit_code"] == 1
+    ns = payload["next_step"]
+    assert ns["type"] == "run_script"
+    assert ns["script"].endswith("select_worktree.py")
+    assert ns["params"][0] == str(repo_dir)
+    assert ns["params"][1] == "--new"
+    assert ns["params"][2].startswith("myrepo.worktree")
+    assert ns["params"][3] == "--force"
+    assert "--workdir" not in ns["params"]   # select_worktree 以位置参数 WORK_DIR 开头
 
 
 def test_handler_choice_selects_existing(tmp_path):
@@ -459,7 +514,9 @@ def test_handler_list_skips_codegraph_prereqs(tmp_path):
          patch("scripts.select_worktree.wt.find_container", return_value=None):
         decision, _ = handler(args)
 
-    assert decision.route == Route.FINISH
+    # 无已存在 worktree: 不再 finish, 而是 run_script 给出新建命令
+    assert decision.route == Route.SELECT_WORKTREE
+    assert decision.exit_code == config.EXIT_CONTINUE
     mock_mcp.assert_not_called()
     mock_idx.assert_not_called()
 
@@ -1043,5 +1100,305 @@ def test_handler_list_wins_over_clear_history(tmp_path):
          patch("scripts.select_worktree.wt.clear_all_worktrees") as mock_clear:
         decision, ectx = handler(args)
 
-    assert decision.route == Route.FINISH
+    # --list 优先: 无已存在 worktree -> run_script 给出新建命令(不触发清理)
+    assert decision.route == Route.SELECT_WORKTREE
     mock_clear.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# worktree .codegraph 复制 + codegraph sync(选定/新建返回前)
+# --------------------------------------------------------------------------- #
+def _make_codegraph_dir(path: Path) -> Path:
+    """创建带典型文件的 .codegraph 源目录(db + .gitignore + 运行时文件)。"""
+    path.mkdir(parents=True)
+    (path / "codegraph.db").write_bytes(b"db")
+    (path / ".gitignore").write_text("*\n!.gitignore\n")
+    (path / "daemon.pid").write_text("12345")
+    (path / "daemon.sock").write_text("sock")
+    (path / "daemon.log").write_text("log")
+    (path / "codegraph.db-shm").write_bytes(b"shm")
+    (path / "codegraph.db-wal").write_bytes(b"wal")
+    return path
+
+
+def test_ensure_skips_when_target_has_codegraph(tmp_path, monkeypatch):
+    """目标 worktree 已有 .codegraph: 跳过复制与 sync(即便主工程缺索引也不检查)。"""
+    src = tmp_path / "src"          # 故意不建 .codegraph
+    src.mkdir()
+    target = tmp_path / "wt"
+    target.mkdir()
+    _make_codegraph_dir(target / ".codegraph")
+    logger = MagicMock()
+    mock_run = MagicMock()
+    monkeypatch.setattr("scripts.select_worktree.run_command", mock_run)
+
+    _ORIG_ENSURE_CODEGRAPH(src, str(target), logger)
+
+    mock_run.assert_not_called()
+
+
+def test_ensure_copies_index_and_runs_sync(tmp_path, monkeypatch):
+    """缺索引: 从主工程复制 .codegraph 并在 worktree 根执行 codegraph sync -q。"""
+    src = _make_codegraph_dir(tmp_path / "src" / ".codegraph").parent
+    target = tmp_path / "wt"
+    target.mkdir()
+    logger = MagicMock()
+    mock_run = MagicMock(return_value=CommandResult(ok=True, returncode=0,
+                                                    stdout="", stderr=""))
+    monkeypatch.setattr("scripts.select_worktree.run_command", mock_run)
+
+    _ORIG_ENSURE_CODEGRAPH(src, str(target), logger)
+
+    assert (target / ".codegraph" / "codegraph.db").read_bytes() == b"db"
+    assert (target / ".codegraph" / ".gitignore").is_file()
+    mock_run.assert_called_once_with(
+        ["codegraph", "sync", "-q"], cwd=str(target),
+        timeout=config.CODEGRAPH_SYNC_TIMEOUT_SECONDS)
+
+
+def test_ensure_copy_excludes_runtime_files(tmp_path, monkeypatch):
+    """复制剔除 daemon 运行时状态与 SQLite WAL/SHM 侧文件。"""
+    src = _make_codegraph_dir(tmp_path / "src" / ".codegraph").parent
+    target = tmp_path / "wt"
+    target.mkdir()
+    monkeypatch.setattr("scripts.select_worktree.run_command",
+                        MagicMock(return_value=CommandResult(ok=True, returncode=0,
+                                                             stdout="", stderr="")))
+
+    _ORIG_ENSURE_CODEGRAPH(src, str(target), MagicMock())
+
+    copied = target / ".codegraph"
+    for name in ("daemon.pid", "daemon.sock", "daemon.log",
+                 "codegraph.db-shm", "codegraph.db-wal"):
+        assert not (copied / name).exists(), name
+
+
+def test_ensure_aborts_when_source_missing_codegraph(tmp_path):
+    """主工程与目标 worktree 都缺 .codegraph: abort(exit 2), 提示 codegraph init。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    target = tmp_path / "wt"
+    target.mkdir()
+
+    with pytest.raises(StepError) as exc_info:
+        _ORIG_ENSURE_CODEGRAPH(src, str(target), MagicMock())
+
+    decision = exc_info.value.decision
+    assert decision.status == "failed"
+    assert decision.exit_code == config.EXIT_ERROR
+    assert decision.route == Route.ABORT
+    assert "codegraph init" in decision.question
+    assert decision.resume == []
+
+
+def test_ensure_copy_failure_aborts_and_removes_partial(tmp_path, monkeypatch):
+    """copytree 失败: 先清半成品再 abort, message 给手动 cp + sync 指引。"""
+    src = _make_codegraph_dir(tmp_path / "src" / ".codegraph").parent
+    target = tmp_path / "wt"
+    target.mkdir()
+
+    def _boom(*a, **k):
+        (target / ".codegraph").mkdir()          # 模拟半成品残留
+        raise OSError("boom")
+
+    monkeypatch.setattr("scripts.select_worktree.shutil.copytree", _boom)
+
+    with pytest.raises(StepError) as exc_info:
+        _ORIG_ENSURE_CODEGRAPH(src, str(target), MagicMock())
+
+    decision = exc_info.value.decision
+    assert decision.route == Route.ABORT
+    assert decision.exit_code == config.EXIT_ERROR
+    assert "cp -a" in decision.question
+    assert "codegraph sync" in decision.question
+    assert not (target / ".codegraph").exists()   # 半成品已清, 重跑不误入跳过分支
+
+
+def test_ensure_sync_nonzero_exit_aborts_keeps_copy(tmp_path, monkeypatch):
+    """codegraph sync 非零退出: abort, 已复制的副本保留(仅同步失败)。"""
+    src = _make_codegraph_dir(tmp_path / "src" / ".codegraph").parent
+    target = tmp_path / "wt"
+    target.mkdir()
+    monkeypatch.setattr("scripts.select_worktree.run_command",
+                        MagicMock(return_value=CommandResult(ok=False, returncode=1,
+                                                             stdout="", stderr="boom")))
+
+    with pytest.raises(StepError) as exc_info:
+        _ORIG_ENSURE_CODEGRAPH(src, str(target), MagicMock())
+
+    decision = exc_info.value.decision
+    assert decision.route == Route.ABORT
+    assert "退出码 1" in decision.question
+    assert "boom" in decision.question
+    assert "codegraph sync" in decision.question
+    assert (target / ".codegraph" / "codegraph.db").is_file()   # 副本保留
+
+
+def test_ensure_sync_timeout_aborts(tmp_path, monkeypatch):
+    """codegraph sync 超时: abort, message 含超时秒数。"""
+    src = _make_codegraph_dir(tmp_path / "src" / ".codegraph").parent
+    target = tmp_path / "wt"
+    target.mkdir()
+    monkeypatch.setattr("scripts.select_worktree.run_command",
+                        MagicMock(return_value=CommandResult(ok=False, returncode=None,
+                                                             stdout="", stderr="",
+                                                             timed_out=True)))
+
+    with pytest.raises(StepError) as exc_info:
+        _ORIG_ENSURE_CODEGRAPH(src, str(target), MagicMock())
+
+    decision = exc_info.value.decision
+    assert decision.route == Route.ABORT
+    assert "超时" in decision.question
+    assert str(config.CODEGRAPH_SYNC_TIMEOUT_SECONDS) in decision.question
+
+
+def test_ensure_sync_launch_failed_aborts(tmp_path, monkeypatch):
+    """codegraph 命令不存在: abort, message 提示命令无法执行。"""
+    src = _make_codegraph_dir(tmp_path / "src" / ".codegraph").parent
+    target = tmp_path / "wt"
+    target.mkdir()
+    monkeypatch.setattr("scripts.select_worktree.run_command",
+                        MagicMock(return_value=CommandResult(ok=False, returncode=None,
+                                                             stdout="", stderr="")))
+
+    with pytest.raises(StepError) as exc_info:
+        _ORIG_ENSURE_CODEGRAPH(src, str(target), MagicMock())
+
+    decision = exc_info.value.decision
+    assert decision.route == Route.ABORT
+    assert "不存在或无法执行" in decision.question
+
+
+def test_ready_with_codegraph_runs_ensure_then_finishes(monkeypatch):
+    """_ready_with_codegraph: 先调 ensure, 再返回与 _ready 等价的 finish 决策。"""
+    mock_ensure = MagicMock()
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", mock_ensure)
+
+    decision = sw._ready_with_codegraph("/wt/x", "已新建 worktree",
+                                        repo_root="/repo", logger="LOG")
+
+    mock_ensure.assert_called_once_with("/repo", "/wt/x", "LOG")
+    assert decision.route == Route.FINISH
+    assert decision.status == "success"
+    assert decision.deliverables == ["/wt/x"]
+    assert "已新建 worktree: /wt/x" in decision.summary
+
+
+def test_handler_choice_ensures_codegraph(tmp_path, monkeypatch):
+    """--choice: 选定后返回前执行 _ensure_worktree_codegraph(path)。"""
+    mock_ensure = MagicMock()
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", mock_ensure)
+    repo_dir = tmp_path / "myrepo"
+    _make_repo(repo_dir)
+    existing = [str(tmp_path / "wt1"), str(tmp_path / "wt2")]
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.list_worktrees", return_value=existing):
+        decision, _ = handler(_make_args(str(repo_dir), choice=2))
+
+    assert decision.route == Route.FINISH
+    mock_ensure.assert_called_once()
+    assert mock_ensure.call_args[0][1] == str(tmp_path / "wt2")
+
+
+def test_handler_new_ensures_codegraph(tmp_path, monkeypatch):
+    """--new --force: 新建后返回前执行 _ensure_worktree_codegraph(path)。"""
+    mock_ensure = MagicMock()
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", mock_ensure)
+    repo_dir = tmp_path / "myrepo"
+    _make_repo(repo_dir)
+    created = str(tmp_path / "myrepo.worktrees" / "my-feature")
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.validate_new_name", return_value=True), \
+         patch("scripts.select_worktree.wt.has_uncommitted_changes", return_value=[]), \
+         patch("scripts.select_worktree.wt.create_new_worktree", return_value=created):
+        decision, _ = handler(_make_args(str(repo_dir), new="my-feature", force=True))
+
+    assert decision.route == Route.FINISH
+    mock_ensure.assert_called_once()
+    assert mock_ensure.call_args[0][1] == created
+
+
+def test_handler_clear_history_ensures_codegraph(tmp_path, monkeypatch):
+    """--clear-history --force: 清理重建后返回前执行 _ensure_worktree_codegraph(path)。"""
+    mock_ensure = MagicMock()
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", mock_ensure)
+    repo_dir = tmp_path / "myrepo"
+    _make_repo(repo_dir)
+    created = str(tmp_path / "myrepo.worktrees" / "myrepo.worktree20260908")
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.has_uncommitted_changes", return_value=[]), \
+         patch("scripts.select_worktree.wt.preflight_new_worktree"), \
+         patch("scripts.select_worktree.wt.clear_all_worktrees", return_value=[]), \
+         patch("scripts.select_worktree.wt.create_new_worktree", return_value=created):
+        decision, _ = handler(_make_args(str(repo_dir), clear_history=True, force=True))
+
+    assert decision.route == Route.FINISH
+    mock_ensure.assert_called_once()
+    assert mock_ensure.call_args[0][1] == created
+
+
+def test_handler_no_args_force_ensures_codegraph(tmp_path, monkeypatch):
+    """无参数 + --force: 自动新建后返回前执行 _ensure_worktree_codegraph(path)。"""
+    mock_ensure = MagicMock()
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", mock_ensure)
+    repo_dir = tmp_path / "myrepo"
+    _make_repo(repo_dir)
+    created = str(tmp_path / "myrepo.worktrees" / "myrepo.worktree20260908")
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=None), \
+         patch("scripts.select_worktree.wt.list_worktrees", return_value=[]), \
+         patch("scripts.select_worktree.wt.default_worktree_name", return_value="myrepo.worktree20260908"), \
+         patch("scripts.select_worktree.wt.has_uncommitted_changes", return_value=[]), \
+         patch("scripts.select_worktree.wt.create_new_worktree", return_value=created):
+        decision, _ = handler(_make_args(str(repo_dir), force=True))
+
+    assert decision.route == Route.FINISH
+    mock_ensure.assert_called_once()
+    assert mock_ensure.call_args[0][1] == created
+
+
+def test_handler_choice_backfills_missing_codegraph(tmp_path, monkeypatch):
+    """集成: --choice 选定缺索引的已有树 -> 真复制 codegraph.db 并执行 sync -> finish。"""
+    monkeypatch.setattr(sw, "_ensure_worktree_codegraph", _ORIG_ENSURE_CODEGRAPH)
+    repo_dir = tmp_path / "myrepo"
+    _make_repo(repo_dir)
+    (repo_dir / ".codegraph" / "codegraph.db").write_bytes(b"db")
+    wt_path = tmp_path / "wt1"
+    wt_path.mkdir()                      # 已有树, 故意没有 .codegraph
+    mock_run = MagicMock(return_value=CommandResult(ok=True, returncode=0,
+                                                    stdout="", stderr=""))
+    monkeypatch.setattr("scripts.select_worktree.run_command", mock_run)
+
+    with patch("scripts.select_worktree.setup_logger"), \
+         patch("scripts.select_worktree.wt.parent_dir", return_value=str(tmp_path)), \
+         patch("scripts.select_worktree.wt.current_dir_name", return_value="myrepo"), \
+         patch("scripts.select_worktree.wt.resolve_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.find_container", return_value=str(tmp_path / "myrepo.worktrees")), \
+         patch("scripts.select_worktree.wt.list_worktrees", return_value=[str(wt_path)]):
+        decision, _ = handler(_make_args(str(repo_dir), choice=1))
+
+    assert decision.route == Route.FINISH
+    assert (wt_path / ".codegraph" / "codegraph.db").read_bytes() == b"db"
+    mock_run.assert_called_once()
+    assert mock_run.call_args[0][0] == ["codegraph", "sync", "-q"]
+    assert mock_run.call_args[1]["cwd"] == str(wt_path)

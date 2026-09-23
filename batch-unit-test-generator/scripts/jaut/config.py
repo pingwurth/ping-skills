@@ -138,6 +138,11 @@ WORKTREE_DEFAULT_NEW_SENTINEL = "__DEFAULT__"  # --new 未附名称时的哨兵�
 WORKTREE_NAME_DISALLOWED_CHARS = '<>:"/\\|?*'
 
 # --------------------------------------------------------------------------- #
+# CodeGraph 索引同步(select_worktree 复制 .codegraph 后执行)
+# --------------------------------------------------------------------------- #
+CODEGRAPH_SYNC_TIMEOUT_SECONDS = 120  # codegraph sync 超时秒数(分支切换后重建较重)
+
+# --------------------------------------------------------------------------- #
 # 批量执行(batch-unit-test-generator 专用)
 # --------------------------------------------------------------------------- #
 _BATCH_CLASS_ROUND_BUDGET_ENV = "JAVA_UT_BATCH_CLASS_ROUND_BUDGET"

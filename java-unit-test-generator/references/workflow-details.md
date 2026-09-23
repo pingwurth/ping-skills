@@ -10,7 +10,7 @@
 
 ```text
 python scripts/select_worktree.py <当前工作目录>                        # 首次: 请求选择或请求确认新建
-python scripts/select_worktree.py <当前工作目录> --list                  # 仅列出已存在的 worktree
+python scripts/select_worktree.py <当前工作目录> --list                  # 列出已存在的 worktree; 无则 run_script 给出新建命令
 python scripts/select_worktree.py <当前工作目录> --choice N              # 选择第 N 个已有 worktree
 python scripts/select_worktree.py <当前工作目录> --new [名称]            # 新建
 python scripts/select_worktree.py <当前工作目录> --new [名称] --base <ref>  # 基于指定分支/标签/commit 新建
@@ -20,6 +20,7 @@ python scripts/select_worktree.py <当前工作目录> --clear-history [--base <
 
 ### 行为说明
 
+- `--list` 有已有 worktree → `finish` 列出候选；**无已有 worktree → `run_script`（exit 1）**，`next_step.params` 为完整新建命令 `<当前工作目录> --new <默认名> --force`（含 `--base` 时一并携带），调用方逐字执行即可新建
 - 无已有 worktree → 输出 `ask_user` 请求用户确认（选项：默认名新建 / 自定义名新建 / 取消），用户确认后调用方带 `--new --force` 重跑；**不出现**清理历史选项
 - 有已有 worktree → 输出 `ask_user` 列出候选（`[1..N]` 选择已有、`[N+1] 新建默认 worktree`、`[N+2] 清理历史工作树并创建新的工作树(历史树未提交内容将被永久删除)`，各选项均附 resume 命令（params 以 `<当前工作目录>` 开头）可逐字执行；`--new [名称]` 自定义新建见 question 指引）
 - `--clear-history` → **先预检**（base ref 可解析 / 目标路径 / 派生分支未被容器外检出；预检失败则**历史 worktree 全部保留**），再强制清理容器内全部历史 worktree（`git worktree remove --force`，**历史树未提交内容永久删除、不可恢复；分支保留不删除**）后新建默认名 worktree → `finish`；清理后新建失败的报错会注明「历史 worktree 已被清除, 无法回滚」；历史树为零时幂等跳过清理照常新建；主工作区有未提交变更时先 `ask_user` 确认（`--force` 跳过），确认文案含永久删除警示

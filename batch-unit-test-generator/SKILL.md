@@ -45,10 +45,10 @@ batch_finish (一次全量 mvn → 批量终验 → 不达标类重入队 rechec
 
 ```text
 # 第一步: 工作树确认
-python scripts/select_worktree.py <当前工作目录> [--choice N | --new [名称] | --clear-history] [--base REF] [--force]
+python scripts/select_worktree.py <当前工作目录> [--list | --choice N | --new [名称] | --clear-history] [--base REF] [--force]
 # resume 的 params 以 <当前工作目录> 开头可逐字执行; --clear-history 先预检(base ref/分支检出/目标路径,
 # 失败则历史保留), 清理会永久删除历史树未提交内容(分支保留); 已有分支 + --base 会强制重置该分支
-# 拿到 <worktree> 后:
+# 拿到 worktree 后自动复制主工程 .codegraph 并执行 codegraph sync(失败 abort); 拿到 <worktree> 后:
 
 # 第二步: 差异分析
 python scripts/batch_diff.py --project-root <worktree> [--target <分支>] [--diff-mode auto|three|two] [--exclude-glob PATTERN ...] [--sort-policy module-coverage|coverage|diff-size] [--workdir <dir>]
