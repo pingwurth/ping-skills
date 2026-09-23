@@ -4,17 +4,19 @@
 ✔ 执行 select_worktree.py 创建工作树前先检查 `opencode mcp list | grep "codegraph.*connected"`, 如果不存在就中断任务，提示用户执行 codegraph install 配置 mcp
 ✔ select_worktree.py 创建完工作树目录，将 .codegraph 拷贝到工作树的工程根目录下，并在工作树的工程根目录执行 `codegraph sync`
 
-6. 超过预算轮数不再人工决策，检索 `references/単测编写指导.md` ，如果没有匹配方案直接跳过，state.json 记录跳过原因，并提醒用户更新 `単测编写指导.md`，如果找到匹配方案就追加 10 轮预算
-
-7. 新增快速模式，skill 加载完第一件事 ———— 让用户选择模式：
+✔ 新增快速模式，skill 加载完第一件事 ———— 让用户选择模式：
         - 快速模式（适合简单类，一次生成即结束，覆盖率和编译通过率不保证）
         - 标准模式（循环修复自愈，直到覆盖率达标）
 
+7. 超过预算轮数不再人工决策，直接跳过，跳过的时候要把预算耗尽的根因记录到 state.json
+8. 新增一份 `references/単测编写指导.md` 文件，首次预算耗尽可检索文档，如果有匹配的解决方案就追加预算10轮，否则执行跳过操作；这部分逻辑尽可能通过 state.json + python 脚本实现，如果确实需要依赖 LLM 请说明原因
 
-8. 新增 junit4 支持
 
 
-9. 采集使用情况：
+9. 新增 junit4 支持
+
+
+10. 采集使用情况：
         调整 nginx 容器服务，新增 python 脚本，使用 redis 统计，支持生成报告
         个人信息来源 git config list, git var GIT_AUTHOR_IDENT, git var GIT_COMMITTER_IDENT
         项目信息 project_dir

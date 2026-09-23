@@ -2,6 +2,8 @@
 
 本文件包含 java-unit-test-generator 技能的详细命令和参数说明，SKILL.md 主文档仅保留概述。
 
+> 本文件描述的是**标准模式**的工作流（模式选择见 SKILL.md §0）；快速模式为纯 LLM 流程，不调用本文件中的任何脚本。
+
 ---
 
 ## 1. 工作树确认（select_worktree.py）

@@ -8,7 +8,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 
 针对分支差异涉及的**多个 Java 类**，以 JaCoCo Line Coverage 为主目标，批量生成 JUnit5+Mockito 单元测试，直到达到门槛。
 
-核心原则：
+核心原则（标准模式）：
 
 - 工作树选择仅一次，整个批次共享同一工作树。
 - mvn install 仅主流程一次，全量 mvn 测试仅基线和终验各一次。
@@ -20,7 +20,65 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 
 ---
 
-## 1. Workflow
+**第一步：先让用户选择模式（§0），选定后立刻复制对应 todo 清单，再按清单推进。**
+
+## 0. 模式选择（加载后第一件事）
+
+**先问模式，再动手**：用户答复前，不得执行任何脚本、不得读写任何测试文件。直接向用户二选一提问并等待答复 —— 目标范围未在请求中给出时一并问清。用户在请求里已指明模式的，按其指定执行，不再重复提问。
+
+| 模式 | 适用 | 执行方式 | 不保证 |
+|---|---|---|---|
+| **快速模式** | 一批简单类，铺一遍即可，不做覆盖率把关 | 保留 `select_worktree` + `batch_diff`（拿候选类清单 + 用户确认范围/门槛），**跳过 `batch_init` / `batch_next` / `batch_update` / `batch_finish`**；**不使用子代理**，主流程自己逐类串行按 §0.1 的单类五步编写；**不跑任何 mvn** | 覆盖率达标、编译与测试通过 |
+| **标准模式** | 需要可靠覆盖率与批量终验 | 复用 §1 工作流：脚本 + 子代理委派 + mvn 基线与终验 + 循环自愈，直到覆盖率达标 | — |
+
+用户选定后**立刻**把对应清单**原样复制**为本次任务的 todo 清单（宿主的 todo/任务工具可用就建到工具里，没有就在对话中维护该 Markdown 清单），随后逐项勾选推进：不跳项、不改顺序、不加项。
+
+### 0.1 快速模式 todo 清单
+
+```markdown
+- [ ] 1. 确认 git 工作树：select_worktree.py，拿到 <worktree>
+- [ ] 2. 差异分析与范围确认：batch_diff.py --project-root <worktree> → 转述候选类清单，等用户确认范围（--all / --top N / --classes <FQCN,...>；快速模式不看门槛，无覆盖率目标）
+- [ ] 3. 逐类串行处理，一次只处理一个类（不使用子代理），对每个类重复第 4~8 项
+- [ ] 4. 探索该类/方法的生产源码：确认 FQCN 与源文件、列出全部方法、识别依赖与分支
+- [ ] 5. 探索对应测试类的源码：定位测试文件、已有用例、可复用的 mock/基类/工具方法
+- [ ] 6. 分析哪些方法需要补单元测试，把计划清单写到 /tmp/<skill_name>/<时间戳>/<简单类名>/plan.md
+- [ ] 7. 从 plan.md 取第一个「待补」方法，依据第 4、5 项的探索结果编写该方法的单元测试，每次只专注一个方法
+- [ ] 8. 在 plan.md 勾掉/标注该方法状态，回到第 7 项逐个方法增量推进，直到该类所有方法处理完毕；再回到第 3 项处理下一个类
+- [ ] 9. 全部类处理完后汇报：各类已补测方法、跳过的方法/类与原因，并声明「快速模式未执行 mvn 验证，覆盖率与编译/测试结果未验证」
+```
+
+- 计划清单路径：`/tmp/<skill_name>/<时间戳>/<简单类名>/plan.md`，其中 `<skill_name>` = `batch-unit-test-generator`，`<时间戳>` = 本次批量运行开始时间（`YYYYMMDD-HHMMSS`，同一次运行的所有类共用同一时间戳目录）；目录不存在则创建。每个类的清单按方法一行，含方法名、补测理由、优先级、状态（待补 / 已完成 / 跳过）：
+
+```markdown
+# FooService 补测计划
+- [ ] `process(String)` — 待补 — 无现有用例，含 3 个分支
+- [x] `getOrder(Long)` — 已完成 — 覆盖存在 / 不存在两条路径
+- [ ] `init()` — 跳过 — 依赖静态初始化块，不改生产代码无法测
+```
+
+- 快速模式仍受 §4 全局约束与 `references/UnitTestRules.md` 约束，且**无脚本兜底**，必须自行自查：只允许写 `src/test/java/**/<TargetTest>.java`；禁止改 `src/main/java/**`、`pom.xml`、配置；禁止 `try-catch`（异常路径用 `assertThrows`）；每个用例以断言结尾；禁止 `@Disabled`、删除用例、同义反复断言等消红手段。
+- 某方法无法在不改生产代码的前提下测试时，在 `plan.md` 标注 `跳过` + 原因，继续下一个方法；整个类都不宜快速处理时标注该类 `跳过` + 原因，继续下一个类，不阻塞整批；**不得改生产代码使其可测**。
+- 快速模式不跑 `batch_init`，因此**没有基线覆盖率**：类范围一律以 `batch_diff` 候选清单 + 用户确认结果为准，不得用覆盖率数字筛选类，也不得宣称任何覆盖率增量。
+- 快速模式不产出 `state.json` / `batch_state.json`，无类内迭代、升级穿透与批量终验，做完即结束：不进入 §3.2 升级穿透、§5 子代理委派、§6 断点续跑、§7 批量终验与最终报告（§3.1 范围确认门禁仍需走）。
+
+### 0.2 标准模式 todo 清单
+
+```markdown
+- [ ] 1. 确认 git 工作树：select_worktree.py，拿到 <worktree>
+- [ ] 2. 差异分析：batch_diff.py --project-root <worktree>
+- [ ] 3. 范围与门槛确认门禁：转述候选类清单，等用户确认范围（--all / --top N / --classes）与门槛
+- [ ] 4. 批量基线：batch_init.py --project-root <worktree> --classes <已确认范围> --threshold <门槛>
+- [ ] 5. 循环认领与委派：batch_next.py 认领 pending 类 → 委派子代理 batch-class-writer 跑类内迭代 → 子代理交付报告 → batch_update.py 落账 → 尚有剩余类则回到本项
+- [ ] 6. 类内/批量级升级穿透为 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令
+- [ ] 7. 全部类 done/skipped 后：batch_finish.py --project-root <worktree> 全量终验（出现 recheck 类则回到第 5 项重新委派）
+- [ ] 8. 逐字转述 finish 最终报告（§7）；收尾清理由用户手动执行
+```
+
+- `<workdir>` 默认 `<worktree>/.agent/batch-unit-test-generator/`，各类独立子目录 `classes/<简单类名>/`（§4）。
+- 跑 mvn 的脚本（`batch_init` / `batch_finish`）按 §4 用 `run_in_background: true` 执行，等待脚本完成通知，禁止手动轮询或杀进程。
+- todo 只是进度视图：每一步执行什么、下一条命令是什么，一律以 `NEXT_STEP` 协议块为准（§2），不得用 todo 覆盖协议路由。
+
+## 1. Workflow（标准模式）
 
 ```text
 select_worktree (拷贝复用, 整个批次仅一次)
@@ -44,7 +102,7 @@ batch_finish (一次全量 mvn → 批量终验 → 不达标类重入队 rechec
 ### 脚本调用
 
 ```text
-# 第一步: 工作树确认
+# 第一步(标准模式): 工作树确认
 python scripts/select_worktree.py <当前工作目录> [--list | --choice N | --new [名称] | --clear-history] [--base REF] [--force]
 # resume 的 params 以 <当前工作目录> 开头可逐字执行; --clear-history 先预检(base ref/分支检出/目标路径,
 # 失败则历史保留), 清理会永久删除历史树未提交内容(分支保留); 已有分支 + --base 会强制重置该分支
@@ -257,5 +315,7 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 4. `references/diff-analysis.md`（差异过滤/排序规则细节）；
 5. `references/delegation.md`（子代理委派与失控防护完整契约）；
 6. `agents/batch-class-writer.md`（子代理定义）。
+
+本 `SKILL.md` 中的 Workflow / 门禁 / 委派 / 终验 / 报告均指**标准模式**；快速模式见 §0.1，仅保留 `select_worktree` + `batch_diff`，不使用子代理、不跑 mvn。
 
 与 `SKILL.md` 冲突时以 `SKILL.md` 为准。

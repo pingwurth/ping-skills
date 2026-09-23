@@ -6,9 +6,71 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 
 # Java 单元测试生成
 
-针对单个 Java 类（可选单个方法），以 **JaCoCo Line Coverage** 为主目标，通过脚本 + LLM 迭代生成测试，直到达到门槛。核心原则：每次执行先确认 git 工作树；脚本负责分析、执行、验证和流程决策；LLM **仅在 `write_code` 阶段**编写/修改测试代码；不得修改生产代码；测试必须通过后才能判定目标完成；所有流程由 `NEXT_STEP` 驱动；所有状态保存在 `state.json`，支持断点续跑；多轮迭代必须有预算，禁止无限循环。
+针对单个 Java 类（可选单个方法），以 **JaCoCo Line Coverage** 为主目标，通过脚本 + LLM 迭代生成测试，直到达到门槛。
 
-## 1. Workflow
+核心原则（标准模式）：
+- 每次执行先确认 git 工作树；脚本负责分析、执行、验证和流程决策；
+- LLM **仅在 `write_code` 阶段**编写/修改测试代码；
+- 不得修改生产代码；
+- 测试必须通过后才能判定目标完成；
+- 所有流程由 `NEXT_STEP` 驱动；
+- 所有状态保存在 `state.json`，支持断点续跑；
+- 多轮迭代必须有预算，禁止无限循环。
+
+**第一步：先让用户选择模式（§0），选定后立刻复制对应 todo 清单，再按清单推进。**
+
+## 0. 模式选择（加载后第一件事）
+
+**先问模式，再动手**：用户答复前，不得执行任何脚本、不得读写任何测试文件。直接向用户提问并等待答复 —— 目标类/方法未在请求中给出时一并问清。用户在请求里已指明模式的，按其指定执行，不再重复提问。
+
+| 模式 | 适用 | 执行方式 | 不保证 |
+|---|---|---|---|
+| **快速模式** | 简单类，一次生成即结束 | 纯 LLM 流程（§0.1）：探索源码 → 列计划 → 逐方法补测；**不执行任何脚本、不建 worktree、不写 `state.json`、不跑 mvn** | 覆盖率达标、编译与测试通过 |
+| **标准模式** | 需要可靠覆盖率 | 复用 §1 工作流：脚本 + NEXT_STEP 驱动 + mvn 验证 + 循环自愈，直到覆盖率达标 | — |
+
+用户选定后**立刻**把对应清单**原样复制**为本次任务的 todo 清单（宿主的 todo/任务工具可用就建到工具里，没有就在对话中维护该 Markdown 清单），随后逐项勾选推进：不跳项、不改顺序、不加项。
+
+### 0.1 快速模式 todo 清单
+
+```markdown
+- [ ] 1. 探索目标类/方法的生产源码：确认 FQCN 与源文件、列出全部方法、识别依赖与分支
+- [ ] 2. 探索对应测试类的源码：定位测试文件、已有用例、可复用的 mock/基类/工具方法
+- [ ] 3. 分析哪些方法需要补单元测试，把计划清单写到 /tmp/<skill_name>/<时间戳>/<简单类名>/plan.md
+- [ ] 4. 从 plan.md 取第一个「待补」方法，依据第 1、2 步的探索结果编写该方法的单元测试，每次只专注一个方法
+- [ ] 5. 在 plan.md 勾掉/标注该方法状态，回到第 4 项，逐个方法增量推进，直到所有方法处理完毕
+- [ ] 6. 汇报已补测方法、跳过方法与原因，并声明「快速模式未执行 mvn 验证，覆盖率与编译/测试结果未验证」
+```
+
+- 计划清单路径：`/tmp/<skill_name>/<时间戳>/<简单类名>/plan.md`，其中 `<skill_name>` = `java-unit-test-generator`；目录不存在则创建。清单按方法一行，含方法名、补测理由、优先级、状态（待补 / 已完成 / 跳过）：
+
+```markdown
+# FooService 补测计划
+- [ ] `process(String)` — 待补 — 无现有用例，含 3 个分支
+- [x] `getOrder(Long)` — 已完成 — 覆盖存在 / 不存在两条路径
+- [ ] `init()` — 跳过 — 依赖静态初始化块，不改生产代码无法测
+```
+
+- 快速模式仍受 §3 全局约束与 `references/UnitTestRules.md` 约束，且**无脚本兜底**，必须自行自查：只允许写 `src/test/java/**/<TargetTest>.java`；禁止改 `src/main/java/**`、`pom.xml`、配置；禁止 `try-catch`（异常路径用 `assertThrows`）；每个用例以断言结尾；禁止 `@Disabled`、删除用例、同义反复断言等消红手段。
+- 某方法无法在不改生产代码的前提下测试时，在 `plan.md` 标注 `跳过` + 原因，继续下一个方法，不阻塞整体流程；**不得改生产代码使其可测**。
+- 快速模式不产出 `state.json`、无覆盖率与流程判定，做完即结束，不进入 §6 升级协议、§7 Final Check、§8 Finish 报告。
+
+### 0.2 标准模式 todo 清单
+
+```markdown
+- [ ] 1. 确认 git 工作树：select_worktree.py，拿到 <worktree>
+- [ ] 2. 初始化并跑首轮覆盖率：init_coverage.py --project-root <worktree> --class <FQCN 或源文件> [--method <方法名>] --workdir <workdir>
+- [ ] 3. 制定迭代计划：make_plan.py --workdir <workdir>
+- [ ] 4. 循环：build_prompt.py → LLM write_code → 逐字执行 next_step.on_complete → validate_rules.py → verify_coverage.py（均带 --workdir <workdir>）
+- [ ] 5. 未达标回到第 3 项换方法/重排计划；达标或触发升级条件则退出循环
+- [ ] 6. 升级为 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令
+- [ ] 7. 目标方法全部完成后：init_coverage.py --project-root <worktree> --final-check 全量终验
+- [ ] 8. 逐字转述 finish 报告（§8）；收尾清理由用户手动执行
+```
+
+- `<workdir>` 默认 `<worktree>/.agent/java-unit-test-generator`；多目标类用 `<worktree>/.agent/java-unit-test-generator/<简单类名>`（§3）。
+- todo 只是进度视图：每一步执行什么、下一条命令是什么，一律以 `NEXT_STEP` 协议块为准（§2），不得用 todo 覆盖协议路由。
+
+## 1. Workflow（标准模式）
 
 ```text
 select_worktree → init_coverage → make_plan → build_prompt → LLM write_code → validate_rules → verify_coverage
@@ -58,7 +120,7 @@ Finish 报告由脚本生成，LLM 只负责转述，不负责拼装。收到 `n
 
 ## 9. 权威文件
 
-本 SKILL.md 只定义 Workflow 和全局约束。详细规则分别以以下文件为准：
+本 SKILL.md 只定义模式选择与两种模式的 todo 清单、Workflow 和全局约束（未特别标注时，Workflow / 迭代 / 升级 / Final Check / Finish 均指标准模式）。详细规则分别以以下文件为准：
 
 ```text
 protocol/next-step.schema.json
