@@ -37,8 +37,8 @@ from jaut import config  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.lockutil import batch_lock  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import BatchState, Decision, Route  # noqa: E402
-from jaut.state import default_workdir  # noqa: E402
+from jaut.models import BatchClassEntry, BatchState, Decision, Route  # noqa: E402
+from jaut.state import StateStore, default_workdir  # noqa: E402
 
 SCRIPT_NAME = "batch_next"
 
@@ -109,9 +109,14 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             entry.attempts += 1
             _save_batch_state(batch_state_path, batch_state)
 
-        # 输出委派要件
-        remaining_budget = config.batch_class_round_budget() - entry.rounds_used
+        # 输出委派要件(剩余预算按类的有效预算算: 大类探索模式翻倍)
+        class_budget, exploring = _effective_class_budget(entry)
+        remaining_budget = class_budget - entry.rounds_used
         scripts_dir = Path(__file__).resolve().parent
+
+        # 提示信号取实际驱动预算的 exploration_mode(大类判定可为方法数或 diff 行数,
+        # 与方法组拆分条件并不等价)
+        exploration_hint = "(探索模式预算翻倍)" if exploring else ""
 
         # 构建 make_plan 命令(大类附带 --method-group)
         make_plan_cmd = (
@@ -139,7 +144,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             f"  - scripts 目录: {scripts_dir}\n"
             f"  - 门槛: {batch_state.threshold}%\n"
             f"  - 类级剩余预算: {remaining_budget} 轮"
-            f"(已用 {entry.rounds_used}/{config.batch_class_round_budget()})\n"
+            f"(已用 {entry.rounds_used}/{class_budget}{exploration_hint})\n"
             f"  - 认领序号: {entry.attempts}\n"
             f"{group_info}"
             f"\n"
@@ -157,6 +162,25 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             route=Route.ASK_USER, reason="委派子代理执行类内迭代",
             question=delegation)
         return decision, EmitContext(workdir=batch_workdir)
+
+
+def _effective_class_budget(entry: BatchClassEntry) -> tuple[int, bool]:
+    """类的有效类级预算与探索模式标记(读类 state.json)。
+
+    预算口径见 State.class_round_budget, 且随迭代变化(--unskip 追加窗口、轮次推进),
+    因此每次委派读一次 state.json 取实时值, 不缓存到 BatchClassEntry 上。
+
+    Returns:
+        (有效预算, 是否探索模式)。读不到 state.json 时退回基础预算与非探索模式;
+        类未开始迭代时 state 可能尚不存在。
+    """
+    try:
+        state = StateStore(Path(entry.workdir)).load()
+    except Exception:  # noqa: BLE001 — 显示用, 任何读取异常都退回基础预算
+        state = None
+    if state is None:
+        return config.batch_class_round_budget(), False
+    return state.class_round_budget, bool(state.exploration_mode)
 
 
 def _save_batch_state(path: Path, batch_state: BatchState) -> None:

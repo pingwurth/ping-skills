@@ -80,3 +80,38 @@ def test_render_skipped_method_annotated():
                        status=MethodStatus.SKIPPED, initial_rate=50.0)
     text = report.render_finish_report(_state(methods=[m]))
     assert "other()V: 50.00% -> 50.00% (未纳入本次目标)" in text
+
+
+def test_render_auto_skipped_method_shows_reason():
+    """自动跳过的方法在报告中带出 skip_reason, 便于定位为何未达标。"""
+    m = MethodCoverage(key=MethodKey("other", "()V"), covered=5, missed=5,
+                       status=MethodStatus.SKIPPED, initial_rate=50.0,
+                       skip_reason="单方法迭代已达上限 8 轮仍未达标(当前 50.0%)")
+    text = report.render_finish_report(_state(methods=[m]))
+    assert "other()V: 50.00% -> 50.00% (跳过: 单方法迭代已达上限 8 轮仍未达标" in text
+
+
+def test_render_unmet_status_and_note():
+    """未达标收尾: 状态降级为未达标并附说明行。"""
+    text = report.render_finish_report(_state(), met=False, note="2 个方法被跳过")
+    assert "最终状态: 未达标" in text
+    assert "说明: 2 个方法被跳过" in text
+    assert "最终状态: PASS" not in text
+
+
+def test_render_unmet_without_note_omits_note_line():
+    text = report.render_finish_report(_state(), met=False)
+    assert "最终状态: 未达标" in text
+    assert "说明: " not in text
+
+
+def test_render_unverified_status_and_note():
+    """环境不可信收尾: 状态为未复核(测试结果不可信), 不混同 PASS/未达标。"""
+    note = ("测试结果不可信(surefire 报告缺失/无法解析或目录清理失败), "
+            "未能确认达标; 环境修复后可重新终验复核")
+    text = report.render_finish_report(_state(), met=False, note=note,
+                                       unverified=True)
+    assert "最终状态: 未复核(测试结果不可信)" in text
+    assert f"说明: {note}" in text
+    assert "最终状态: PASS" not in text
+    assert "最终状态: 未达标" not in text

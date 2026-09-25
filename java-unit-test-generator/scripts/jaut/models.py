@@ -135,6 +135,8 @@ class MethodCoverage:
     round_test_results: list[TestOutcome] = field(default_factory=list)
     # init 基线快照(finish 报告的 before 值); 旧 state.json 无此字段, 报告降级显示"未记录"
     initial_rate: Optional[float] = None
+    # 跳过原因(预算耗尽/规范违规不收敛等自动跳过时写入); 手动跳过或旧 state.json 为 None
+    skip_reason: Optional[str] = None
 
     @property
     def rate(self) -> float:
@@ -164,6 +166,8 @@ class MethodCoverage:
         }
         if self.initial_rate is not None:
             data["initial_rate"] = round(self.initial_rate, 2)
+        if self.skip_reason is not None:
+            data["skip_reason"] = self.skip_reason
         if self.round_test_results:
             data["round_test_results"] = [r.to_dict() for r in self.round_test_results]
         return data
@@ -179,6 +183,7 @@ class MethodCoverage:
             round_rates=list(data.get("round_rates", []) or []),
             round_test_results=[TestOutcome.from_dict(r) for r in data.get("round_test_results", []) or []],
             initial_rate=float(initial) if initial is not None else None,
+            skip_reason=data.get("skip_reason"),
         )
 
 
@@ -270,6 +275,16 @@ class TestResult:
     def fail_lines(self) -> list[str]:
         return [fc.summary_line() for fc in self.failed_cases]
 
+    def failures_in_class(self, test_simple: Optional[str]) -> list[FailedCase]:
+        """失败用例中属于该测试类的部分(按测试类简名匹配; 简名未知时返回空)。
+
+        失败用例归属判定的单一实现, 供终验分流(decisions)与批量按类终态化共用。
+        """
+        if not test_simple:
+            return []
+        return [fc for fc in self.failed_cases
+                if fc.class_name.rsplit(".", 1)[-1] == test_simple]
+
     def failure_count_for_trajectory(self, uncleaned_dirs: bool = False) -> int:
         """计算本轮失败计数, 供 decisions.test_failure_streak 判定连续失败。
 
@@ -345,6 +360,10 @@ class Decision:
     # 需由入口脚本落地到 state 的动作(决策本身不修改状态):
     mark_done: bool = False          # 当前方法达标, 标记 status=done
     reset_trajectory: bool = False   # 升级后复位轨迹, 用户继续时获得全新窗口
+    # 预算耗尽/不收敛时不再 ask_user, 改由入口脚本自动跳过并记录原因:
+    auto_skip_method: bool = False   # 跳过当前方法(status=skipped + skip_reason)
+    auto_skip_reason: str = ""       # 跳过原因(写入 MethodCoverage.skip_reason)
+    skip_all_pending: bool = False   # 跳过所有 pending 方法(全局预算耗尽)
 
     @property
     def next_type(self) -> str:

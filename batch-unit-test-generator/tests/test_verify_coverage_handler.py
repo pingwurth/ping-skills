@@ -10,7 +10,8 @@ import pytest
 
 from jaut import config
 from jaut.cli import StepError
-from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, Route, State, TestResult
+from jaut.models import (Decision, ClassCoverage, MethodCoverage, MethodKey,
+                         MethodStatus, Route, State, TestResult)
 from scripts.verify_coverage import handler
 
 
@@ -19,10 +20,11 @@ def _make_args(workdir: str) -> argparse.Namespace:
 
 
 def _make_state(tmp_path, **overrides) -> State:
+    """真实 State(非 MagicMock): 类级预算等派生属性由模型自身计算, 便于断言。"""
     defaults = dict(
         project_root=str(tmp_path),
         target_class="com.example.MyService",
-        current_method=MagicMock(name="doSomething"),
+        current_method=MethodKey("doSomething", "()V"),
         module=".",
         mvn_log=str(tmp_path / "mvn.log"),
         jacoco_version=config.DEFAULT_JACOCO_VERSION,
@@ -31,10 +33,14 @@ def _make_state(tmp_path, **overrides) -> State:
         iteration=1,
         global_iteration=5,
         threshold=80.0,
-        class_coverage=MagicMock(rate=50.0),
+        class_coverage=ClassCoverage.of(50, 50),
+        batch_mode=False,
+        class_round_used=0,
+        class_round_bonus=0,
+        exploration_mode=False,
     )
     defaults.update(overrides)
-    return MagicMock(spec=State, **defaults)
+    return State(**defaults)
 
 
 def _locked_mock():
@@ -141,6 +147,8 @@ def test_handler_marks_done_when_decision_says_so(tmp_path):
         mock_decision = MagicMock()
         mock_decision.mark_done = True
         mock_decision.reset_trajectory = False
+        mock_decision.auto_skip_method = False
+        mock_decision.skip_all_pending = False
         mock_decision.route = Route.MAKE_PLAN
         mock_decide.return_value = mock_decision
 
@@ -173,7 +181,9 @@ def test_handler_saves_state_after_decision(tmp_path):
         MockStore.return_value.load.return_value = state
         mock_cov.return_value = (MagicMock(ok=True), None)
         mock_record.return_value = (method_entry, 50.0)
-        mock_decide.return_value = MagicMock(mark_done=False, reset_trajectory=False, route=Route.BUILD_PROMPT)
+        mock_decide.return_value = MagicMock(mark_done=False, reset_trajectory=False,
+                                             auto_skip_method=False, skip_all_pending=False,
+                                             route=Route.BUILD_PROMPT)
 
         handler(_make_args(str(tmp_path)))
 
@@ -362,3 +372,114 @@ def test_handler_fallback_success(tmp_path):
     assert decision.route == Route.MAKE_PLAN
     # 确认使用了降级路径(通过 log_path 非 None 可知)
     mock_cov.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# 类级预算耗尽 / 自动跳过(不再 ask_user)
+# --------------------------------------------------------------------------- #
+def test_handler_class_budget_exhausted_skips_all_pending_without_mvn(tmp_path):
+    """类级预算耗尽: 跳过全部 pending 并回 make_plan, 且不执行 mvn。"""
+    m1 = MethodCoverage(key=MethodKey("foo", "()V"), covered=5, missed=5)
+    m2 = MethodCoverage(key=MethodKey("bar", "()V"), covered=3, missed=7)
+    state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        current_method=m1.key, module=".", threshold=80.0,
+        mvn_log=str(tmp_path / "mvn.log"),
+        test_class_file=str(tmp_path / "MyServiceTest.java"),
+        test_class_simple="MyServiceTest",
+        batch_mode=True, class_round_used=config.batch_class_round_budget(),
+        methods=[m1, m2],
+    )
+
+    with patch("scripts.verify_coverage.StateStore") as MockStore, \
+         patch("scripts.verify_coverage.setup_logger"), \
+         patch("scripts.verify_coverage.maven.run_single_cov_with_fallback") as mock_cov:
+        MockStore.return_value.locked.return_value = _locked_mock()
+        MockStore.return_value.load.return_value = state
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    mock_cov.assert_not_called()          # 预算已耗尽, 不浪费一次 mvn
+    assert decision.route == Route.MAKE_PLAN
+    # exit_code 统一为 EXIT_CONTINUE: state 已就地落地, 状态仍待推进
+    assert decision.exit_code == config.EXIT_CONTINUE
+    assert decision.auto_skip_method is True
+    assert decision.skip_all_pending is True
+    for m in state.methods:
+        assert m.status == MethodStatus.SKIPPED
+        assert "类级预算耗尽" in m.skip_reason
+
+
+def test_handler_exploration_mode_doubles_class_budget(tmp_path):
+    """探索模式(大类)预算翻倍: 基础预算用尽时仍继续迭代, 不跳过。"""
+    entry = MagicMock(spec=MethodCoverage)
+    state = _make_state(tmp_path, batch_mode=True, exploration_mode=True,
+                        class_round_used=config.batch_class_round_budget())
+    entry.key = state.current_method
+    entry.rate = 95.0
+    entry.status = MethodStatus.DONE
+    mock_test = TestResult(tests=5, failures=0, errors=0, skipped=0, report_found=True)
+
+    with patch("scripts.verify_coverage.StateStore") as MockStore, \
+         patch("scripts.verify_coverage.setup_logger"), \
+         patch("scripts.verify_coverage.maven.clean_jacoco_dirs"), \
+         patch("scripts.verify_coverage.maven.clean_surefire_dirs", return_value=[]), \
+         patch("scripts.verify_coverage.maven.run_single_cov_with_fallback") as mock_cov, \
+         patch("scripts.verify_coverage.surefire.parse_surefire_reports", return_value=mock_test), \
+         patch("scripts.verify_coverage.jacoco.report_paths", return_value=(Path("x.xml"), Path("x.csv"))), \
+         patch("scripts.verify_coverage.Path.is_file", return_value=True), \
+         patch("scripts.verify_coverage._record_observation", return_value=(entry, 80.0)), \
+         patch("scripts.verify_coverage.decisions.decide_after_verify") as mock_decide:
+        MockStore.return_value.locked.return_value = _locked_mock()
+        MockStore.return_value.load.return_value = state
+        mock_cov.return_value = (MagicMock(ok=True), None)
+        mock_decide.return_value = Decision(
+            status="success", exit_code=config.EXIT_OK, summary="make_plan",
+            route=Route.MAKE_PLAN, reason="方法完成")
+
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    mock_cov.assert_called_once()         # 预算翻倍后仍在预算内, 正常执行 mvn
+    assert decision.route == Route.MAKE_PLAN
+
+
+def test_handler_auto_skip_marks_method_skipped_with_reason(tmp_path):
+    """auto_skip_method 决策: 当前方法改 skipped 并写入原因, 计数清零。"""
+    m1 = MethodCoverage(key=MethodKey("foo", "()V"), covered=5, missed=5)
+    m2 = MethodCoverage(key=MethodKey("bar", "()V"), covered=3, missed=7)
+    state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        current_method=m1.key, module=".", threshold=80.0,
+        mvn_log=str(tmp_path / "mvn.log"),
+        test_class_file=str(tmp_path / "MyServiceTest.java"),
+        test_class_simple="MyServiceTest",
+        batch_mode=True, methods=[m1, m2],
+    )
+    state.validate_fail_streak = 3
+    mock_test = TestResult(tests=1, failures=0, errors=0, report_found=True)
+    decision_in = Decision(status="success", exit_code=config.EXIT_CONTINUE,
+                           summary="预算耗尽, 自动跳过", route=Route.MAKE_PLAN,
+                           reason="预算耗尽, 自动跳过",
+                           auto_skip_method=True,
+                           auto_skip_reason="单方法迭代已达上限 8 轮仍未达标(当前 50.0%)")
+
+    with patch("scripts.verify_coverage.StateStore") as MockStore, \
+         patch("scripts.verify_coverage.setup_logger"), \
+         patch("scripts.verify_coverage.maven.clean_jacoco_dirs"), \
+         patch("scripts.verify_coverage.maven.clean_surefire_dirs", return_value=[]), \
+         patch("scripts.verify_coverage.maven.run_single_cov_with_fallback") as mock_cov, \
+         patch("scripts.verify_coverage.surefire.parse_surefire_reports", return_value=mock_test), \
+         patch("scripts.verify_coverage.jacoco.report_paths", return_value=(Path("x.xml"), Path("x.csv"))), \
+         patch("scripts.verify_coverage.Path.is_file", return_value=True), \
+         patch("scripts.verify_coverage._record_observation", return_value=(m1, 50.0)), \
+         patch("scripts.verify_coverage.decisions.decide_after_verify", return_value=decision_in):
+        MockStore.return_value.locked.return_value = _locked_mock()
+        MockStore.return_value.load.return_value = state
+        mock_cov.return_value = (MagicMock(ok=True), None)
+
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    assert decision.route == Route.MAKE_PLAN
+    assert state.methods[0].status == MethodStatus.SKIPPED
+    assert state.methods[0].skip_reason == "单方法迭代已达上限 8 轮仍未达标(当前 50.0%)"
+    assert state.methods[1].status == MethodStatus.PENDING
+    assert state.validate_fail_streak == 0

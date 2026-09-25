@@ -48,7 +48,7 @@ Scripts drive the workflow; the LLM only writes test code at designated steps an
 
 ### Shared `jaut` engine — duplicated and diverged
 
-Both unit-test skills carry a copy of the engine at `scripts/jaut/` (cli, state machine, maven/surefire/jacoco integration, worktree, protocol, report…), plus near-identical test suites. **The two copies have diverged** — batch adds `lockutil.py`, batch_mode auto-continue/escalation logic, and its own variants of `config/decisions/maven/proc/...`; `references/UnitTestRules.md` also differs. When changing shared logic, diff both copies and run both suites; do not assume a fix applies to one side only.
+Both unit-test skills carry a copy of the engine at `scripts/jaut/` (cli, state machine, maven/surefire/jacoco integration, worktree, protocol, report…), plus near-identical test suites. **The two copies have diverged** — batch adds `lockutil.py`, the batch-mode layer (class-level budget `class_round_budget`/`class_round_bonus`/`class_budget_exhausted` on `State`, `skip_all_pending`, per-class `unmet` terminal state, method-group splitting), and its own variants of `config/decisions/maven/proc/...`; `references/UnitTestRules.md` also differs. Budget exhaustion no longer asks the user in either copy: it auto-skips the method/class and records `skip_reason` (`make_plan.py --unskip` is the only way to revive a skipped method). When changing shared logic, diff both copies and run both suites; do not assume a fix applies to one side only.
 
 ### sensitive-log-review
 

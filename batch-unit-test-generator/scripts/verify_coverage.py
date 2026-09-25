@@ -11,20 +11,21 @@
 
 职责边界:
     构建/清理/执行覆盖率采集 -> maven.run_single_cov_with_fallback; 覆盖率解析 -> jacoco; 测试解析 -> surefire;
-    双条件判定/预算/升级 -> decisions.decide_after_verify(纯函数);
-    本文件负责"记录观测到 state"与"把决策回传的 mark_done/reset_trajectory 落地后持久化"。
+    双条件判定/预算/跳过 -> decisions.decide_after_verify(纯函数);
+    本文件负责"记录观测到 state"与"把决策回传的 mark_done/reset_trajectory/auto_skip_* 落地后持久化"。
 
-判定与升级(SKILL.md §5/§6, 详见 decisions):
+判定与预算(SKILL.md §5/§6, 详见 decisions):
     覆盖率达标且测试全绿 -> done -> make_plan; 单方法 >=8 轮 / 全局 >=30 轮 /
-    连续 3 轮失败 / 连续 3 轮无提升 -> ask_user; 测试不绿或覆盖率未达标 -> build_prompt。
+    连续 3 轮失败 / 连续 3 轮无提升 / 类级预算(默认 30 轮, 探索模式翻倍)耗尽
+    -> 自动跳过并写入 skip_reason -> make_plan; 测试不绿或覆盖率未达标 -> build_prompt。
 
 输入:
     --workdir 或 --project-root 定位 workdir; 读取 <workdir>/state.json,
     必须已含 current_method(否则状态错误 exit 3)。
 
 输出(NEXT_STEP):
-    达标 -> run_script make_plan.py(exit 0); 未达标 -> run_script build_prompt.py(exit 1);
-    升级 -> ask_user(exit 1); mvn/报告/环境失败 -> ask_user(exit 2, failed)。
+    达标/跳过 -> run_script make_plan.py(exit 0); 未达标 -> run_script build_prompt.py(exit 1);
+    mvn/报告/环境失败 -> ask_user(exit 2, failed)。
     artifacts 附 mvn.log 与 surefire-reports; metrics 附 before/after/轮次/测试计数。
 
 关键约束:
@@ -64,13 +65,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         3. 解析 surefire(fail-closed 绿灯)与 jacoco 覆盖率;
         4. _record_observation 把本轮结果写入 state(轮次 +1);
         5. decisions.decide_after_verify 产出决策;
-        6. 落地 mark_done / reset_trajectory 后原子保存 state。
+        6. 落地 mark_done / reset_trajectory / auto_skip_* 后原子保存 state。
 
     Args:
         args: 已解析的命令行参数。
 
     Returns:
-        (Decision, EmitContext): 决策(make_plan / build_prompt / ask_user)与路由上下文。
+        (Decision, EmitContext): 决策(make_plan / build_prompt)与路由上下文。
 
     Raises:
         StepError: workdir/state/current_method 缺失(exit 3), 或 mvn/报告/环境失败(exit 2)。
@@ -89,6 +90,26 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         module = state.module or "."
         mvn_log = state.mvn_log or str(workdir / config.MVN_LOG_FILENAME)
         test_simple = state.test_class_simple or decisions.test_simple_name(state.target_class)
+
+        # 类级预算预检查(批量模式): 耗尽则跳过全部未达标方法, 不再执行无谓的 mvn。
+        # state 已就地落地, auto_skip_* 仅作决策语义标记(与 decide_after_verify
+        # 的 _auto_skip 同形), 路由 MAKE_PLAN 继续类内队列。
+        if state.class_budget_exhausted:
+            budget = state.class_round_budget
+            reason = state.class_budget_skip_reason
+            skipped = state.skip_pending_methods(reason)   # 与 batch_finish 共用同一次扫描
+            store.save(state)
+            logger.info(f"{reason}; 跳过 {len(skipped)} 个未达标方法")
+            return Decision(
+                status="success", exit_code=config.EXIT_CONTINUE,
+                summary=f"类级预算耗尽({budget} 轮), 跳过全部未达标方法",
+                route=Route.MAKE_PLAN, reason="类级预算耗尽, 自动跳过全部未达标方法",
+                auto_skip_method=True, auto_skip_reason=reason,
+                skip_all_pending=True,
+                metrics={"class_round_used": state.class_round_used,
+                         "class_round_budget": budget,
+                         "skipped_methods": len(skipped)}), \
+                EmitContext(workdir=workdir, state=state)
 
         # 清理旧报告 -> fast-single-cov.sh(失败降级 mvn test jacoco:report)
         # 依赖模块已在 init_coverage 阶段预装, 传 no_am=True 跳过重编译
@@ -143,7 +164,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                              "compile_errors": len(compile_errors)})
                 return decision, EmitContext(workdir=workdir, state=state)
             else:
-                # 依赖解析失败/环境缺失 -> ask_user(exit 2)
+                # 依赖解析失败/环境缺失 -> ask_user(exit 2, 环境问题仍需人工介入)
                 raise StepError.exec_error("mvn 执行失败(依赖解析或环境问题)",
                                            question=f"mvn 失败, 详见 {mvn_log}",
                                            artifacts=[{"path": mvn_log, "kind": "mvn_log"}])
@@ -179,28 +200,31 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             global_round_bonus=state.global_round_bonus,
             mvn_log=mvn_log,
             surefire_report_dir=str(surefire.report_paths(project_root, module)),
-            test_simple=test_simple, test_class_file=state.test_class_file,
-            batch_mode=state.batch_mode, class_round_used=state.class_round_used,
-            exploration_mode=state.exploration_mode)
+            test_simple=test_simple, test_class_file=state.test_class_file)
         decision = decisions.decide_after_verify(ctx)
 
         # 决策落地到 state
         if decision.mark_done:
             entry.status = MethodStatus.DONE
+        elif decision.auto_skip_method:
+            # 预算耗尽/不收敛: 自动跳过并记录原因(不再 ask_user 穿透)
+            entry.status = MethodStatus.SKIPPED
+            entry.skip_reason = decision.auto_skip_reason
+            state.validate_fail_streak = 0
+            logger.info(f"自动跳过方法 {entry.key.label()}: {decision.auto_skip_reason}")
         if decision.reset_trajectory:
             entry.reset_trajectory()
-        # 批量模式自动继续: 预算内升级点自动追加预算窗口并复位轨迹
-        if decision.auto_grant:
-            state.method_round_bonus += config.RESUME_GRANT_ROUNDS
-            state.global_round_bonus += config.RESUME_GRANT_ROUNDS
-            entry.reset_trajectory()
-            state.validate_fail_streak = 0
-            logger.info(f"批量模式自动继续: method_round_bonus={state.method_round_bonus}, "
-                        f"class_round_used={state.class_round_used}/{config.batch_class_round_budget()}")
+        if decision.skip_all_pending:
+            for m in state.methods:
+                if m.status == MethodStatus.PENDING:
+                    m.status = MethodStatus.SKIPPED
+                    m.skip_reason = decision.auto_skip_reason
+            logger.info(f"跳过全部未达标方法: {decision.auto_skip_reason}")
         store.save(state)
         logger.info(f"方法 {entry.key.label()}: {before_rate:.1f}% -> {entry.rate:.1f}% "
                     f"(轮次 {state.iteration}/{config.METHOD_ROUND_BUDGET + state.method_round_bonus}, "
                     f"全局 {state.global_iteration}/{config.GLOBAL_ROUND_BUDGET + state.global_round_bonus}, "
+                    f"类级 {state.class_round_used}/{state.class_round_budget}, "
                     f"门槛 {state.threshold}%, 测试绿={tests_green}, 路由={decision.route.value})")
     return decision, EmitContext(workdir=workdir, state=state)
 

@@ -68,9 +68,9 @@ ASSERTION_FAILURE_TYPE_PREFIXES = (
 # --------------------------------------------------------------------------- #
 # 迭代预算与升级(SKILL.md §6)
 # --------------------------------------------------------------------------- #
-NO_IMPROVEMENT_ROUNDS = 3        # 连续 N 轮覆盖率无提升 -> ask_user
-NO_IMPROVEMENT_NEAR_THRESHOLD_FACTOR = 0.9  # 覆盖率接近门槛(>=threshold*此因子)时抑制无提升升级
-TEST_FAIL_STREAK_ROUNDS = 3      # 连续 N 轮测试失败     -> ask_user
+NO_IMPROVEMENT_ROUNDS = 3        # 连续 N 轮覆盖率无提升 -> 自动跳过当前方法
+NO_IMPROVEMENT_NEAR_THRESHOLD_FACTOR = 0.9  # 覆盖率接近门槛(>=threshold*此因子)时抑制无提升跳过
+TEST_FAIL_STREAK_ROUNDS = 3      # 连续 N 轮测试失败     -> 自动跳过当前方法
 
 _METHOD_ROUND_BUDGET_ENV = "JAVA_UT_METHOD_ROUND_BUDGET"
 _DEFAULT_METHOD_ROUND_BUDGET = 8
@@ -94,9 +94,8 @@ def global_round_budget() -> int:
         return int(raw)
     except (TypeError, ValueError):
         return _DEFAULT_GLOBAL_ROUND_BUDGET
-FINAL_CHECK_FAIL_STREAK_LIMIT = 2  # 终验连续 N 轮不绿且无待修复方法 -> ask_user
-RESUME_GRANT_ROUNDS = 3          # ask_user "继续" 时追加的预算轮数(make_plan --grant-rounds)
-VALIDATE_FAIL_STREAK_LIMIT = 5   # validate_rules 连续 N 轮违规未通过 -> ask_user
+FINAL_CHECK_FAIL_STREAK_LIMIT = 2  # 终验连续 N 轮不绿且无待修复方法 -> 未达标收尾
+VALIDATE_FAIL_STREAK_LIMIT = 5   # validate_rules 连续 N 轮违规未通过 -> 自动跳过当前方法
 
 # --------------------------------------------------------------------------- #
 # Maven 执行(SKILL.md §3)

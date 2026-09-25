@@ -75,17 +75,26 @@ class TestWindowsProcessTreeKill:
         mock_proc.kill.assert_called_once()
         mock_proc.wait.assert_called_once()
 
+    @patch("jaut.proc.module_logger")
     @patch("subprocess.Popen")
-    def test_run_streamed_sets_creationflags_on_windows(self, mock_popen):
-        """验证 Windows 下 _run_streamed 设置 CREATE_NEW_PROCESS_GROUP。"""
+    def test_run_streamed_sets_creationflags_on_windows(self, mock_popen, mock_module_logger):
+        """验证 Windows 下 _run_streamed 设置 CREATE_NEW_PROCESS_GROUP。
+
+        模拟 os.name=nt 会连带影响两处平台敏感代码: subprocess 的
+        CREATE_NEW_PROCESS_GROUP 常量(POSIX 不存在, 以哨兵值 create=True 注入;
+        哨兵值还证明生产代码引用的是常量而非硬编码)与 pathlib.Path(POSIX 上
+        禁止实例化 WindowsPath, 故屏蔽日志初始化)。真 Windows 上行为不变。
+        """
         # 准备模拟对象
         mock_proc = MagicMock()
         mock_popen.return_value = mock_proc
         mock_proc.stdout = iter([])  # 空输出
         mock_proc.wait.return_value = 0
 
-        # 模拟 Windows 环境
-        with patch("os.name", "nt"):
+        sentinel = 0xABCD  # 哨兵值: 故意不用真实常量值
+        # 模拟 Windows 环境(常量在 POSIX 不存在, create=True 注入)
+        with patch("os.name", "nt"), \
+             patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", sentinel, create=True):
             # 调用 run_command (capture=False)
             result = proc.run_command(
                 ["echo", "test"],
@@ -95,14 +104,19 @@ class TestWindowsProcessTreeKill:
                 log_file="test.log",
             )
 
-        # 验证 Popen 被调用时包含 creationflags
+        # 验证 Popen 被调用时包含 creationflags(取自 subprocess 常量)
         call_kwargs = mock_popen.call_args[1]
         assert "creationflags" in call_kwargs
-        assert call_kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        assert call_kwargs["creationflags"] == sentinel
 
+    @patch("jaut.proc.module_logger")
     @patch("subprocess.Popen")
-    def test_run_streamed_sets_start_new_session_on_posix(self, mock_popen):
-        """验证 POSIX 下 _run_streamed 设置 start_new_session。"""
+    def test_run_streamed_sets_start_new_session_on_posix(self, mock_popen, mock_module_logger):
+        """验证 POSIX 下 _run_streamed 设置 start_new_session。
+
+        在 Windows 上模拟 os.name=posix 时 pathlib.Path 会切到 PosixPath
+        (Windows 上禁止实例化), 故屏蔽日志初始化, 保证用例双向可跑。
+        """
         # 准备模拟对象
         mock_proc = MagicMock()
         mock_popen.return_value = mock_proc

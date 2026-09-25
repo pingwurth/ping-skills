@@ -11,13 +11,15 @@ import pytest
 
 from jaut import config
 from jaut.cli import StepError
-from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, Route, State, TestOutcome
+from jaut.models import (Decision, ClassCoverage, MethodCoverage, MethodKey,
+                        MethodStatus, Route, State, TestOutcome)
 from scripts.make_plan import handler
 
 
 def _make_args(workdir: str, **over) -> argparse.Namespace:
     args = argparse.Namespace(workdir=workdir, project_root=None,
-                              skip_current=False, set_threshold=None, grant_rounds=None)
+                              skip_current=False, set_threshold=None, grant_rounds=None,
+                              unskip=None)
     for key, value in over.items():
         setattr(args, key, value)
     return args
@@ -117,6 +119,87 @@ def test_handler_queue_empty_triggers_final_check(tmp_path):
     assert decision.route == Route.FINAL_CHECK
 
 
+def test_handler_queue_empty_skipped_methods_still_triggers_final_check(tmp_path):
+    """队列空且方法被跳过: 仍进全量终验(不预判未达标), 是否达标由终验实测判定。"""
+    method = _make_method("method1", covered=5, missed=5)
+    method.status = MethodStatus.SKIPPED
+    method.skip_reason = "单方法迭代已达上限 8 轮仍未达标(当前 50.0%)"
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        threshold=80.0,
+        class_coverage=ClassCoverage.of(5, 5),
+        methods=[method],
+        current_method=method.key,
+        plan={"target_class": "com.example.MyService", "methods": []},
+    )
+
+    with patch("scripts.make_plan.StateStore") as MockStore, \
+         patch("scripts.make_plan.setup_logger"):
+        MockStore.return_value.locked.return_value.__enter__ = MagicMock(return_value=None)
+        MockStore.return_value.locked.return_value.__exit__ = MagicMock(return_value=False)
+        MockStore.return_value.load.return_value = state
+        MockStore.return_value.coverage_path.return_value = tmp_path / "coverage.json"
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    assert decision.route == Route.FINAL_CHECK
+    assert decision.report is None  # 收尾报告改由 init_coverage 终验实测后渲染
+
+
+def test_handler_queue_empty_method_mode_still_triggers_final_check(tmp_path):
+    """--method 模式队列空: 类级未达标不构成收尾依据, 仍进入全量终验(SKILL §7)。"""
+    target = _make_method("bar", covered=10, missed=0)
+    target.status = MethodStatus.DONE
+    out_of_scope = _make_method("other1", covered=0, missed=10)
+    out_of_scope.status = MethodStatus.SKIPPED  # --method 未纳入, skip_reason 为空
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        target_method="bar",
+        threshold=80.0,
+        class_coverage=ClassCoverage.of(12, 88),  # 类级远未达门槛
+        methods=[target, out_of_scope],
+        current_method=target.key,
+        plan={"target_class": "com.example.MyService", "methods": []},
+    )
+
+    with patch("scripts.make_plan.StateStore") as MockStore, \
+         patch("scripts.make_plan.setup_logger"):
+        MockStore.return_value.locked.return_value.__enter__ = MagicMock(return_value=None)
+        MockStore.return_value.locked.return_value.__exit__ = MagicMock(return_value=False)
+        MockStore.return_value.load.return_value = state
+        MockStore.return_value.coverage_path.return_value = tmp_path / "coverage.json"
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    assert decision.route == Route.FINAL_CHECK
+    assert decision.report is None  # 不渲染未达标收尾报告
+
+
+def test_handler_queue_empty_met_still_triggers_final_check(tmp_path):
+    """队列空且类级达标: 仍按原流程进入全量终验。"""
+    method = _make_method("method1", covered=10, missed=0)
+    method.status = MethodStatus.DONE
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        threshold=80.0,
+        class_coverage=ClassCoverage.of(100, 0),
+        methods=[method],
+        current_method=method.key,
+        plan={"target_class": "com.example.MyService", "methods": []},
+    )
+
+    with patch("scripts.make_plan.StateStore") as MockStore, \
+         patch("scripts.make_plan.setup_logger"):
+        MockStore.return_value.locked.return_value.__enter__ = MagicMock(return_value=None)
+        MockStore.return_value.locked.return_value.__exit__ = MagicMock(return_value=False)
+        MockStore.return_value.load.return_value = state
+        MockStore.return_value.coverage_path.return_value = tmp_path / "coverage.json"
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    assert decision.route == Route.FINAL_CHECK
+
+
 def test_handler_queue_empty_after_final_check_finishes(tmp_path):
     """队列空且已终验: finish。"""
     method = _make_method("method1", covered=10, missed=0)
@@ -154,6 +237,8 @@ def test_handler_finish_decision_carries_rendered_report(tmp_path):
     state = State(
         project_root=str(tmp_path),
         target_class="com.example.MyService",
+        threshold=80.0,
+        class_coverage=ClassCoverage.of(85, 15),  # 终验结论与当前口径一致
         methods=[method],
         current_method=method.key,
         final_checked=True,
@@ -178,6 +263,69 @@ def test_handler_finish_decision_carries_rendered_report(tmp_path):
     assert "worktree20260908" in decision.report
 
 
+def test_handler_stale_final_check_reruns_final_check(tmp_path):
+    """终验结论过期(覆盖率/门槛口径漂移): 按未终验处理, 重走 final-check 实测。
+
+    根因: final_checked 由上一轮 PASS 持久化, 调门槛/终验后覆盖率回落时队列仍空,
+    直接按默认 met=True 渲染收尾报告会输出与实测相反的"最终状态: PASS"。
+    """
+    method = _make_method("method1", covered=10, missed=0)
+    method.status = MethodStatus.DONE
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        threshold=90.0,                             # 门槛上调后终验结论过期
+        class_coverage=ClassCoverage.of(85, 15),    # 85% < 90%
+        methods=[method],
+        current_method=method.key,
+        final_checked=True,                         # 上一轮 80% 门槛时终验通过
+        plan={"target_class": "com.example.MyService", "methods": []},
+    )
+
+    with patch("scripts.make_plan.StateStore") as MockStore, \
+         patch("scripts.make_plan.setup_logger"):
+        MockStore.return_value.locked.return_value.__enter__ = MagicMock(return_value=None)
+        MockStore.return_value.locked.return_value.__exit__ = MagicMock(return_value=False)
+        MockStore.return_value.load.return_value = state
+        MockStore.return_value.coverage_path.return_value = tmp_path / "coverage.json"
+
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    assert decision.route == Route.FINAL_CHECK
+    assert decision.report is None
+
+
+def test_handler_stale_final_check_method_mode_uses_target_scope(tmp_path):
+    """method 模式的终验结论口径是目标方法本身: 类级覆盖率低于门槛不算漂移。"""
+    target = _make_method("bar", covered=10, missed=0)
+    target.status = MethodStatus.DONE
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        target_method="bar",
+        threshold=80.0,
+        class_coverage=ClassCoverage.of(20, 80),    # 类级远未达门槛, method 模式无关
+        methods=[target],
+        current_method=target.key,
+        final_checked=True,
+        plan={"target_class": "com.example.MyService", "methods": []},
+        final_test_summary={"tests": 3, "failures": 0, "errors": 0, "skipped": 0},
+    )
+
+    with patch("scripts.make_plan.StateStore") as MockStore, \
+         patch("scripts.make_plan.setup_logger"):
+        MockStore.return_value.locked.return_value.__enter__ = MagicMock(return_value=None)
+        MockStore.return_value.locked.return_value.__exit__ = MagicMock(return_value=False)
+        MockStore.return_value.load.return_value = state
+        MockStore.return_value.coverage_path.return_value = tmp_path / "coverage.json"
+
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    assert decision.route == Route.FINISH          # 目标方法达标, 结论仍有效
+    assert decision.report is not None
+    assert "最终状态: PASS" in decision.report
+
+
 # --------------------------------------------------------------------------- #
 # 错误场景
 # --------------------------------------------------------------------------- #
@@ -197,7 +345,7 @@ def test_handler_raises_when_state_missing(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 用户决策落地(SKILL.md §6: --skip-current / --set-threshold / --grant-rounds)
+# 用户决策落地(SKILL.md §6: --skip-current / --set-threshold / --grant-rounds / --unskip)
 # --------------------------------------------------------------------------- #
 @contextmanager
 def _patched_store(state):
@@ -362,5 +510,179 @@ def test_handler_user_decision_flags_are_mutually_exclusive(tmp_path):
     with patch("scripts.make_plan.setup_logger"), _patched_store(state):
         with pytest.raises(StepError) as exc_info:
             handler(_make_args(str(tmp_path), skip_current=True, grant_rounds=3))
+
+    assert "互斥" in exc_info.value.decision.summary
+
+
+# --------------------------------------------------------------------------- #
+# --unskip 恢复被跳过的方法(SKILL.md §6)
+# --------------------------------------------------------------------------- #
+def _skipped_method(name: str, covered: int = 5, missed: int = 5,
+                    reason: str = "单方法迭代已达上限 8 轮仍未达标(当前 50.0%)",
+                    desc: str = "()V"):
+    m = _make_method(name, desc=desc, covered=covered, missed=missed)
+    m.status = MethodStatus.SKIPPED
+    m.skip_reason = reason
+    m.round_rates = [50.0] * config.method_round_budget()
+    m.round_test_results = [TestOutcome(0, 0)] * config.method_round_budget()
+    return m
+
+
+def test_handler_unskip_revives_current_method_and_reopens_budget(tmp_path):
+    """--unskip: 当前方法复活为 pending, 清跳过原因, 重开单方法/全局预算窗口。"""
+    method = _skipped_method("doStuff")
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        methods=[method],
+        current_method=method.key,
+        iteration=config.method_round_budget(),        # 已耗尽
+        global_iteration=config.global_round_budget(),  # 已耗尽
+        validate_fail_streak=4,
+        plan={"target_class": "com.example.MyService", "threshold": 80.0, "methods": []},
+    )
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        decision = handler(_make_args(str(tmp_path), unskip="doStuff"))[0]
+
+    assert method.status == MethodStatus.PENDING
+    assert method.skip_reason is None
+    assert method.round_rates == [] and method.round_test_results == []  # 全新窗口
+    assert state.iteration == 0            # 游标未切换, 就地重开单方法窗口
+    assert state.method_round_bonus == 0
+    assert state.global_round_bonus == config.global_round_budget()
+    assert state.validate_fail_streak == 0
+    assert decision.route == Route.BUILD_PROMPT  # 复活的队列重新可迭代
+
+
+def test_handler_unskip_switches_cursor_to_revived_method(tmp_path):
+    """--unskip: 当前方法是别的方法时, 游标切到复活的低覆盖率方法。"""
+    current = _make_method("current", covered=12, missed=3)   # 80%, 仍 pending
+    revived = _skipped_method("revived", covered=1, missed=9)  # 10%, 排序更靠前
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        methods=[current, revived],
+        current_method=current.key,
+        iteration=5,
+        plan={"target_class": "com.example.MyService", "threshold": 80.0, "methods": []},
+    )
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        handler(_make_args(str(tmp_path), unskip="revived"))
+
+    assert revived.status == MethodStatus.PENDING
+    assert state.current_method == revived.key  # 复活后按覆盖率排序重新选中
+    assert state.iteration == 0                 # 切换方法 -> 轮次清零
+
+
+def test_handler_unskip_combines_with_grant_rounds(tmp_path):
+    """--unskip 与 --grant-rounds 组合: 恢复后再追加 N 轮窗口。"""
+    method = _skipped_method("doStuff")
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        methods=[method],
+        current_method=method.key,
+        plan={"target_class": "com.example.MyService", "threshold": 80.0, "methods": []},
+    )
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        handler(_make_args(str(tmp_path), unskip="doStuff", grant_rounds=8))
+
+    assert method.status == MethodStatus.PENDING
+    assert state.global_round_bonus == config.global_round_budget() + 8
+    assert state.method_round_bonus == 8
+
+
+@pytest.mark.parametrize("names, match", [
+    ("noSuchMethod", "找不到方法"),
+    ("doneMethod", "只有被跳过的方法才能恢复"),
+    ("outOfScope", "无跳过原因"),
+    (" , ", "需要方法名列表"),
+])
+def test_handler_unskip_rejects_invalid_targets(tmp_path, names, match):
+    """--unskip 非法目标(不存在/非 skipped/无跳过原因/空列表): 状态错误。"""
+    done = _make_method("doneMethod", covered=10, missed=0)
+    done.status = MethodStatus.DONE
+    out_of_scope = _make_method("outOfScope", covered=0, missed=10)
+    out_of_scope.status = MethodStatus.SKIPPED  # --method 范围外, 无 skip_reason
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        methods=[done, out_of_scope],
+        current_method=None,
+        plan={"target_class": "com.example.MyService", "methods": []},
+    )
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        with pytest.raises(StepError) as exc_info:
+            handler(_make_args(str(tmp_path), unskip=names))
+
+    assert match in exc_info.value.decision.summary
+    assert done.status == MethodStatus.DONE  # 校验失败不留半成品状态
+    assert out_of_scope.status == MethodStatus.SKIPPED
+
+
+def test_handler_unskip_revives_all_skipped_overloads(tmp_path):
+    """--unskip: 同名重载全部被跳过时, 一次恢复所有重载。
+
+    反例(修复前): next() 只命中首个同名条目, 其余重载仍 skipped ->
+    _target_method_done 恒为 False, method 模式永远无法达标。
+    """
+    no_arg = _skipped_method("doStuff", covered=2, missed=8, desc="()V")
+    with_arg = _skipped_method("doStuff", covered=4, missed=6, desc="(I)V")
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        target_method="doStuff",
+        methods=[no_arg, with_arg],
+        current_method=None,
+        plan={"target_class": "com.example.MyService", "threshold": 80.0, "methods": []},
+    )
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        handler(_make_args(str(tmp_path), unskip="doStuff"))
+
+    assert no_arg.status == MethodStatus.PENDING
+    assert with_arg.status == MethodStatus.PENDING
+    assert no_arg.skip_reason is None and with_arg.skip_reason is None
+    assert no_arg.round_rates == [] and with_arg.round_rates == []
+
+
+def test_handler_unskip_revives_skipped_overload_when_sibling_is_done(tmp_path):
+    """--unskip: 一个重载已 done、另一个被跳过时, 只恢复被跳过的重载。
+
+    反例(修复前): next() 命中已 done 的首个重载 -> 报"只有被跳过的方法才能
+    恢复", 被跳过的重载无法通过任何 CLI 路径恢复。
+    """
+    done = _make_method("doStuff", desc="()V", covered=10, missed=0)
+    done.status = MethodStatus.DONE
+    skipped = _skipped_method("doStuff", desc="(I)V", covered=4, missed=6)
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        target_method="doStuff",
+        methods=[done, skipped],
+        current_method=None,
+        plan={"target_class": "com.example.MyService", "threshold": 80.0, "methods": []},
+    )
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        handler(_make_args(str(tmp_path), unskip="doStuff"))
+
+    assert skipped.status == MethodStatus.PENDING   # 被跳过的重载已恢复
+    assert skipped.skip_reason is None
+    assert done.status == MethodStatus.DONE         # 已达标的重载不受影响
+
+
+def test_handler_unskip_and_skip_current_are_mutually_exclusive(tmp_path):
+    """--unskip 与 --skip-current 同用: 状态错误。"""
+    state = State(project_root=str(tmp_path), target_class="c",
+                 methods=[_skipped_method("doStuff")], current_method=None,
+                 plan={"target_class": "c", "methods": []})
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        with pytest.raises(StepError) as exc_info:
+            handler(_make_args(str(tmp_path), unskip="doStuff", skip_current=True))
 
     assert "互斥" in exc_info.value.decision.summary

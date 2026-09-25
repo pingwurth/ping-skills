@@ -356,14 +356,15 @@ def _make_method_cov(name: str, desc: str = "()V", covered: int = 10,
     return m
 
 
-def _handler_patch_context(tmp_path, parsed_methods):
+def _handler_patch_context(tmp_path, parsed_methods, class_rate: float = 100.0,
+                           test_result: TestResult | None = None):
     """构建 handler 所需的全量 patch 上下文管理器，返回 (mock_run, MockStore) 元组。"""
     mock_class_cov = MagicMock(spec=ClassCoverage)
-    mock_class_cov.rate = 100.0
-    mock_class_cov.to_dict.return_value = {"rate": 100.0}
+    mock_class_cov.rate = class_rate
+    mock_class_cov.to_dict.return_value = {"rate": class_rate}
 
-    mock_test = TestResult(tests=1, failures=0, errors=0, skipped=0,
-                           report_found=True, parse_errors=0)
+    mock_test = test_result if test_result is not None else TestResult(
+        tests=1, failures=0, errors=0, skipped=0, report_found=True, parse_errors=0)
 
     patches = {
         "scripts.init_coverage.javasrc.resolve_target": (
@@ -447,6 +448,197 @@ def test_handler_method_mode_matched_proceeds(tmp_path):
 
     assert decision is not None
     assert ectx.state is not None
+
+
+def test_handler_method_mode_skipped_target_finishes_unmet(tmp_path):
+    """method 模式: 目标方法被跳过(未覆盖) -> 未达标收尾, 不得判 PASS(SKILL §7)。
+
+    根因: scope_met 只按 pending 队列判空, 被跳过的目标方法不是 pending ->
+         init_is_met(method_mode=True) 只看 scope_met + tests_green -> 假 PASS。
+    修复: method 模式下 scope_met 还要求目标方法自身 done。
+    """
+    args = _make_args(tmp_path, method="doStuff", final_check=True)
+    skipped = MethodCoverage(
+        key=MethodKey("doStuff", "()V"), covered=5, missed=5,
+        status=MethodStatus.SKIPPED, initial_rate=50.0,
+        skip_reason="单方法迭代已达上限 8 轮仍未达标(当前 50.0%)")
+    prev_state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        target_method="doStuff", module=".", threshold=80.0,
+        test_class_simple="MyServiceTest", methods=[skipped],
+        class_coverage=ClassCoverage.of(90, 10), global_iteration=9)
+    parsed_target = MethodCoverage(key=MethodKey("doStuff", "()V"), covered=5, missed=5)
+
+    stack, _, MockStore = _handler_patch_context(tmp_path, [parsed_target])
+    MockStore.return_value.load.return_value = prev_state
+    with stack:
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.FINISH
+    assert "最终状态: 未达标" in decision.report
+    assert "目标方法 doStuff 已跳过" in decision.report
+    assert ectx.state.final_checked is False   # 未达标不得置 final_checked
+
+
+def test_handler_method_mode_done_target_passes_despite_class_rate(tmp_path):
+    """method 模式反例: 目标方法达标即 PASS, 类级覆盖率不参与判定(SKILL §7)。"""
+    args = _make_args(tmp_path, method="doStuff", final_check=True)
+    done = MethodCoverage(
+        key=MethodKey("doStuff", "()V"), covered=9, missed=1,
+        status=MethodStatus.DONE, initial_rate=50.0)
+    prev_state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        target_method="doStuff", module=".", threshold=80.0,
+        test_class_simple="MyServiceTest", methods=[done],
+        class_coverage=ClassCoverage.of(12, 88), global_iteration=9)
+    parsed_target = MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1)
+
+    stack, _, MockStore = _handler_patch_context(tmp_path, [parsed_target],
+                                                 class_rate=12.0)
+    MockStore.return_value.load.return_value = prev_state
+    with stack:
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.FINISH
+    assert "最终状态: PASS" in decision.report
+    assert ectx.state.final_checked is True
+
+
+def test_handler_method_mode_overload_skipped_target_finishes_unmet(tmp_path):
+    """method 模式: --method 按方法名限定范围, 同名重载全部在范围内。
+
+    回归: 目标方法判定用 next() 只取首个同名条目 -> 结果依赖 methods 顺序;
+         "一个重载 done、另一个重载被跳过" 会被误判 PASS。必须每个同名重载都
+         done 才算范围满足。
+    """
+    args = _make_args(tmp_path, method="doStuff", final_check=True)
+    done = MethodCoverage(
+        key=MethodKey("doStuff", "()V"), covered=9, missed=1,
+        status=MethodStatus.DONE, initial_rate=50.0)
+    skipped = MethodCoverage(
+        key=MethodKey("doStuff", "(I)V"), covered=0, missed=10,
+        status=MethodStatus.SKIPPED, initial_rate=0.0,
+        skip_reason="单方法迭代已达上限 8 轮仍未达标(当前 0.0%)")
+    prev_state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        target_method="doStuff", module=".", threshold=80.0,
+        test_class_simple="MyServiceTest", methods=[done, skipped],
+        class_coverage=ClassCoverage.of(90, 10), global_iteration=9)
+    parsed = [MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1),
+              MethodCoverage(key=MethodKey("doStuff", "(I)V"), covered=0, missed=10)]
+
+    stack, _, MockStore = _handler_patch_context(tmp_path, parsed, class_rate=10.0)
+    MockStore.return_value.load.return_value = prev_state
+    with stack:
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.FINISH
+    assert "最终状态: 未达标" in decision.report
+    assert ectx.state.final_checked is False
+
+
+def test_handler_unmet_final_check_persists_test_summary(tmp_path):
+    """未达标终验收尾: 测试汇总同样落盘, 报告如实显示本轮测试数字而非"未记录"。
+
+    根因: final_test_summary 只在 met=True 时写盘, met=False 路径的收尾报告
+         "测试:"段固定输出 未记录, 而同报告的 note 却引用刚解析的 surefire 数字。
+    """
+    args = _make_args(tmp_path, final_check=True)
+    done = MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1,
+                          status=MethodStatus.DONE, initial_rate=50.0)
+    prev_state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        module=".", threshold=80.0, test_class_simple="MyServiceTest",
+        methods=[done], class_coverage=ClassCoverage.of(70, 30), global_iteration=9)
+    parsed = [MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1)]
+
+    stack, _, MockStore = _handler_patch_context(tmp_path, parsed, class_rate=70.0)
+    MockStore.return_value.load.return_value = prev_state
+    with stack:
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.FINISH
+    assert "最终状态: 未达标" in decision.report
+    # 终验轮(无论达标与否)测试汇总落盘, 收尾报告显示真实数字
+    assert ectx.state.final_test_summary == {"tests": 1, "failures": 0,
+                                             "errors": 0, "skipped": 0}
+    assert "Tests run: 1" in decision.report
+    assert "未记录" not in decision.report
+
+
+def test_handler_final_check_env_uncertain_finishes_unverified(tmp_path):
+    """终验 surefire 报告缺失(无失败用例)达 streak 上限 -> 未复核收尾。
+
+    报告"最终状态"为未复核(测试结果不可信), 说明行与决策 summary 均按"未能复核"
+    措辞, 不混同普通测试失败; final_checked 保持 False(环境修复后可重跑复核)。
+    """
+    args = _make_args(tmp_path, final_check=True)
+    done = MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1,
+                          status=MethodStatus.DONE, initial_rate=50.0)
+    prev_state = State(
+        project_root=str(tmp_path), target_class="com.example.MyService",
+        module=".", threshold=80.0, test_class_simple="MyServiceTest",
+        methods=[done], class_coverage=ClassCoverage.of(70, 30), global_iteration=9,
+        final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT - 1)
+    parsed = [MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1)]
+    uncertain = TestResult(tests=0, failures=0, errors=0, skipped=0,
+                           report_found=False, parse_errors=0)
+
+    stack, _, MockStore = _handler_patch_context(
+        tmp_path, parsed, class_rate=70.0, test_result=uncertain)
+    MockStore.return_value.load.return_value = prev_state
+    with stack:
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.FINISH
+    assert "最终状态: 未复核(测试结果不可信)" in decision.report
+    assert "测试结果不可信" in decision.report
+    assert "未能复核达标" in decision.summary
+    assert "未达标" not in decision.summary
+    assert ectx.state.final_checked is False
+
+
+def test_build_method_entries_clears_skip_reason_on_promotion():
+    """终验把已跳过的达标方法晋升 done 时清空 skip_reason(done ⇒ 无跳过原因)。"""
+    from scripts.init_coverage import _build_method_entries
+
+    prev = MethodCoverage(
+        key=MethodKey("doStuff", "()V"), covered=5, missed=5,
+        status=MethodStatus.SKIPPED, skip_reason="类级预算耗尽(30/30 轮), 未达标方法不再迭代")
+    prev_state = State(project_root="/r", target_class="com.example.MyService",
+                       methods=[prev])
+    parsed = [MethodCoverage(key=MethodKey("doStuff", "()V"), covered=9, missed=1)]
+
+    entries = _build_method_entries(parsed, None, prev_state, 80.0, True)
+
+    assert entries[0].status == MethodStatus.DONE
+    assert entries[0].skip_reason is None
+
+
+def test_unmet_note_baseline_not_green_not_called_final():
+    """基线轮(非终验)测试未通过: 措辞为"测试未通过", 不得误称"终验测试未通过"。"""
+    from scripts.init_coverage import _unmet_note
+
+    test = TestResult(tests=1, failures=1, errors=0, report_found=True)
+    note = _unmet_note(False, False, test, 2, 50.0, 80.0, None, final_check=False)
+    assert note.startswith("测试未通过")
+    assert "终验" not in note
+
+    note_final = _unmet_note(False, False, test, 2, 50.0, 80.0, None,
+                             final_check=True)
+    assert note_final.startswith("终验测试未通过")
+
+
+def test_unmet_note_env_uncertain_says_unverified():
+    """环境不可信: 说明行按"未能复核"措辞, 不称测试失败。"""
+    from scripts.init_coverage import _unmet_note
+
+    test = TestResult(tests=0, failures=0, errors=0, report_found=False)
+    note = _unmet_note(False, False, test, 0, 70.0, 80.0, None,
+                       final_check=True, env_uncertain=True)
+    assert "测试结果不可信" in note
+    assert "未能确认达标" in note
+    assert "未通过" not in note
 
 
 def test_handler_source_not_found_includes_diagnosis(tmp_path):

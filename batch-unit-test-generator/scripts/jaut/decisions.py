@@ -7,19 +7,20 @@
 
 升级策略(按优先级, 命中即返回):
     覆盖率达标且测试全绿 -> done
-    单方法轮次 >= METHOD_ROUND_BUDGET + method_round_bonus -> ask_user
-    全局轮次   >= GLOBAL_ROUND_BUDGET + global_round_bonus  -> ask_user
-    连续 TEST_FAIL_STREAK_ROUNDS(3) 轮测试失败 -> ask_user
-    连续 NO_IMPROVEMENT_ROUNDS(3) 轮覆盖率无提升 -> ask_user
+    单方法轮次 >= METHOD_ROUND_BUDGET + method_round_bonus -> 自动跳过当前方法
+    全局轮次   >= GLOBAL_ROUND_BUDGET + global_round_bonus  -> 自动跳过全部 pending
+    连续 TEST_FAIL_STREAK_ROUNDS(3) 轮测试失败 -> 自动跳过当前方法
+    连续 NO_IMPROVEMENT_ROUNDS(3) 轮覆盖率无提升 -> 自动跳过当前方法
     测试不绿 -> 回 build_prompt 修复
     覆盖率未达标 -> 回 build_prompt 继续
 
-ask_user 决策一律携带 resume(各用户选项的恢复命令): 用户"继续"经
-make_plan --grant-rounds 追加预算窗口而非依赖原计数器, "跳过/调门槛"经
-make_plan --skip-current / --set-threshold 落地, 避免每轮必问的假死循环。
+预算耗尽不再 ask_user(子代理无感, 也不穿透主流程): 一律自动跳过并记录原因,
+由入口脚本写入 MethodCoverage.skip_reason 后路由 make_plan 推进下一方法;
+队列空时由 decide_after_plan 收尾(批量模式输出类内完成报告)。
 
-决策函数不修改任何状态; 需要落地到 state 的动作(标 done / 复位轨迹)以 Decision
-的 mark_done / reset_trajectory 标志回传, 由入口脚本应用后再持久化。
+决策函数不修改任何状态; 需要落地到 state 的动作(标 done / 复位轨迹 / 跳过方法)
+以 Decision 的 mark_done / reset_trajectory / auto_skip_* 标志回传, 由入口脚本
+应用后再持久化。
 """
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ from .models import (
     MethodCoverage,
     MethodStatus,
     NextCommand,
-    ResumeOption,
     Route,
+    State,
     TestOutcome,
     TestResult,
 )
@@ -103,47 +104,25 @@ def test_simple_name(fqcn: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 升级恢复指引(纯函数, 语义级; 路径与 --workdir 由 transitions 补全)
+# 自动跳过(预算耗尽/不收敛的统一动作)
 # --------------------------------------------------------------------------- #
-def _resume_skip_method() -> ResumeOption:
-    """跳过当前方法的恢复选项。"""
-    return ResumeOption(option="skip_method", label="跳过该方法",
-                        script="make_plan.py", params=["--skip-current"])
+def _auto_skip(ctx: VerifyContext, metrics: dict, artifacts: list, *,
+               reason: str, summary: str,
+               skip_all: bool = False) -> Decision:
+    """预算耗尽/不收敛: 跳过当前方法(或全部 pending)并回 make_plan 推进队列。
 
-
-def _resume_adjust_threshold() -> ResumeOption:
-    """调整覆盖率门槛的恢复选项。"""
-    return ResumeOption(option="adjust_threshold", label="调整门槛",
-                        script="make_plan.py", params=["--set-threshold", "N"],
-                        note="N=用户给定的新门槛百分比(0<N≤100)")
-
-
-def _resume_terminate() -> ResumeOption:
-    """终止技能执行的恢复选项。"""
-    return ResumeOption(option="terminate", label="终止")
-
-
-def _resume_budget_exhausted() -> list[ResumeOption]:
-    """预算类升级(单方法/全局轮次耗尽): 继续 = make_plan --grant-rounds 追加窗口。"""
-    return [
-        ResumeOption(option="continue", label="继续",
-                     script="make_plan.py",
-                     params=["--grant-rounds", str(config.RESUME_GRANT_ROUNDS)]),
-        _resume_skip_method(),
-        _resume_adjust_threshold(),
-        _resume_terminate(),
-    ]
-
-
-def _resume_not_converged() -> list[ResumeOption]:
-    """轨迹类升级(连续失败/无提升): 预算未耗尽, 继续 = 直接回迭代修复(轨迹已复位)。"""
-    return [
-        ResumeOption(option="continue", label="继续修复",
-                     script="build_prompt.py", params=[]),
-        _resume_skip_method(),
-        _resume_adjust_threshold(),
-        _resume_terminate(),
-    ]
+    skip_all=True 时同时跳过所有剩余 pending 方法(全局/类级预算耗尽的语义);
+    两种情况都路由 MAKE_PLAN, 由 decide_after_plan 决定下一个方法或收尾。
+    入口脚本据 auto_skip_* 标志落地 state。
+    """
+    metrics = dict(metrics, skip_reason=reason, skip_all_pending=skip_all)
+    return Decision(
+        status="success", exit_code=config.EXIT_CONTINUE, summary=summary,
+        route=Route.MAKE_PLAN,
+        reason="预算耗尽, 自动跳过" if not skip_all else "预算耗尽, 跳过全部未达标方法",
+        artifacts=artifacts, metrics=metrics,
+        auto_skip_method=True, auto_skip_reason=reason,
+        skip_all_pending=skip_all, reset_trajectory=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,11 +148,6 @@ class VerifyContext:
     # 预算追加窗口(make_plan --grant-rounds 落地; 判定时计入有效预算)
     method_round_bonus: int = 0
     global_round_bonus: int = 0
-    # 批量模式: 升级点预算内自动继续(class_round_used < BATCH_CLASS_ROUND_BUDGET 时)
-    batch_mode: bool = False
-    class_round_used: int = 0
-    # 探索模式: 大类拆分时预算翻倍(class_round_used < BATCH_CLASS_ROUND_BUDGET * 倍数)
-    exploration_mode: bool = False
 
     @property
     def label(self) -> str:
@@ -185,10 +159,10 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
 
     按优先级依次判定:
         1. 双条件达标(覆盖率达标 + 测试全绿) -> done
-        2. 单方法预算耗尽 -> ask_user(追加预算/跳过/调门槛)
-        3. 全局预算耗尽 -> ask_user
-        4. 连续测试失败 -> ask_user
-        5. 连续无提升 -> ask_user
+        2. 单方法预算耗尽 -> 自动跳过当前方法
+        3. 全局预算耗尽 -> 自动跳过全部未达标方法
+        4. 连续测试失败 -> 自动跳过当前方法
+        5. 连续无提升 -> 自动跳过当前方法
         6. 测试不绿 -> 回 build_prompt 修复
         7. 覆盖率未达标 -> 回 build_prompt 继续
     """
@@ -206,71 +180,41 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
                      f"{after_rate:.1f}%, {test_status})"),
             route=Route.MAKE_PLAN, reason="取下一个未达标方法",
             artifacts=artifacts, metrics=metrics, mark_done=True)
-    # 2) 单方法预算耗尽(含用户"继续"后追加的窗口)
+    # 2) 单方法预算耗尽(含此前追加的窗口) -> 自动跳过当前方法
     method_budget = config.METHOD_ROUND_BUDGET + ctx.method_round_bonus
     if ctx.iteration >= method_budget:
-        if _batch_auto_grant(ctx):
-            return _auto_continue(ctx, metrics, artifacts,
-                summary=(f"方法 {ctx.label} 已达单方法迭代上限 {method_budget} 轮"
-                         f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 批量模式预算内自动继续"))
-        return _escalate(
-            ctx, metrics, artifacts, reset=True,
+        return _auto_skip(
+            ctx, metrics, artifacts,
+            reason=f"单方法迭代已达上限 {method_budget} 轮仍未达标(当前 {after_rate:.1f}%)",
             summary=(f"方法 {ctx.label} 已达单方法迭代上限 {method_budget} 轮"
-                     f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 升级给用户决策"),
-            reason="单方法迭代预算耗尽, 需用户决策",
-            question=(f"方法 {ctx.label} 已迭代 {ctx.iteration} 轮, 达单方法上限 "
-                      f"{method_budget} 轮仍未达标(当前覆盖率 {after_rate:.1f}%, "
-                      f"门槛 {ctx.threshold}%, {_test_status(ctx)})。"
-                      "继续迭代 / 跳过该方法 / 调整门槛 / 终止?"),
-            resume=_resume_budget_exhausted())
-    # 3) 全局预算耗尽(含用户"继续"后追加的窗口)
+                     f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 自动跳过"))
+    # 3) 全局预算耗尽(含此前追加的窗口) -> 自动跳过全部未达标方法
     global_budget = config.GLOBAL_ROUND_BUDGET + ctx.global_round_bonus
     if ctx.global_iteration >= global_budget:
-        if _batch_auto_grant(ctx):
-            return _auto_continue(ctx, metrics, artifacts,
-                summary=(f"全局迭代已达上限 {global_budget} 轮"
-                         f"(方法 {ctx.label} 当前 {after_rate:.1f}%, {_test_status(ctx)}), 批量模式预算内自动继续"))
-        return _escalate(
-            ctx, metrics, artifacts, reset=False,
+        return _auto_skip(
+            ctx, metrics, artifacts, skip_all=True,
+            reason=f"全局迭代已达上限 {global_budget} 轮, 未达标方法不再迭代",
             summary=(f"全局迭代已达上限 {global_budget} 轮"
-                     f"(方法 {ctx.label} 当前 {after_rate:.1f}%, {_test_status(ctx)}), 升级给用户决策"),
-            reason="全局迭代预算耗尽, 需用户决策",
-            question=(f"全局迭代已达上限 {global_budget} 轮。"
-                      f"当前方法 {ctx.label} 覆盖率 {after_rate:.1f}%(门槛 {ctx.threshold}%, "
-                      f"{_test_status(ctx)})。继续 / 跳过该方法 / 调整门槛 / 终止?"),
-            resume=_resume_budget_exhausted())
-    # 4) 连续测试失败不收敛
+                     f"(方法 {ctx.label} 当前 {after_rate:.1f}%, {_test_status(ctx)}), "
+                     "跳过全部未达标方法"))
+    # 4) 连续测试失败不收敛 -> 自动跳过当前方法
     if test_failure_streak(ctx.method.round_test_results):
         trajectory = [(r.failures, r.errors) for r in ctx.method.round_test_results]
-        if _batch_auto_grant(ctx):
-            return _auto_continue(ctx, metrics, artifacts,
-                summary=(f"方法 {ctx.label} 连续 {config.TEST_FAIL_STREAK_ROUNDS} 轮测试失败不收敛, "
-                         "批量模式预算内自动继续"))
-        return _escalate(
-            ctx, metrics, artifacts, reset=True,
+        return _auto_skip(
+            ctx, metrics, artifacts,
+            reason=(f"连续 {config.TEST_FAIL_STREAK_ROUNDS} 轮测试失败不收敛"
+                    f"(每轮 Failures/Errors: {trajectory})"),
             summary=(f"方法 {ctx.label} 连续 {config.TEST_FAIL_STREAK_ROUNDS} 轮测试失败不收敛, "
-                     "升级给用户决策"),
-            reason="测试失败不收敛, 需用户决策",
-            question=(f"方法 {ctx.label} 已连续 {config.TEST_FAIL_STREAK_ROUNDS} 轮测试失败"
-                      f"(每轮 Failures/Errors 轨迹: {trajectory})。"
-                      "继续修复 / 跳过该方法 / 调整门槛 / 终止?"),
-            resume=_resume_not_converged())
-    # 5) 连续覆盖率无提升
+                     "自动跳过"))
+    # 5) 连续覆盖率无提升 -> 自动跳过当前方法
     if no_improvement(ctx.method.round_rates, threshold=ctx.threshold):
         trajectory = list(ctx.method.round_rates)
-        if _batch_auto_grant(ctx):
-            return _auto_continue(ctx, metrics, artifacts,
-                summary=(f"方法 {ctx.label} 连续 {config.NO_IMPROVEMENT_ROUNDS} 轮覆盖率无提升"
-                         f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 批量模式预算内自动继续"))
-        return _escalate(
-            ctx, metrics, artifacts, reset=True,
+        return _auto_skip(
+            ctx, metrics, artifacts,
+            reason=(f"连续 {config.NO_IMPROVEMENT_ROUNDS} 轮覆盖率无提升"
+                    f"(覆盖率轨迹: {trajectory})"),
             summary=(f"方法 {ctx.label} 连续 {config.NO_IMPROVEMENT_ROUNDS} 轮覆盖率无提升"
-                     f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 升级给用户决策"),
-            reason="迭代不收敛, 需用户决策",
-            question=(f"方法 {ctx.label} 已连续 {config.NO_IMPROVEMENT_ROUNDS} 轮无提升"
-                      f"(覆盖率轨迹: {trajectory}, {_test_status(ctx)})。"
-                      "继续迭代 / 跳过该方法 / 调整门槛 / 终止?"),
-            resume=_resume_not_converged())
+                     f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 自动跳过"))
     # 6) 测试不绿 -> 回 build_prompt 修复失败用例
     if not ctx.tests_green:
         summary, instructions = _verify_not_green(ctx, after_rate)
@@ -297,50 +241,6 @@ def _test_status(ctx: VerifyContext) -> str:
     if ctx.test.skipped > 0:
         status += f", 跳过 {ctx.test.skipped} 个"
     return status
-
-
-def _batch_auto_grant(ctx: VerifyContext) -> bool:
-    """批量模式下升级点是否可自动继续(class_round_used < 有效预算)。
-
-    探索模式(大类拆分)时有效预算 = BATCH_CLASS_ROUND_BUDGET * EXPLORATION_MODE_MULTIPLIER;
-    否则 = BATCH_CLASS_ROUND_BUDGET。
-    预算内自动返回 BUILD_PROMPT 继续; 预算耗尽返回 False 穿透至 ASK_USER。
-    """
-    if not ctx.batch_mode:
-        return False
-    budget = config.batch_class_round_budget()
-    if ctx.exploration_mode:
-        budget *= config.EXPLORATION_MODE_MULTIPLIER
-    return ctx.class_round_used < budget
-
-
-def _auto_continue(ctx: VerifyContext, metrics: dict, artifacts: list, *,
-                   summary: str) -> Decision:
-    """批量模式预算内自动继续: 路由 BUILD_PROMPT 并携带 auto_grant=True。
-
-    handler 落地: method_round_bonus += RESUME_GRANT_ROUNDS, 复位轨迹,
-    class_round_used 照常累计(已在 _record_observation 递增)。
-    """
-    return Decision(
-        status="success", exit_code=config.EXIT_CONTINUE, summary=summary,
-        route=Route.BUILD_PROMPT, reason="批量模式预算内自动继续迭代",
-        artifacts=artifacts, metrics=metrics, auto_grant=True,
-        reset_trajectory=True)
-
-
-def _escalate(ctx: VerifyContext, metrics: dict, artifacts: list, *,
-              reset: bool, summary: str, reason: str, question: str,
-              resume: list[ResumeOption]) -> Decision:
-    """升级(ask_user)决策; mark_done 恒 False, reset 决定是否复位轨迹。
-
-    resume 为每个用户选项的恢复命令(由 transitions 补全路径后写入 next_step.resume),
-    避免升级后用户决策无落地通道。
-    """
-    return Decision(
-        status="needs_input", exit_code=config.EXIT_CONTINUE, summary=summary,
-        route=Route.ASK_USER, reason=reason, question=question,
-        artifacts=artifacts, metrics=metrics, mark_done=False, reset_trajectory=reset,
-        resume=resume)
 
 
 def _verify_metrics(ctx: VerifyContext, after_rate: float) -> dict:
@@ -412,7 +312,7 @@ class InitContext:
     class_rate: float
     threshold: float
     failing_count: int              # pending 方法数
-    scope_met: bool                 # 无 pending 方法
+    scope_met: bool                 # 范围已满足: 无 pending; method 模式还要求目标方法 done
     class_met: bool                 # 类级覆盖率 >= threshold
     test: TestResult
     tests_green: bool
@@ -425,6 +325,11 @@ class InitContext:
     # finish 时由入口脚本渲染好的收尾报告(report.render_finish_report), 逐字透传
     report: Optional[str] = None
 
+    @property
+    def env_uncertain(self) -> bool:
+        """结果不可信且无真实失败用例(见模块函数 env_uncertain)。"""
+        return env_uncertain(self.test, self.uncleaned)
+
 
 def init_is_met(scope_met: bool, tests_green: bool, class_met: bool, method_mode: bool) -> bool:
     """init/final-check 达标判定(单一事实源, 供入口更新 streak 与决策共用)。
@@ -436,14 +341,26 @@ def init_is_met(scope_met: bool, tests_green: bool, class_met: bool, method_mode
     return True if method_mode else class_met
 
 
+def env_uncertain(test: TestResult, uncleaned: bool) -> bool:
+    """终验不绿且无真实失败用例(报告缺失/无法解析/目录清理失败): 结果不可信。
+
+    fail-closed 口径与 TestResult.is_green 对齐: 三类"不可信"信号任一命中且无
+    失败用例时, 决策与报告须按"未能复核"处理, 不得混同普通测试失败。
+    """
+    if test.failed_cases or test.failures or test.errors:
+        return False
+    return (not test.report_found) or test.parse_errors > 0 or uncleaned
+
+
 def decide_after_init(ctx: InitContext) -> Decision:
     """init_coverage 阶段决策: 基线/终验门槛判定。
 
     按优先级依次判定:
         1. 达标且测试全绿 -> finish
-        2. 终验连续不绿且无待修复方法 -> ask_user(禁止无限循环)
-        3. 测试不绿 -> 回 make_plan 修复
-        4. 覆盖率未达标 -> 回 make_plan 补测
+        2. 终验连续不绿且无待修复方法 -> finish(未达标收尾/未复核收尾, 不再 ask_user)
+        3. 测试不绿 -> 回 make_plan 修复(终验失败用例含非目标类 -> 未达标收尾;
+           报告缺失/清理失败等环境问题 -> 重试, 由 final_check_fail_streak 兜底)
+        4. 覆盖率/范围未达标 -> 无 pending 方法则未达标收尾, 否则回 make_plan 补测
     """
     met = init_is_met(ctx.scope_met, ctx.tests_green, ctx.class_met, ctx.method_mode)
     metrics = _init_metrics(ctx)
@@ -458,33 +375,37 @@ def decide_after_init(ctx: InitContext) -> Decision:
             route=Route.FINISH, reason="覆盖率达标且测试全绿, 任务完成",
             deliverables=[ctx.coverage_path, ctx.state_path],
             artifacts=[coverage_artifact], metrics=metrics, report=ctx.report)
-    # 2) 终验连续不绿且无待修复方法 -> ask_user(禁止无限循环)
-    if (ctx.final_check and not ctx.tests_green and ctx.scope_met
+    # 2) 终验连续不绿且无待修复方法 -> 未达标收尾/未复核收尾(禁止无限循环, 不再 ask_user)
+    # 用 failing_count(而非 scope_met)判"已无待修复方法": method 模式下目标方法被
+    # 跳过时 scope_met 为 False 但队列已空, 若用 scope_met 本分支永不触发,
+    # 终验不绿的有限重试将失去上界(严格语义只用于达标判定 init_is_met)
+    if (ctx.final_check and not ctx.tests_green and ctx.failing_count == 0
             and ctx.final_check_fail_streak >= config.FINAL_CHECK_FAIL_STREAK_LIMIT):
+        if ctx.env_uncertain:
+            # 环境不可信(报告缺失/无法解析/目录清理失败, 无失败用例): 不混同
+            # "测试失败", 按未复核收尾; 环境修复后可重新终验复核
+            return Decision(
+                status="success", exit_code=config.EXIT_OK,
+                summary=(f"终验连续 {ctx.final_check_fail_streak} 轮测试结果不可信"
+                         "(surefire 报告缺失/无法解析或目录清理失败)且无待修复方法, "
+                         "未能复核达标; 环境修复后可重新终验复核"),
+                route=Route.FINISH, reason="终验环境不可信且无可修复方法, 未复核收尾",
+                deliverables=[ctx.coverage_path, ctx.state_path],
+                artifacts=[coverage_artifact, {"path": ctx.mvn_log, "kind": "mvn_log"}],
+                metrics=metrics, report=ctx.report)
         fail_lines = _annotated_fail_lines(ctx)
-        question = (f"终验已连续 {ctx.final_check_fail_streak} 轮测试不绿且已无待修复方法, "
-                    "失败可能源于目标类之外、技能无权修复, 请选择: "
-                    "修复相关测试 / 调整门槛 / 终止。\n失败用例清单:\n"
-                    + "\n".join(f"- {line}" for line in fail_lines))
-        resume = [
-            ResumeOption(option="retry", label="修复相关测试后重试终验",
-                         script="make_plan.py", params=[],
-                         note="先修复失败用例(仅测试代码), make_plan 将自动路由到终验"),
-            _resume_adjust_threshold(),
-            _resume_terminate(),
-        ]
         return Decision(
-            status="needs_input", exit_code=config.EXIT_CONTINUE,
+            status="success", exit_code=config.EXIT_OK,
             summary=(f"终验连续 {ctx.final_check_fail_streak} 轮测试不绿且无待修复方法, "
-                     "升级给用户决策"),
-            route=Route.ASK_USER, reason="终验不绿且无可修复方法, 需用户决策",
-            question=question, resume=resume,
+                     "未达标收尾。失败用例清单: " + "; ".join(fail_lines)),
+            route=Route.FINISH, reason="终验不达标且无可修复方法, 未达标收尾",
+            deliverables=[ctx.coverage_path, ctx.state_path],
             artifacts=[coverage_artifact, {"path": ctx.mvn_log, "kind": "mvn_log"}],
-            metrics=metrics)
+            metrics=metrics, report=ctx.report)
     # 3) 测试不绿 -> failed, 回 make_plan 修复
     if not ctx.tests_green:
         # 终验时所有方法已done, 按失败用例归属分流
-        if ctx.final_check and ctx.scope_met:
+        if ctx.final_check and ctx.failing_count == 0:
             if _failures_all_in_target_class(ctx):
                 # 失败用例全在目标测试类 -> 直接路由 write_code 修复
                 summary, instructions = _init_not_green(ctx)
@@ -497,26 +418,19 @@ def decide_after_init(ctx: InitContext) -> Decision:
                     on_complete=NextCommand("make_plan.py"),
                     artifacts=[coverage_artifact, {"path": ctx.mvn_log, "kind": "mvn_log"}],
                     metrics=metrics, reset_trajectory=True)
-            else:
-                # 包含非目标类失败 -> 立即 ask_user(不必等 streak)
+            elif ctx.test.failed_cases:
+                # 包含非目标类失败 -> 未达标收尾(技能无权修复, 不必等 streak)
                 fail_lines = _annotated_fail_lines(ctx)
-                question = ("终验失败用例包含非目标类, 技能无权修复, 请选择: "
-                            "修复相关测试 / 调整门槛 / 终止。\n失败用例清单:\n"
-                            + "\n".join(f"- {line}" for line in fail_lines))
-                resume = [
-                    ResumeOption(option="retry", label="修复相关测试后重试终验",
-                                 script="make_plan.py", params=[],
-                                 note="先修复失败用例(仅测试代码), make_plan 将自动路由到终验"),
-                    _resume_adjust_threshold(),
-                    _resume_terminate(),
-                ]
                 return Decision(
-                    status="needs_input", exit_code=config.EXIT_CONTINUE,
-                    summary="终验失败用例包含非目标类, 升级给用户决策",
-                    route=Route.ASK_USER, reason="终验不绿且包含非目标类失败, 需用户决策",
-                    question=question, resume=resume,
+                    status="success", exit_code=config.EXIT_OK,
+                    summary=("终验失败用例包含非目标类, 技能无权修复, 未达标收尾。"
+                             "失败用例清单: " + "; ".join(fail_lines)),
+                    route=Route.FINISH, reason="终验不绿且包含非目标类失败, 未达标收尾",
+                    deliverables=[ctx.coverage_path, ctx.state_path],
                     artifacts=[coverage_artifact, {"path": ctx.mvn_log, "kind": "mvn_log"}],
-                    metrics=metrics)
+                    metrics=metrics, report=ctx.report)
+            # 报告缺失/清理失败等环境问题(无失败用例但不绿): 落入通用路径重试,
+            # 由 final_check_fail_streak 兜底, 不直接终态化
         # 非终验或还有待修复方法 -> 保持原有逻辑
         summary, instructions = _init_not_green(ctx)
         return Decision(
@@ -525,12 +439,24 @@ def decide_after_init(ctx: InitContext) -> Decision:
             instructions=instructions,
             artifacts=[coverage_artifact, {"path": ctx.mvn_log, "kind": "mvn_log"}],
             metrics=metrics)
-    # 4) 测试全绿但覆盖率/范围未达标 -> 进入计划阶段
+    # 4) 测试全绿但覆盖率/范围未达标
     if ctx.final_check:
         summary = f"终验未达标: 类级 {ctx.class_rate:.2f}%, 未达标方法 {ctx.failing_count} 个"
     else:
         summary = (f"覆盖率未达标: 类级 {ctx.class_rate:.2f}% (门槛 {ctx.threshold}%), "
                    f"未达标方法 {ctx.failing_count} 个")
+    # 无可补测方法(方法已 done/skipped)却仍未达标 -> 未达标收尾, 否则回计划阶段补测。
+    # 判定用 failing_count(还有 pending 才值得回计划): method 模式下 scope_met 还会因
+    # 目标方法被跳过而为 False, 此时无 pending 可补, 回 make_plan 只会空转
+    if ctx.failing_count == 0:
+        return Decision(
+            status="success", exit_code=config.EXIT_OK,
+            summary=(f"无可补测方法(方法已完成或被跳过), 类级覆盖率 {ctx.class_rate:.2f}% "
+                     f"未达门槛 {ctx.threshold}%, 未达标收尾"),
+            route=Route.FINISH, reason="无可补测方法且未达标, 未达标收尾",
+            deliverables=[ctx.coverage_path, ctx.state_path],
+            artifacts=[coverage_artifact, {"path": ctx.mvn_log, "kind": "mvn_log"}],
+            metrics=metrics, report=ctx.report)
     return Decision(
         status="success", exit_code=config.EXIT_CONTINUE, summary=summary,
         route=Route.MAKE_PLAN, reason="未达标, 进入计划阶段逐方法补测试",
@@ -567,19 +493,16 @@ def _annotated_fail_lines(ctx: InitContext) -> list[str]:
 
 def _failures_all_in_target_class(ctx: InitContext) -> bool:
     """判断失败用例是否全属于目标测试类。
-    
-    返回True: 所有失败用例都属于目标测试类, 可以路由到build_prompt修复。
-    返回False: 包含非目标类失败, 需要立即ask_user, 或 failed_cases 为空(报告缺失/环境问题)。
+
+    返回 True: 所有失败用例都属于目标测试类, 可以路由到 write_code 修复。
+    返回 False: 包含非目标类失败, 或 failed_cases 为空(报告缺失/清理失败等环境问题),
+                或目标测试类名未知; 调用方按 failed_cases 是否为空区分两种成因。
     """
     if not ctx.test_simple:
         return False
     if not ctx.test.failed_cases:
         return False  # 无失败用例但测试不绿 = 报告缺失/环境问题, 不属于目标类修复范畴
-    for fc in ctx.test.failed_cases:
-        cls_simple = fc.class_name.rsplit(".", 1)[-1]
-        if cls_simple != ctx.test_simple:
-            return False
-    return True
+    return len(ctx.test.failures_in_class(ctx.test_simple)) == len(ctx.test.failed_cases)
 
 
 def _init_not_green(ctx: InitContext) -> tuple[str, str]:

@@ -14,7 +14,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 - mvn install 仅主流程一次，全量 mvn 测试仅基线和终验各一次。
 - 类间严格串行，batch_next 原子认领保证无重复委派。
 - 子代理负责单类迭代循环（make_plan → build_prompt → write_code → validate_rules → verify_coverage）。
-- 升级点在类级总预算（默认 30 轮）内自动继续，耗尽才穿透用户。
+- 预算耗尽/不收敛自动跳过当前方法并记录原因（不再询问用户），类级总预算默认 30 轮。
 - 大类自动拆分方法组（pending ≥ 30 方法或 diff ≥ 300 行），每组 ≤ 10 方法独立委派，探索模式预算翻倍。
 - 所有流程由 NEXT_STEP 协议驱动，支持双层断点续跑。
 
@@ -59,7 +59,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 - 快速模式仍受 §4 全局约束与 `references/UnitTestRules.md` 约束，且**无脚本兜底**，必须自行自查：只允许写 `src/test/java/**/<TargetTest>.java`；禁止改 `src/main/java/**`、`pom.xml`、配置；禁止 `try-catch`（异常路径用 `assertThrows`）；每个用例以断言结尾；禁止 `@Disabled`、删除用例、同义反复断言等消红手段。
 - 某方法无法在不改生产代码的前提下测试时，在 `plan.md` 标注 `跳过` + 原因，继续下一个方法；整个类都不宜快速处理时标注该类 `跳过` + 原因，继续下一个类，不阻塞整批；**不得改生产代码使其可测**。
 - 快速模式不跑 `batch_init`，因此**没有基线覆盖率**：类范围一律以 `batch_diff` 候选清单 + 用户确认结果为准，不得用覆盖率数字筛选类，也不得宣称任何覆盖率增量。
-- 快速模式不产出 `state.json` / `batch_state.json`，无类内迭代、升级穿透与批量终验，做完即结束：不进入 §3.2 升级穿透、§5 子代理委派、§6 断点续跑、§7 批量终验与最终报告（§3.1 范围确认门禁仍需走）。
+- 快速模式不产出 `state.json` / `batch_state.json`，无类内迭代、自动跳过与批量终验，做完即结束：不进入 §3.2 预算与跳过、§5 子代理委派、§6 断点续跑、§7 批量终验与最终报告（§3.1 范围确认门禁仍需走）。
 
 ### 0.2 标准模式 todo 清单
 
@@ -69,8 +69,8 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 - [ ] 3. 范围与门槛确认门禁：转述候选类清单，等用户确认范围（--all / --top N / --classes）与门槛
 - [ ] 4. 批量基线：batch_init.py --project-root <worktree> --classes <已确认范围> --threshold <门槛>
 - [ ] 5. 循环认领与委派：batch_next.py 认领 pending 类 → 委派子代理 batch-class-writer 跑类内迭代 → 子代理交付报告 → batch_update.py 落账 → 尚有剩余类则回到本项
-- [ ] 6. 类内/批量级升级穿透为 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令
-- [ ] 7. 全部类 done/skipped 后：batch_finish.py --project-root <worktree> 全量终验（出现 recheck 类则回到第 5 项重新委派）
+- [ ] 6. 收到 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令(预算耗尽已改为自动跳过, 此门禁仅用于范围确认与异常中断)
+- [ ] 7. 全部类 done/skipped/failed/unmet/unverified 后：batch_finish.py --project-root <worktree> 全量终验（出现 recheck 类则回到第 5 项重新委派；unmet 为未达标终态，不再重验；unverified 为环境不可信待复核，非终态——环境修复后重跑本步即可重新终验）
 - [ ] 8. 逐字转述 finish 最终报告（§7）；收尾清理由用户手动执行
 ```
 
@@ -91,12 +91,12 @@ batch_next (原子认领下一 pending 类 → 输出子代理委派要件)
       ↓
 子代理 batch-class-writer: make_plan → build_prompt → write_code
       → validate_rules → verify_coverage 迭代循环
-      (batch_mode: 队列空→类内finish; 升级点预算内自动继续, 耗尽才穿透)
+      (batch_mode: 队列空→类内finish; 预算耗尽→自动跳过并记录 skip_reason)
       ↓  子代理输出交付报告
 batch_update (读类 state.json 落账: done/skipped/failed + 覆盖率 before→after)
       ↓  有剩余 → batch_next 循环; 无剩余 → batch_finish
-batch_finish (一次全量 mvn → 批量终验 → 不达标类重入队 recheck → 最终报告 finish)
-      ↓  recheck 类 → batch_next 重新委派
+batch_finish (一次全量 mvn → 批量终验 → 有补测空间的不达标类重入队 recheck → 其余不达标类终止为 unmet → 环境不可信类标 unverified 待复核 → 最终报告 finish)
+      ↓  recheck 类 → batch_next 重新委派; unmet 类 → 未达标终态(不再重验); unverified 类 → 非终态, 环境修复后重跑 batch_finish 复核
 ```
 
 ### 脚本调用
@@ -152,30 +152,32 @@ python scripts/batch_finish.py --project-root <worktree> [--skip-mvn] [--workdir
 
 差异为空或过滤后无候选类 → 直接 `finish`，不触发门禁。
 
-### 3.2 升级穿透
+### 3.2 预算耗尽与自动跳过
 
-升级穿透分为两个层级：**类内升级穿透**和**批量级升级穿透**。
+预算/不收敛不再询问用户，两个层级都自动跳过并记录原因。
 
-#### 3.2.1 类内升级穿透（verify_coverage / validate_rules 触发）
+#### 3.2.1 类内自动跳过（verify_coverage / validate_rules 触发）
 
-子代理类内迭代中，升级点（连续失败/无提升/预算耗尽/连续规范违规）在 `BATCH_CLASS_ROUND_BUDGET`（默认 30 轮）内**自动继续**，子代理无感。预算耗尽时穿透为 `ask_user`，用户四选项：
+子代理类内迭代中，以下触发点**一律自动跳过当前方法**（子代理无感，不穿透主流程）：
 
-1. **继续**（`make_plan.py --grant-rounds 3`）：追加预算窗口继续迭代；
-2. **跳过该方法**（`make_plan.py --skip-current`）；
-3. **调整门槛**（`make_plan.py --set-threshold N`）；
-4. **终止**。
+- 单方法迭代达上限（`METHOD_ROUND_BUDGET`，默认 8 轮）
+- 全局迭代达上限（`GLOBAL_ROUND_BUDGET`，默认 30 轮）→ 跳过**全部**未达标方法
+- 连续 `TEST_FAIL_STREAK_ROUNDS`(3) 轮测试失败
+- 连续 `NO_IMPROVEMENT_ROUNDS`(3) 轮覆盖率无提升
+- `validate_rules` 连续 `VALIDATE_FAIL_STREAK_LIMIT`(5) 轮规范违规未通过
 
-**编译失败自愈机制**：`verify_coverage.py` 检测到编译错误时，会记录本轮观测（轮次 +1）并自动路由到 `write_code` 修复，而不是升级到用户。编译失败不计入测试失败轨迹，仅用于触发自愈流程。
+跳过动作：方法状态写 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`，随后回
+`make_plan.py` 推进下一方法；队列清空则由 `decide_after_plan` 输出类内完成报告收尾。
 
-**批量模式自动继续机制**：当 `batch_mode=True` 且 `class_round_used < BATCH_CLASS_ROUND_BUDGET` 时，升级点（单方法预算耗尽/全局预算耗尽/连续测试失败/连续无提升/连续规范违规）会自动继续，而不是穿透到用户。自动继续时：
-- 自动追加预算窗口（`method_round_bonus += RESUME_GRANT_ROUNDS`，默认 3 轮）
-- 复位当前方法轨迹
-- 清零 validate_fail_streak
-- 子代理无感继续迭代
+**类级预算**：`class_round_used >= BATCH_CLASS_ROUND_BUDGET`（默认 30 轮，大类探索模式翻倍）
+时，`verify_coverage.py` 在**执行 mvn 之前**预检查并跳过全部未达标方法，避免浪费一轮全量构建。
 
-#### 3.2.2 批量级升级穿透（batch_update 触发）
+**编译失败自愈机制**：`verify_coverage.py` 检测到编译错误时，会记录本轮观测（轮次 +1）并自动路由到 `write_code` 修复，而不是跳过或升级到用户。编译失败不计入测试失败轨迹，仅用于触发自愈流程。
 
-当子代理输出交付报告但类内仍有 pending 方法时，`batch_update.py` 会推断升级原因并转述给用户，用户三选项：
+#### 3.2.2 批量级人工门禁（batch_update 触发，仅异常中断）
+
+类内迭代正常结束后不会再产生类级 `ask_user`。仅当子代理**异常中断**（mvn 环境/依赖失败 exit 2、
+用户主动中止等）且类内仍有 pending 方法时，`batch_update.py` 才转述中断原因请用户决策：
 
 1. **继续委派**：重新委派该类继续迭代；
 2. **跳过该类**（`--skip-class <FQCN> --reason <text>`）；
@@ -285,7 +287,7 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 
 ### 5.1 大类方法组拆分
 
-当类满足大类条件（`diff_add ≥ 300` 或 `pending 方法数 ≥ 30`）时，自动按每组 ≤ 10 个方法拆分，探索模式预算翻倍。完整流程见 `references/delegation.md §4` 和 `references/diff-analysis.md §7`。
+当类满足大类条件（`diff_add ≥ 300` 或 `pending 方法数 ≥ 30`）时，自动按每组 ≤ 10 个方法拆分，探索模式类级预算翻倍（`BATCH_CLASS_ROUND_BUDGET × 2`）。完整流程见 `references/delegation.md §4` 和 `references/diff-analysis.md §7`。
 
 ---
 
@@ -293,17 +295,18 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 
 双层恢复机制：
 
-- **批次级**：`batch_state.json` 记录各类状态（pending/in_progress/done/skipped/failed/recheck）。中断后 `batch_next` 直接续跑（已有 in_progress 直接重新输出委派要件）。
+- **批次级**：`batch_state.json` 记录各类状态（pending/in_progress/done/skipped/failed/recheck/unmet/unverified，unmet 为未达标终态，unverified 为环境不可信待复核的非终态）。中断后 `batch_next` 直接续跑（已有 in_progress 直接重新输出委派要件）。
 - **类级**：`classes/<类名>/state.json` 记录类内迭代进度。子代理从 `make_plan` 续跑（state.json 存在则自动恢复游标）。
 - **僵死复位**：`batch_next --reset-claim <FQCN>` 将僵死 in_progress 复位为 pending。
+- **类内跳过恢复**：被自动跳过的方法为终态，用 `make_plan.py --unskip <方法名[,方法名]>`（状态改回 pending，并重开全局与类级预算窗口，可配 `--grant-rounds N`；同名重载会一并恢复）；`--grant-rounds` / `--set-threshold` 都不能复活 skipped 方法。
 
 ---
 
 ## 7. 完成标准与最终交付
 
 - **类内完成**：所有方法 done/skipped → 子代理输出交付报告（含类内完成报告）。
-- **批量终验**：`batch_finish` 一次全量 mvn → 每个非 skipped 类刷新覆盖率与测试 → 达标且测试绿 → 确认 done；否则 → recheck 重入队。
-- **最终报告**：全部确认 → `finish` 携带 `render_batch_finish_report`（各类 before→after、达标/跳过/失败清单、总轮次、终验结果、worktree 清理提醒），LLM 逐字转述。
+- **批量终验**：`batch_finish` 一次全量 mvn → 每个活跃类（done/recheck/unverified）刷新覆盖率与测试 → 按类判定（覆盖率达标 + 结果可信 + 失败用例不在本类）→ 确认 done；否则 → 有补测空间（存在 pending 方法）→ recheck 重入队；无补测空间 → unmet 未达标终态（记录 skip_reason 并入最终报告）；环境不可信（surefire 报告缺失/目录清理失败）且无补测空间 → unverified 待复核（非终态，环境修复后重跑 `batch_finish` 重新终验）。终态类（skipped/unmet/failed）不参与复核，只进最终报告；全部类均为终态时跳过 mvn 直接出报告。整批 `tests_green` 是聚合值，别的类红灯不会把本类打成 unmet；本类失败归因覆盖该类全部测试类命名变体（`{Simple}Test`/`{Simple}Tests`/`{Simple}IT`），既有 `FooTests` 的失败不会漏算成"其他类的失败"。
+- **最终报告**：全部确认 → `finish` 携带 `render_batch_finish_report`（各类 before→after、达标/跳过/失败/未达标清单、总轮次、总自动跳过方法数、终验结果、worktree 清理提醒），LLM 逐字转述。
 
 ---
 

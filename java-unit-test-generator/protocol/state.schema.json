@@ -73,7 +73,7 @@
     "final_test_summary": {
       "type": ["object", "null"],
       "additionalProperties": true,
-      "description": "达标轮(init 即达标或终验通过)的 surefire 汇总 {tests, failures, errors, skipped}, finish 报告数据源"
+      "description": "达标轮(init 即达标)或终验轮(含未达标收尾)的 surefire 汇总 {tests, failures, errors, skipped}, finish 报告数据源; 未达标终验同样落盘, 收尾报告如实显示测试数字"
     },
     "test_class_file": { "type": "string", "description": "测试类文件绝对路径" },
     "test_class_simple": { "type": "string", "description": "测试类简单名, 如 FooServiceTest" },
@@ -143,6 +143,10 @@
             }
           },
           "description": "本方法历轮测试结果轨迹, 用于连续失败升级判定"
+        },
+        "skip_reason": {
+          "type": ["string", "null"],
+          "description": "跳过原因(预算耗尽/连续失败/无提升/规范违规等自动跳过时写入); 手动跳过或旧版本 state.json 为 null"
         }
       }
     }

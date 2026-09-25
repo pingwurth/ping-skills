@@ -188,8 +188,20 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         # 决策落地到 state
         if decision.mark_done:
             entry.status = MethodStatus.DONE
+        elif decision.auto_skip_method:
+            # 预算耗尽/不收敛: 自动跳过并记录原因(不再 ask_user)
+            entry.status = MethodStatus.SKIPPED
+            entry.skip_reason = decision.auto_skip_reason
+            state.validate_fail_streak = 0
+            logger.info(f"自动跳过方法 {entry.key.label()}: {decision.auto_skip_reason}")
         if decision.reset_trajectory:
             entry.reset_trajectory()
+        if decision.skip_all_pending:
+            for m in state.methods:
+                if m.status == MethodStatus.PENDING:
+                    m.status = MethodStatus.SKIPPED
+                    m.skip_reason = decision.auto_skip_reason
+            logger.info(f"跳过全部未达标方法: {decision.auto_skip_reason}")
         store.save(state)
         logger.info(f"方法 {entry.key.label()}: {before_rate:.1f}% -> {entry.rate:.1f}% "
                     f"(轮次 {state.iteration}/{config.method_round_budget() + state.method_round_bonus}, "

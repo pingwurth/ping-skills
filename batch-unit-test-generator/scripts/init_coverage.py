@@ -9,7 +9,8 @@
 两种模式:
     基线模式(默认)      : 记录 git 基线(规则 d 豁免依据), fast-single-cov.sh 采集覆盖率, 首次生成方法表与状态。
     终验模式(--final-check): 延续既有进度, 仅刷新覆盖率/测试数据并复核完成条件;
-                          连续 FINAL_CHECK_FAIL_STREAK_LIMIT 轮不绿且无待修复方法 -> ask_user。
+                          连续 FINAL_CHECK_FAIL_STREAK_LIMIT 轮不绿且无待修复方法 ->
+                          未达标收尾(环境不可信时为未复核收尾, 环境修复后可重跑复核)。
 
 职责边界(本文件只做编排):
     目标定位 -> javasrc; 模块探测/构建/清理/覆盖率采集 -> maven.run_single_cov_with_fallback; 覆盖率解析 -> jacoco;
@@ -24,7 +25,7 @@
 
 输出(NEXT_STEP):
     达标 -> finish(exit 0); 未达标/测试不绿 -> run_script make_plan(exit 1);
-    终验不绿升级 -> ask_user(exit 1); mvn/报告/环境失败 -> ask_user(exit 2, failed)。
+    终验收敛 -> finish(未达标/未复核收尾, exit 0); mvn/报告/环境失败 -> ask_user(exit 2, failed)。
     产物: <workdir>/state.json 与 coverage.json; 过程日志 <workdir>/mvn.log。
 
 关键约束:
@@ -134,7 +135,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         args: 已解析的命令行参数。
 
     Returns:
-        (Decision, EmitContext): 决策(finish / make_plan / ask_user)与路由上下文。
+        (Decision, EmitContext): 决策(finish / make_plan)与路由上下文。
 
     Raises:
         StepError: 项目根缺失、目标类无法解析、mvn/报告/环境失败(exit 2)。
@@ -294,15 +295,18 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 f"[SKIPPED] 本轮有 {test.skipped} 个测试被跳过(可能使用了 @Disabled), "
                 f"请确认是否有意为之; 被跳过的测试不计入 failures, 但可能导致覆盖率虚高")
         failing = state.pending_methods()
-        scope_met = not failing
-        class_met = class_cov.rate >= threshold
         method_mode = bool(state.target_method)
+        # method 模式达标看目标方法本身(SKILL §7): 被跳过(未覆盖)的目标方法不是 pending,
+        # 但绝不能算"范围已满足", 否则未覆盖的方法会被判成 PASS
+        scope_met = not failing and (not method_mode or _target_method_done(state))
+        class_met = class_cov.rate >= threshold
         met = decisions.init_is_met(scope_met, tests_green, class_met, method_mode)
 
         # 仅终验真正通过(含测试全绿)才持久化 final_checked, 防止未达标时 make_plan 谎报通过
         state.final_checked = bool(args.final_check) and met
-        # 达标轮(init 即达标或终验通过)的测试汇总落盘, finish 报告数据源
-        if met:
+        # 达标轮(init 即达标)与终验轮(含未达标收尾)的测试汇总落盘, finish 报告
+        # "测试:"段数据源 —— 未达标终验也要如实显示本轮测试数字, 而非"未记录"
+        if met or args.final_check:
             state.final_test_summary = {"tests": test.tests, "failures": test.failures,
                                         "errors": test.errors, "skipped": test.skipped}
         if args.final_check:
@@ -325,6 +329,9 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 f"未达标方法 {len(failing)} 个, Tests run {test.tests}, "
                 f"Failures {test.failures}, Errors {test.errors}")
 
+    # 环境不可信(报告缺失/无法解析/目录清理失败, 无失败用例): 报告按"未复核"
+    # 收尾, 不混同普通测试失败; 环境修复后重跑终验即可复核
+    env_uncertain = decisions.env_uncertain(test, bool(uncleaned))
     ctx = decisions.InitContext(
         final_check=bool(args.final_check), method_mode=method_mode,
         class_rate=class_cov.rate, threshold=threshold, failing_count=len(failing),
@@ -332,9 +339,57 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         uncleaned=bool(uncleaned), final_check_fail_streak=state.final_check_fail_streak,
         coverage_path=str(store.coverage_path()), state_path=str(store.path),
         mvn_log=mvn_log, test_simple=state.test_class_simple or None,
-        report=report.render_finish_report(state) if met else None)
+        report=report.render_finish_report(
+            state, met=met,
+            note=_unmet_note(met, tests_green, test, len(failing),
+                             class_cov.rate, threshold, state.target_method,
+                             final_check=bool(args.final_check),
+                             env_uncertain=env_uncertain),
+            unverified=env_uncertain))
+    decision = decisions.decide_after_init(ctx)
     decision = decisions.decide_after_init(ctx)
     return decision, EmitContext(workdir=workdir, state=state)
+
+
+def _unmet_note(met: bool, tests_green: bool, test, failing_count: int,
+                class_rate: float, threshold: float,
+                target_method: str | None = None, *,
+                final_check: bool = False, env_uncertain: bool = False) -> str:
+    """未达标收尾报告的"说明"行(达标时为空串)。
+
+    按成因区分: 环境不可信(未复核) / 测试不绿 / 仍有未达标方法 / method 模式
+    目标方法已跳过 / 无补测方法(方法被跳过)导致类级不达标。
+    "终验"措辞仅在终验模式(final_check)下使用, 基线轮测试未通过不得误述为终验。
+    """
+    if met:
+        return ""
+    if env_uncertain:
+        return ("测试结果不可信(surefire 报告缺失/无法解析或目录清理失败), "
+                "未能确认达标; 环境修复后可重新终验复核")
+    if not tests_green:
+        prefix = "终验测试未通过" if final_check else "测试未通过"
+        return (f"{prefix}(Failures {test.failures}, Errors {test.errors}), "
+                f"未达标方法 {failing_count} 个")
+    if failing_count:
+        return f"仍有 {failing_count} 个未达标方法"
+    if target_method:
+        return f"目标方法 {target_method} 已跳过(未达到门槛 {threshold}%), 无补测余地"
+    return (f"无可补测方法(已完成或被跳过), 类级覆盖率 {class_rate:.2f}% "
+            f"未达门槛 {threshold}%")
+
+
+def _target_method_done(state: State) -> bool:
+    """method 模式: 目标方法是否已达标(done)。
+
+    目标方法被跳过/待测/不存在都算未达标 — 该模式下"范围已满足"必须由目标方法
+    自身给出, 不能靠 pending 队列为空推断(SKILL §7)。
+
+    `--method` 按方法名限定范围, 同名重载全部在范围内, 因此必须每个都 done 才算
+    达标: 只取首个同名条目会让结果依赖 methods 顺序, 漏掉"一个重载 done、另一个
+    重载被跳过"的假 PASS。
+    """
+    in_scope = [m for m in state.methods if m.key.name == state.target_method]
+    return bool(in_scope) and all(m.status == MethodStatus.DONE for m in in_scope)
 
 
 def _build_method_entries(parsed: list[MethodCoverage], method_arg: str | None,
@@ -368,7 +423,10 @@ def _build_method_entries(parsed: list[MethodCoverage], method_arg: str | None,
             if not in_scope and entry.status != MethodStatus.DONE:
                 entry.status = MethodStatus.SKIPPED
             elif entry.status != MethodStatus.DONE and (m.is_abstract or rate >= threshold):
+                # 达标晋升: 清空历史跳过原因, 维持 "done => skip_reason 为空" 不变式
+                # (报告/方法组复活/--unskip 都按该不变式判定方法是否被跳过)
                 entry.status = MethodStatus.DONE
+                entry.skip_reason = None
             elif entry.status == MethodStatus.DONE and rate < threshold and not m.is_abstract:
                 # 打回 pending: 清除陈旧轨迹, 升级判定只基于本次入队后的轮次
                 entry.status = MethodStatus.PENDING
@@ -395,7 +453,8 @@ def _carry_prev(prev: MethodCoverage | None, m: MethodCoverage) -> MethodCoverag
     entry = MethodCoverage(key=prev.key, covered=m.covered, missed=m.missed,
                            status=prev.status, round_rates=list(prev.round_rates),
                            round_test_results=list(prev.round_test_results),
-                           initial_rate=prev.initial_rate)
+                           initial_rate=prev.initial_rate,
+                           skip_reason=prev.skip_reason)
     return entry
 
 

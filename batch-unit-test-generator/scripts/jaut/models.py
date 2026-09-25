@@ -139,6 +139,8 @@ class MethodCoverage:
     round_test_results: list[TestOutcome] = field(default_factory=list)
     # init 基线快照(finish 报告的 before 值); 旧 state.json 无此字段, 报告降级显示"未记录"
     initial_rate: Optional[float] = None
+    # 跳过原因(预算耗尽/规范违规不收敛等自动跳过时写入); 手动跳过或旧 state.json 为 None
+    skip_reason: Optional[str] = None
 
     @property
     def rate(self) -> float:
@@ -168,6 +170,8 @@ class MethodCoverage:
         }
         if self.initial_rate is not None:
             data["initial_rate"] = round(self.initial_rate, 2)
+        if self.skip_reason is not None:
+            data["skip_reason"] = self.skip_reason
         if self.round_test_results:
             data["round_test_results"] = [r.to_dict() for r in self.round_test_results]
         return data
@@ -183,6 +187,7 @@ class MethodCoverage:
             round_rates=list(data.get("round_rates", []) or []),
             round_test_results=[TestOutcome.from_dict(r) for r in data.get("round_test_results", []) or []],
             initial_rate=float(initial) if initial is not None else None,
+            skip_reason=data.get("skip_reason"),
         )
 
 
@@ -274,6 +279,16 @@ class TestResult:
     def fail_lines(self) -> list[str]:
         return [fc.summary_line() for fc in self.failed_cases]
 
+    def failures_in_class(self, test_simple: Optional[str]) -> list[FailedCase]:
+        """失败用例中属于该测试类的部分(按测试类简名匹配; 简名未知时返回空)。
+
+        失败用例归属判定的单一实现, 供终验分流(decisions)与批量按类终态化共用。
+        """
+        if not test_simple:
+            return []
+        return [fc for fc in self.failed_cases
+                if fc.class_name.rsplit(".", 1)[-1] == test_simple]
+
     def failure_count_for_trajectory(self, uncleaned_dirs: bool = False) -> int:
         """计算本轮失败计数, 供 decisions.test_failure_streak 判定连续失败。
 
@@ -349,8 +364,10 @@ class Decision:
     # 需由入口脚本落地到 state 的动作(决策本身不修改状态):
     mark_done: bool = False          # 当前方法达标, 标记 status=done
     reset_trajectory: bool = False   # 升级后复位轨迹, 用户继续时获得全新窗口
-    # batch_mode 下预算内自动继续(子代理无感); 耗尽时 False 穿透 ask_user
-    auto_grant: bool = False
+    # 预算耗尽/不收敛时不再 ask_user, 改由入口脚本自动跳过并记录原因:
+    auto_skip_method: bool = False   # 跳过当前方法(status=skipped + skip_reason)
+    auto_skip_reason: str = ""       # 跳过原因(写入 MethodCoverage.skip_reason)
+    skip_all_pending: bool = False   # 跳过所有 pending 方法(全局/类级预算耗尽)
 
     @property
     def next_type(self) -> str:
@@ -419,6 +436,7 @@ class State:
     # 批量模式专用(batch-unit-test-generator 新技能均为新建, from_dict 缺省兜底)
     batch_mode: bool = False         # 是否处于批量模式(影响 decide_after_plan / decide_after_verify 路由)
     class_round_used: int = 0        # 类级已耗轮次(供升级判定, 每轮 verify 后递增)
+    class_round_bonus: int = 0       # 类级预算追加窗口(make_plan --unskip 落地, 不随游标清零)
     exploration_mode: bool = False   # 探索模式(大类拆分时预算翻倍)
 
     # -- 便捷访问 ---------------------------------------------------------- #
@@ -432,6 +450,44 @@ class State:
     def pending_methods(self) -> list[MethodCoverage]:
         """返回所有状态为 pending 的方法列表。"""
         return [m for m in self.methods if m.status == MethodStatus.PENDING]
+
+    # -- 类级预算(批量模式) ------------------------------------------------- #
+    @property
+    def class_round_budget(self) -> int:
+        """有效类级预算: 基础预算(探索模式翻倍) + `--unskip` 追加的窗口。
+
+        单一事实源: 预算判定(verify_coverage 预检查)、决策与渲染层都读这里,
+        渲染层因此无需反向依赖 decisions。
+        """
+        budget = config.batch_class_round_budget()
+        if self.exploration_mode:
+            budget *= config.EXPLORATION_MODE_MULTIPLIER
+        return budget + self.class_round_bonus
+
+    @property
+    def class_budget_exhausted(self) -> bool:
+        """类级预算是否耗尽; 非批量模式(单类技能语义)恒为 False。"""
+        if not self.batch_mode:
+            return False
+        return self.class_round_used >= self.class_round_budget
+
+    @property
+    def class_budget_skip_reason(self) -> str:
+        """类级预算耗尽时的统一跳过原因(verify_coverage 预检查与 batch_finish 共用)。"""
+        return (f"类级预算耗尽({self.class_round_used}/{self.class_round_budget} 轮), "
+                "未达标方法不再迭代")
+
+    def skip_pending_methods(self, reason: str) -> list[MethodCoverage]:
+        """把全部 pending 方法置为 skipped 并写入原因, 返回被跳过的方法列表。
+
+        批量模式"类级预算耗尽"两条落地路径(verify_coverage 预检查、batch_finish
+        终态化)共用, 保证状态与原因串一致。
+        """
+        skipped = [m for m in self.methods if m.status == MethodStatus.PENDING]
+        for m in skipped:
+            m.status = MethodStatus.SKIPPED
+            m.skip_reason = reason
+        return skipped
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -477,6 +533,8 @@ class State:
         if self.batch_mode:
             data["batch_mode"] = self.batch_mode
             data["class_round_used"] = self.class_round_used
+            if self.class_round_bonus:
+                data["class_round_bonus"] = self.class_round_bonus
             if self.exploration_mode:
                 data["exploration_mode"] = self.exploration_mode
         return data
@@ -523,6 +581,7 @@ class State:
             jacoco_config_cache=data.get("jacoco_config_cache"),
             batch_mode=bool(data.get("batch_mode", False)),
             class_round_used=int(data.get("class_round_used", 0)),
+            class_round_bonus=int(data.get("class_round_bonus", 0)),
             exploration_mode=bool(data.get("exploration_mode", False)),
         )
 
@@ -530,7 +589,10 @@ class State:
 # --------------------------------------------------------------------------- #
 # 批量计划条目与总态(batch-unit-test-generator)
 # --------------------------------------------------------------------------- #
-_BATCH_CLASS_STATUSES = ("pending", "in_progress", "done", "skipped", "failed", "recheck")
+# 批量类状态: unmet = 终验未达标且无补测空间的终态(不再重验);
+# unverified = 终验环境不可信且无补测空间的非终态(修复环境后重跑 batch_finish 复核)
+_BATCH_CLASS_STATUSES = ("pending", "in_progress", "done", "skipped", "failed",
+                         "recheck", "unmet", "unverified")
 
 
 @dataclass
@@ -549,6 +611,8 @@ class BatchClassEntry:
     final_rate: Optional[float] = None
     has_existing_tests: bool = False
     attempts: int = 0
+    # 历史字段名保留(batch_state.json 兼容); 升级穿透移除后语义改为类内自动
+    # 跳过(带 skip_reason)的方法数, 由 batch_update 落账时从类 state.json 统计
     escalations: int = 0
     rounds_used: int = 0
     skip_reason: Optional[str] = None
@@ -698,5 +762,10 @@ class BatchState:
         return None
 
     def all_done(self) -> bool:
-        """所有类均已 done/skipped/failed(无 pending/in_progress/recheck)。"""
-        return all(c.status in ("done", "skipped", "failed") for c in self.classes)
+        """所有类均已 done/skipped/failed/unmet(无 pending/in_progress/recheck)。
+
+        unverified(环境不可信待复核)不算完成: 它不可被 batch_next 认领, 路由会经
+        batch_next 转入 batch_finish 重新终验。
+        """
+        return all(c.status in ("done", "skipped", "failed", "unmet")
+                   for c in self.classes)

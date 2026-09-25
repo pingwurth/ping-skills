@@ -54,6 +54,35 @@ def test_state_round_trip_budget_window_fields():
     assert restored.validate_fail_streak == 4
 
 
+def test_state_round_trip_class_round_bonus():
+    """类级预算追加窗口(--unskip 落地)序列化往返; 为 0 时不写出该字段。"""
+    s = _sample_state()
+    s.batch_mode = True
+    s.class_round_used = 30
+    assert "class_round_bonus" not in s.to_dict()   # 未追加时不落盘
+    s.class_round_bonus = 30
+    data = s.to_dict()
+    assert data["class_round_bonus"] == 30
+    assert State.from_dict(data).class_round_bonus == 30
+    legacy = State.from_dict({"project_root": "/r", "target_class": "c"})
+    assert legacy.class_round_bonus == 0
+
+
+def test_state_round_trip_skip_reason():
+    """跳过原因序列化往返; 未跳过的方法不写出该字段, 旧 state.json 读取为 None。"""
+    s = _sample_state()
+    untouched = MethodCoverage(key=MethodKey("bar", "(int)"), covered=5, missed=5)
+    s.methods = [s.methods[0], untouched]
+    s.methods[0].status = MethodStatus.SKIPPED
+    s.methods[0].skip_reason = "连续 3 轮测试失败不收敛(每轮 Failures/Errors: [(1, 0)])"
+    data = s.to_dict()
+    assert data["methods"][0]["skip_reason"].startswith("连续 3 轮测试失败不收敛")
+    assert "skip_reason" not in data["methods"][1]
+    restored = State.from_dict(data)
+    assert restored.methods[0].skip_reason == s.methods[0].skip_reason
+    assert restored.methods[1].skip_reason is None
+
+
 def test_from_dict_budget_window_fields_default_zero():
     """旧版本 state.json 无这些字段时默认 0(兼容断点续跑)。"""
     s = State.from_dict({"project_root": "/r", "target_class": "com.x.Foo"})
@@ -148,3 +177,40 @@ def test_locked_sequential_round_trip(tmp_path: Path):
     with store.locked():
         loaded = store.load()
     assert loaded is not None and loaded.target_class == "com.x.Foo"
+
+
+def test_state_class_budget_properties():
+    """类级预算口径由模型自身计算: 非批量模式恒不耗尽, 追加窗口计入有效预算。"""
+    base = config.batch_class_round_budget()
+    single_mode = State(project_root="/r", target_class="c",
+                        class_round_used=base * 10)
+    assert single_mode.class_budget_exhausted is False   # 单类技能语义不参与判定
+
+    batch = State(project_root="/r", target_class="c", batch_mode=True,
+                  class_round_used=base, class_round_bonus=base,
+                  exploration_mode=True)
+    assert batch.class_round_budget == base * config.EXPLORATION_MODE_MULTIPLIER + base
+    assert batch.class_budget_exhausted is False
+    batch.class_round_used = batch.class_round_budget
+    assert batch.class_budget_exhausted is True
+
+
+def test_state_skip_pending_methods_sweeps_with_unified_reason():
+    """类级预算耗尽的批量跳过与原因串由模型单点提供(verify_coverage / batch_finish 共用)。"""
+    base = config.batch_class_round_budget()
+    pending = MethodCoverage(key=MethodKey("a", "()V"), covered=1, missed=9,
+                             status=MethodStatus.PENDING)
+    done = MethodCoverage(key=MethodKey("b", "()V"), covered=5, missed=5,
+                          status=MethodStatus.DONE)
+    state = State(project_root="/r", target_class="c", batch_mode=True,
+                  class_round_used=base, methods=[pending, done])
+
+    assert state.class_budget_exhausted is True
+    reason = state.class_budget_skip_reason
+    skipped = state.skip_pending_methods(reason)
+
+    assert [m.key.name for m in skipped] == ["a"]
+    assert pending.status == MethodStatus.SKIPPED
+    assert pending.skip_reason == f"类级预算耗尽({base}/{base} 轮), 未达标方法不再迭代"
+    assert done.status == MethodStatus.DONE        # 非 pending 不被扫到
+    assert done.skip_reason is None

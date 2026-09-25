@@ -10,7 +10,7 @@ import pytest
 
 from jaut import config
 from jaut.cli import StepError
-from jaut.models import Decision, Route, State
+from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, Route, State
 from scripts.validate_rules import handler
 
 
@@ -220,29 +220,60 @@ def test_violation_increments_and_persists_streak(tmp_path):
     assert state.validate_fail_streak == 1
 
 
-def test_streak_at_limit_escalates_and_resets_window(tmp_path):
-    """连续达上限(5): 升级 ask_user 并携带 resume, 计数复位为全新窗口。"""
+def test_streak_at_limit_auto_skips_current_method(tmp_path):
+    """连续达上限(5): 自动跳过当前方法(写 skip_reason)并回 make_plan, 不再 ask_user。"""
+    method = MethodKey(name="foo", desc="(int)")
     state = State(project_root=str(tmp_path), target_class="c",
-                 test_class_file=str(_violating_file(tmp_path)), git_baseline={})
+                 test_class_file=str(_violating_file(tmp_path)), git_baseline={},
+                 current_method=method,
+                 methods=[MethodCoverage(key=method, covered=5, missed=5)])
     state.validate_fail_streak = config.VALIDATE_FAIL_STREAK_LIMIT - 1
     decision = _run_with_violations(tmp_path, state, [MagicMock()])
-    assert decision.route == Route.ASK_USER
-    assert decision.status == "needs_input"
-    assert str(config.VALIDATE_FAIL_STREAK_LIMIT) in decision.question
-    # 升级后全新窗口: 计数已复位
+    assert decision.route == Route.MAKE_PLAN
+    assert decision.status == "success"
+    assert decision.resume == []
+    entry = state.find_method(method)
+    assert entry.status == MethodStatus.SKIPPED
+    assert str(config.VALIDATE_FAIL_STREAK_LIMIT) in entry.skip_reason
+    # 跳过后全新窗口: 计数已复位
     assert state.validate_fail_streak == 0
-    # resume: 继续修复(validate_rules)/跳过方法(make_plan --skip-current)/终止
-    options = {r.option: r for r in decision.resume}
-    assert set(options) == {"continue", "skip_method", "terminate"}
-    assert options["continue"].script == "validate_rules.py"
-    assert options["skip_method"].params == ["--skip-current"]
-    assert options["terminate"].script == ""
+
+
+def test_auto_skip_without_current_method_raises_state_error(tmp_path):
+    """达上限但 state 无 current_method -> state_error(exit 3), 不得假报已跳过。
+
+    回归: 曾静默返回"自动跳过"决策而方法表未变, make_plan 再次拿到同一方法 ->
+    规范修复循环失去上界。
+    """
+    state = State(project_root=str(tmp_path), target_class="c",
+                  test_class_file=str(_violating_file(tmp_path)), git_baseline={})
+    state.validate_fail_streak = config.VALIDATE_FAIL_STREAK_LIMIT - 1
+    with pytest.raises(StepError) as exc_info:
+        _run_with_violations(tmp_path, state, [MagicMock()])
+    assert exc_info.value.decision.exit_code == config.EXIT_STATE
+    assert "无法落地跳过" in exc_info.value.decision.summary
+
+
+def test_auto_skip_with_unknown_current_method_raises_state_error(tmp_path):
+    """current_method 不在方法表(状态不一致) -> state_error, 不把不存在的方法标 skipped。"""
+    method = MethodKey(name="foo", desc="(int)")
+    state = State(project_root=str(tmp_path), target_class="c",
+                  test_class_file=str(_violating_file(tmp_path)), git_baseline={},
+                  current_method=method, methods=[])
+    state.validate_fail_streak = config.VALIDATE_FAIL_STREAK_LIMIT - 1
+    with pytest.raises(StepError) as exc_info:
+        _run_with_violations(tmp_path, state, [MagicMock()])
+    assert exc_info.value.decision.exit_code == config.EXIT_STATE
+    assert state.find_method(method) is None   # 未产生任何假跳过记录
 
 
 def test_missing_test_file_counts_toward_streak(tmp_path):
     """测试文件缺失同样计入违规循环(是 write_code 失败的一种形态)。"""
+    method = MethodKey(name="foo", desc="(int)")
     state = State(project_root=str(tmp_path), target_class="c",
-                 test_class_file=str(tmp_path / "nonexistent.java"))
+                 test_class_file=str(tmp_path / "nonexistent.java"),
+                 current_method=method,
+                 methods=[MethodCoverage(key=method, covered=5, missed=5)])
     state.validate_fail_streak = config.VALIDATE_FAIL_STREAK_LIMIT - 1
     args = _make_args(str(tmp_path))
     with patch("scripts.validate_rules.StateStore") as MockStore, \
@@ -250,7 +281,8 @@ def test_missing_test_file_counts_toward_streak(tmp_path):
          patch("scripts.validate_rules.prompt.default_rules_file", return_value=Path("rules.md")):
         MockStore.return_value.load.return_value = state
         decision, ectx = handler(args)
-    assert decision.route == Route.ASK_USER
+    assert decision.route == Route.MAKE_PLAN
+    assert state.find_method(method).status == MethodStatus.SKIPPED
 
 
 def test_pass_resets_streak(tmp_path):

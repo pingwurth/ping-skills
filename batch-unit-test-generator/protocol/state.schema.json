@@ -73,7 +73,7 @@
     "final_test_summary": {
       "type": ["object", "null"],
       "additionalProperties": true,
-      "description": "达标轮(init 即达标或终验通过)的 surefire 汇总 {tests, failures, errors, skipped}, finish 报告数据源"
+      "description": "达标轮(init 即达标)或终验轮(含未达标收尾)的 surefire 汇总 {tests, failures, errors, skipped}, finish 报告数据源; 未达标终验同样落盘, 收尾报告如实显示测试数字"
     },
     "test_class_file": { "type": "string", "description": "测试类文件绝对路径" },
     "test_class_simple": { "type": "string", "description": "测试类简单名, 如 FooServiceTest" },
@@ -106,7 +106,18 @@
     "class_round_used": {
       "type": "integer",
       "minimum": 0,
-      "description": "类级已耗轮次(每轮 verify_coverage._record_observation 递增; 供升级判定, BATCH_CLASS_ROUND_BUDGET 上限内自动继续)"
+      "description": "类级已耗轮次(每轮 verify_coverage._record_observation 递增; 达 class_round_budget 上限即不再迭代, 由 verify_coverage 预检查/batch_finish 跳过全部 pending)"
+    },
+    "class_round_bonus": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "类级预算追加窗口(make_plan.py --unskip 恢复被跳过方法时 +batch_class_round_budget(); 有效预算 = 基础预算 × 探索模式倍数 + 本字段)"
+    },
+    "exploration_mode": {
+      "type": "boolean",
+      "default": false,
+      "description": "大类拆分探索模式; 为 true 时类级有效预算 = batch_class_round_budget() × EXPLORATION_MODE_MULTIPLIER"
     }
   },
   "definitions": {
@@ -153,6 +164,10 @@
             }
           },
           "description": "本方法历轮测试结果轨迹, 用于连续失败升级判定"
+        },
+        "skip_reason": {
+          "type": ["string", "null"],
+          "description": "跳过原因(预算耗尽/连续失败/无提升/规范违规等自动跳过时写入); 组外方法/手动跳过或旧版本 state.json 为 null"
         }
       }
     }

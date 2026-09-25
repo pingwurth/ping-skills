@@ -150,6 +150,8 @@ def test_handler_marks_done_when_decision_says_so(tmp_path):
         mock_decision = MagicMock()
         mock_decision.mark_done = True
         mock_decision.reset_trajectory = False
+        mock_decision.auto_skip_method = False
+        mock_decision.skip_all_pending = False
         mock_decision.route = Route.MAKE_PLAN
         mock_decide.return_value = mock_decision
 
@@ -185,7 +187,9 @@ def test_handler_saves_state_after_decision(tmp_path):
         mock_fast.return_value = MagicMock(ok=True)
         mock_fallback.assert_not_called()
         mock_record.return_value = (method_entry, 50.0)
-        mock_decide.return_value = MagicMock(mark_done=False, reset_trajectory=False, route=Route.BUILD_PROMPT)
+        mock_decide.return_value = MagicMock(mark_done=False, reset_trajectory=False,
+                                             auto_skip_method=False, skip_all_pending=False,
+                                             route=Route.BUILD_PROMPT)
 
         handler(_make_args(str(tmp_path)))
 
@@ -358,3 +362,83 @@ def test_handler_compile_error_increments_test_history(tmp_path):
     assert state.test_history[0]["round"] == 2
     assert "compile_errors" in state.test_history[0]
     assert "Test.java:10:5" in state.test_history[0]["compile_errors"][0]
+
+
+# --------------------------------------------------------------------------- #
+# 预算耗尽自动跳过(不再 ask_user)
+# --------------------------------------------------------------------------- #
+def _real_state(tmp_path) -> State:
+    """真实 State(非 Mock): 自动跳过要落地 status/skip_reason, 需要真实容器。"""
+    m1 = MethodCoverage(key=MethodKey("foo", "()V"), covered=5, missed=5)
+    m2 = MethodCoverage(key=MethodKey("bar", "()V"), covered=3, missed=7)
+    return State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        current_method=m1.key,
+        module=".",
+        mvn_log=str(tmp_path / "mvn.log"),
+        test_class_file=str(tmp_path / "MyServiceTest.java"),
+        test_class_simple="MyServiceTest",
+        iteration=8,
+        global_iteration=8,
+        threshold=80.0,
+        methods=[m1, m2],
+    )
+
+
+def _run_with_decision(tmp_path, state, decision, method_entry, before=50.0):
+    mock_test = TestResult(tests=1, failures=0, errors=0, report_found=True, parse_errors=0)
+    with patch("scripts.verify_coverage.StateStore") as MockStore, \
+         patch("scripts.verify_coverage.setup_logger"), \
+         patch("scripts.verify_coverage.maven.clean_jacoco_dirs"), \
+         patch("scripts.verify_coverage.maven.clean_surefire_dirs", return_value=[]), \
+         patch("scripts.verify_coverage.maven.run_fast_single_cov") as mock_fast, \
+         patch("scripts.verify_coverage.maven.parse_compile_errors", return_value=[]), \
+         patch("scripts.verify_coverage.surefire.parse_surefire_reports", return_value=mock_test), \
+         patch("scripts.verify_coverage.jacoco.report_paths", return_value=(Path("x.xml"), Path("x.csv"))), \
+         patch("scripts.verify_coverage.Path.is_file", return_value=True), \
+         patch("scripts.verify_coverage._record_observation", return_value=(method_entry, before)), \
+         patch("scripts.verify_coverage.decisions.decide_after_verify", return_value=decision):
+        MockStore.return_value.locked.return_value = _locked_mock()
+        MockStore.return_value.load.return_value = state
+        mock_fast.return_value = MagicMock(ok=True)
+        return handler(_make_args(str(tmp_path)))
+
+
+def test_handler_auto_skip_marks_method_skipped_with_reason(tmp_path):
+    """auto_skip_method 决策: 当前方法改 skipped 并写入原因, 计数清零, 回 make_plan。"""
+    state = _real_state(tmp_path)
+    state.validate_fail_streak = 3
+    decision = Decision(status="success", exit_code=config.EXIT_CONTINUE,
+                        summary="预算耗尽, 自动跳过", route=Route.MAKE_PLAN,
+                        reason="预算耗尽, 自动跳过",
+                        auto_skip_method=True,
+                        auto_skip_reason="单方法迭代已达上限 8 轮仍未达标(当前 50.0%)",
+                        reset_trajectory=True)
+
+    result, _ = _run_with_decision(tmp_path, state, decision, state.methods[0])
+
+    assert result.route == Route.MAKE_PLAN
+    assert state.methods[0].status == MethodStatus.SKIPPED
+    assert state.methods[0].skip_reason == "单方法迭代已达上限 8 轮仍未达标(当前 50.0%)"
+    assert state.validate_fail_streak == 0
+    # 其余方法不受影响
+    assert state.methods[1].status == MethodStatus.PENDING
+
+
+def test_handler_skip_all_pending_marks_every_pending_method(tmp_path):
+    """skip_all_pending(全局预算耗尽): 当前方法连同其余 pending 一并跳过。"""
+    state = _real_state(tmp_path)
+    decision = Decision(status="success", exit_code=config.EXIT_CONTINUE,
+                        summary="全局预算耗尽", route=Route.MAKE_PLAN,
+                        reason="全局预算耗尽, 跳过全部未达标方法",
+                        auto_skip_method=True,
+                        auto_skip_reason="全局迭代已达上限 30 轮, 未达标方法不再迭代",
+                        skip_all_pending=True)
+
+    result, _ = _run_with_decision(tmp_path, state, decision, state.methods[0])
+
+    assert result.route == Route.MAKE_PLAN
+    for m in state.methods:
+        assert m.status == MethodStatus.SKIPPED
+        assert m.skip_reason == "全局迭代已达上限 30 轮, 未达标方法不再迭代"

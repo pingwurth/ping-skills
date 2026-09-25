@@ -5,7 +5,7 @@
     LLM 在 write_code 阶段保存测试文件后进入本脚本(SKILL.md §5)。本脚本是 mvn
     执行前的规范闸门: 违规直接打回 write_code 修复, 通过才进入 verify_coverage.py。
     违规修复轮不计入迭代轮次, 但连续 VALIDATE_FAIL_STREAK_LIMIT(5) 轮未通过
-    即升级 ask_user(SKILL.md §6, 禁止 write_code <-> validate_rules 无限循环)。
+    即自动跳过当前方法(SKILL.md §6, 禁止 write_code <-> validate_rules 无限循环)。
 
 校验规则(来源 references/UnitTestRules.md, 硬规则由 jaut/rules 引擎判定):
     规则 c: 禁止 catch 与裸 try; 不带 catch 的 try-with-resources 放行(异常用 assertThrows)。
@@ -24,7 +24,9 @@
     全部通过 -> run_script verify_coverage.py(success, exit 0);
     有违规 / 测试文件缺失 -> write_code(success, exit 1), instructions 附行号级违规清单
     或创建骨架要求, 第 2 轮起附最近一次 mvn 日志提示;
-    连续 5 轮未通过 -> ask_user(exit 1), 附违规清单与用户选项恢复指引。
+    连续 5 轮未通过 -> 标记当前方法 skipped(写入 skip_reason)并 run_script
+    make_plan.py(exit 1), instructions 附违规清单与规范文档路径;
+    state 中无 current_method 可跳过 -> ask_user(exit 3, failed)。
 
 依赖: jaut.rules / jaut.javasrc / jaut.prompt / jaut.state / jaut.cli / jaut.models。
 """
@@ -38,9 +40,9 @@ from pathlib import Path
 import _path_setup  # noqa: F401  — 初始化 sys.path 以导入 jaut 包
 
 from jaut import config, javasrc, prompt, rules  # noqa: E402
-from jaut.cli import EmitContext, add_common_args, require_workdir, run_cli  # noqa: E402
+from jaut.cli import EmitContext, StepError, add_common_args, require_workdir, run_cli  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import Decision, ResumeOption, Route, State  # noqa: E402
+from jaut.models import Decision, MethodStatus, Route, State  # noqa: E402
 from jaut.state import StateStore  # noqa: E402
 
 SCRIPT_NAME = "validate_rules"
@@ -61,14 +63,14 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         2. 解析测试文件路径(--test-file 优先, 其次 state.test_class_file);
         3. 测试文件缺失/不存在 -> write_code(要求创建骨架);
         4. 净化源码后运行硬规则引擎(c/d), 汇总违规;
-        5. 有违规 -> 计数连续违规轮, 达上限升级 ask_user, 否则 write_code(附违规清单);
+        5. 有违规 -> 计数连续违规轮, 达上限自动跳过当前方法, 否则 write_code(附违规清单);
         6. 全部通过 -> 清零违规计数, verify_coverage。
 
     Args:
         args: 已解析的命令行参数。
 
     Returns:
-        (Decision, EmitContext): verify_coverage / write_code / ask_user 决策与路由上下文。
+        (Decision, EmitContext): verify_coverage / write_code / make_plan 决策与路由上下文。
 
     Raises:
         StepError: workdir 缺失(状态错误 exit 3)。
@@ -92,7 +94,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if not test_path.is_file():
             streak = _bump_fail_streak(state, store)
             if streak >= config.VALIDATE_FAIL_STREAK_LIMIT:
-                return _escalate_validate(streak, rules_file, workdir, state)
+                return _auto_skip_validate(streak, rules_file, workdir, state, store)
             return _write_code(
                 f"测试类不存在: {test_file}",
                 f"只能创建 {test_file} 这一个文件(JUnit5 + Mockito 骨架, 包名与被测类一致), "
@@ -109,8 +111,8 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if violations:
             streak = _bump_fail_streak(state, store)
             if streak >= config.VALIDATE_FAIL_STREAK_LIMIT:
-                return _escalate_validate(streak, rules_file, workdir, state,
-                                           violations)
+                return _auto_skip_validate(streak, rules_file, workdir, state,
+                                           store, violations)
             detail = "\n".join(f"- {v.render()}" for v in violations)
             return _write_code(
                 f"规范校验未通过: {len(violations)} 处违规(连续第 {streak} 轮)",
@@ -130,7 +132,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 def _bump_fail_streak(state: State | None, store: StateStore) -> int:
     """连续违规计数 +1 并落盘; 返回更新后的计数(state 为 None 时返回 0 不计数)。
 
-    达上限时复位为 0(升级后全新窗口, 与轨迹复位同语义), 调用方据返回值升级。
+    达上限时复位为 0(跳过后全新窗口, 与轨迹复位同语义), 调用方据返回值跳过该方法。
     """
     if state is None:
         return 0
@@ -142,31 +144,40 @@ def _bump_fail_streak(state: State | None, store: StateStore) -> int:
     return streak
 
 
-def _escalate_validate(streak: int, rules_file: str,
-                       workdir: Path, state: State | None,
-                       violations: list | None = None) -> tuple[Decision, EmitContext]:
-    """连续违规达上限: 升级 ask_user(SKILL.md §6, 规范修复循环同样有预算)。"""
-    resume = [
-        ResumeOption(option="continue", label="继续修复",
-                     script="validate_rules.py", params=[],
-                     note="按此前违规清单修复后重新运行本脚本校验"),
-        ResumeOption(option="skip_method", label="跳过该方法",
-                     script="make_plan.py", params=["--skip-current"]),
-        ResumeOption(option="terminate", label="终止"),
-    ]
+def _auto_skip_validate(streak: int, rules_file: str,
+                        workdir: Path, state: State | None,
+                        store: StateStore,
+                        violations: list | None = None) -> tuple[Decision, EmitContext]:
+    """连续违规达上限: 自动跳过当前方法(SKILL.md §6, 规范修复循环同样有预算)。
+
+    直接把当前方法标记为 skipped 并写入 skip_reason, 回 make_plan 推进下一方法;
+    无剩余 pending 方法时由 decide_after_plan 未达标收尾。
+    state 中无法定位 current_method 对应条目时抛 state_error(exit 3): 假报"已跳过"
+    会让 make_plan 再次拿到同一方法, 规范修复循环失去上界。
+    """
     detail = ""
     if violations:
-        detail = "\n最近一轮违规清单:\n" + "\n".join(f"- {v.render()}" for v in violations)
-    question = (f"测试代码已连续 {streak} 轮规范校验未通过"
-                f"{'(测试类文件未创建)' if violations is None else ''}, "
-                "自动修复疑似不收敛, 可能是场景确实需要与硬规则冲突的写法"
-                "(如规则 c 禁止 catch 而场景需要资源清理)。"
-                f"继续修复 / 跳过该方法 / 终止? 规范权威文档: {rules_file}{detail}")
+        detail = " 最近一轮违规清单: " + "; ".join(str(v.render()) for v in violations)
+    reason = (f"连续 {streak} 轮规范校验未通过(测试类文件"
+              f"{'未创建' if violations is None else '存在违规'}), 自动跳过")
+    entry = (state.find_method(state.current_method)
+             if state is not None and state.current_method is not None else None)
+    if entry is None:
+        raise StepError.state_error(
+            f"规范校验连续 {streak} 轮未通过, 需自动跳过当前方法, 但 state 中"
+            "无 current_method 对应的方法条目(无法落地跳过, 拒绝假报已跳过)",
+            question="state.json 缺少 current_method 或与 methods 不一致, "
+                     "请检查状态与协议后重试")
+    entry.status = MethodStatus.SKIPPED
+    entry.skip_reason = reason
+    state.validate_fail_streak = 0
+    store.save(state)
     decision = Decision(
-        status="needs_input", exit_code=config.EXIT_CONTINUE,
-        summary=f"规范校验连续 {streak} 轮未通过, 升级给用户决策",
-        route=Route.ASK_USER, reason="规范修复循环达上限, 需用户决策",
-        question=question, resume=resume)
+        status="success", exit_code=config.EXIT_CONTINUE,
+        summary=f"规范校验连续 {streak} 轮未通过, 自动跳过当前方法",
+        route=Route.MAKE_PLAN, reason="规范修复循环达上限, 自动跳过当前方法",
+        instructions=(f"当前方法已因规范校验连续 {streak} 轮未通过被跳过。"
+                      f"规范权威文档: {rules_file}{detail}"))
     return decision, EmitContext(workdir=workdir, state=state)
 
 

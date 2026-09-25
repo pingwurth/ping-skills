@@ -68,14 +68,13 @@ ASSERTION_FAILURE_TYPE_PREFIXES = (
 # --------------------------------------------------------------------------- #
 # 迭代预算与升级(SKILL.md §6)
 # --------------------------------------------------------------------------- #
-NO_IMPROVEMENT_ROUNDS = 3        # 连续 N 轮覆盖率无提升 -> ask_user
-NO_IMPROVEMENT_NEAR_THRESHOLD_FACTOR = 0.9  # 覆盖率接近门槛(>=threshold*此因子)时抑制无提升升级
-TEST_FAIL_STREAK_ROUNDS = 3      # 连续 N 轮测试失败     -> ask_user
+NO_IMPROVEMENT_ROUNDS = 3        # 连续 N 轮覆盖率无提升 -> 自动跳过当前方法
+NO_IMPROVEMENT_NEAR_THRESHOLD_FACTOR = 0.9  # 覆盖率接近门槛(>=threshold*此因子)时抑制无提升跳过
+TEST_FAIL_STREAK_ROUNDS = 3      # 连续 N 轮测试失败     -> 自动跳过当前方法
 METHOD_ROUND_BUDGET = 8          # 单方法最多 N 轮
 GLOBAL_ROUND_BUDGET = 30         # 全局最多 N 轮
-FINAL_CHECK_FAIL_STREAK_LIMIT = 2  # 终验连续 N 轮不绿且无待修复方法 -> ask_user
-RESUME_GRANT_ROUNDS = 3          # ask_user "继续" 时追加的预算轮数(make_plan --grant-rounds)
-VALIDATE_FAIL_STREAK_LIMIT = 5   # validate_rules 连续 N 轮违规未通过 -> ask_user
+FINAL_CHECK_FAIL_STREAK_LIMIT = 2  # 终验连续 N 轮不绿且无待修复方法 -> 未达标收尾
+VALIDATE_FAIL_STREAK_LIMIT = 5   # validate_rules 连续 N 轮违规未通过 -> 自动跳过当前方法
 
 # --------------------------------------------------------------------------- #
 # Maven 执行(SKILL.md §3)
@@ -159,7 +158,6 @@ def batch_class_round_budget() -> int:
         return int(raw)
     except (TypeError, ValueError):
         return _DEFAULT_BATCH_CLASS_ROUND_BUDGET
-BATCH_AUTO_GRANT = True            # 预算内升级点自动"继续"
 DEFAULT_TARGET_BRANCHES = ("master", "main", "develop")  # 自动探测顺序
 BATCH_STATE_FILENAME = "batch_state.json"
 CLASSES_SUBDIR = "classes"

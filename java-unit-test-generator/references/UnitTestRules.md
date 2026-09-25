@@ -7,7 +7,7 @@
 > 规则 f-1 为运行时强校验：verify_coverage.py / init_coverage.py 解析 surefire-reports，
 > 出现 Failures/Errors 即判失败，与覆盖率数字无关。
 > 规则 f-2（有效断言）为提示词层软约束，无机器校验。
-> **覆盖率目标与规则冲突时，规则优先**：宁可触发升级协议（3 轮无提升询问用户），
+> **覆盖率目标与规则冲突时，规则优先**：宁可自动跳过未达标方法（连续 3 轮无提升即跳过并记录根因），
 > 也不允许违规达标。
 
 技术栈：JUnit5（`org.junit.jupiter`）+ Mockito（`mockito-core` / `mockito-junit-jupiter`）。
@@ -152,7 +152,7 @@ void testBar() {
 
 - 禁止以任何理由修改 `src/main/java` 下的业务代码、配置、pom.xml。
 - 测试失败的根因在业务代码（可见性、硬编码依赖等）时，属"测试侧无法解决"，
-  交由升级协议处理，绝不通过改业务代码让测试通过。
+  交由自动跳过机制处理（连续 3 轮失败即跳过并记录根因），绝不通过改业务代码让测试通过。
 
 ## 规则 e：测试类不存在时创建（软约束）
 
@@ -207,7 +207,7 @@ class FooServiceTest {
 1. **禁止跳过消红**：不得用 `@Disabled`/`@DisabledIf`/`assumeTrue` 跳过失败用例换取绿灯
    （skipped 不计入 Failures/Errors，但不算真实通过）；
 2. **禁止删除消红**：不得通过删除既有失败测试方法消除失败，只能修复；
-   确属无法修复走升级协议；
+   确属无法修复的由自动跳过机制处理并记录根因；
 3. **禁止同义反复断言**：禁止"抄答案"（先执行取实际返回值再把它同时当期望值与实际值）、
    `assertEquals(x, x)`、断言两个字面量相等。
 
@@ -246,6 +246,6 @@ void testFoo_validInput() {
 - 被排除的内部类不进入方法表，**不必也不得**为其编写测试；
 - 排除模式由用户在命令行指定，编写测试时不得建议以排除方式规避
   规则 f（不得为凑覆盖率排除被测目标或其真实业务方法）；
-- 若达标困难源于 Lombok 等生成代码，可经 ask_user 建议用户配置
+- 若达标困难源于 Lombok 等生成代码，建议用户配置
   `lombok.config`（`lombok.addLombokGeneratedAnnotation = true`，JaCoCo 默认
   过滤 `lombok.Generated` 方法）或追加 `--coverage-exclude`，由用户决定。

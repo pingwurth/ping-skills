@@ -54,6 +54,21 @@ def test_state_round_trip_budget_window_fields():
     assert restored.validate_fail_streak == 4
 
 
+def test_state_round_trip_skip_reason():
+    """跳过原因序列化往返; 未跳过的方法不写出该字段, 旧 state.json 读取为 None。"""
+    s = _sample_state()
+    untouched = MethodCoverage(key=MethodKey("bar", "(int)"), covered=5, missed=5)
+    s.methods = [s.methods[0], untouched]
+    s.methods[0].status = MethodStatus.SKIPPED
+    s.methods[0].skip_reason = "连续 3 轮测试失败不收敛(每轮 Failures/Errors: [(1, 0)])"
+    data = s.to_dict()
+    assert data["methods"][0]["skip_reason"].startswith("连续 3 轮测试失败不收敛")
+    assert "skip_reason" not in data["methods"][1]
+    restored = State.from_dict(data)
+    assert restored.methods[0].skip_reason == s.methods[0].skip_reason
+    assert restored.methods[1].skip_reason is None
+
+
 def test_from_dict_budget_window_fields_default_zero():
     """旧版本 state.json 无这些字段时默认 0(兼容断点续跑)。"""
     s = State.from_dict({"project_root": "/r", "target_class": "com.x.Foo"})

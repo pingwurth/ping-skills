@@ -43,7 +43,8 @@ def _method_lines(state: State) -> list[str]:
             continue
         line = f"{m.key.label()}: {_fmt_rate(m.initial_rate)} -> {_fmt_rate(m.rate)}"
         if m.status == MethodStatus.SKIPPED:
-            line += " (未纳入本次目标)"
+            line += (f" (跳过: {m.skip_reason})" if m.skip_reason
+                     else " (未纳入本次目标)")
         lines.append(line)
     return lines
 
@@ -70,8 +71,15 @@ def _cleanup_section(state: State) -> str:
     return "\n".join(lines)
 
 
-def render_finish_report(state: State) -> str:
-    """渲染 SKILL.md §8 格式的完整收尾报告(仅在 finish 路由时调用)。"""
+def render_finish_report(state: State, met: bool = True, note: str = "",
+                         unverified: bool = False) -> str:
+    """渲染 SKILL.md §8 格式的完整收尾报告(finish 路由时调用)。
+
+    met=False 表示未达标收尾(方法被跳过/预算耗尽/终验不绿), 报告"最终状态"降级为
+    未达标并附 note 说明原因; 方法行已逐条列出跳过原因, 数字仍全部取自 state.json。
+    unverified=True 表示环境不可信未能复核(surefire 报告缺失/无法解析/清理失败且
+    无失败用例): "最终状态"显示"未复核(测试结果不可信)", 不混同未达标。
+    """
     initial = _initial_class_rate(state)
     final = state.class_coverage.rate
     if initial is not None:
@@ -99,9 +107,13 @@ def render_finish_report(state: State) -> str:
         f"Errors: {summary.get('errors', _UNRECORDED)}",
         f"Skipped: {summary.get('skipped', _UNRECORDED)}",
         "",
-        "最终状态: PASS",
-        "",
-        "---",
     ])
+    if unverified:
+        lines.append("最终状态: 未复核(测试结果不可信)")
+    else:
+        lines.append("最终状态: PASS" if met else "最终状态: 未达标")
+    if (not met or unverified) and note:
+        lines.append(f"说明: {note}")
+    lines.extend(["", "---"])
     lines.append(_cleanup_section(state))
     return "\n".join(lines)

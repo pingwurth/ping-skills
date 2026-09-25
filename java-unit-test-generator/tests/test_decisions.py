@@ -83,58 +83,65 @@ def test_verify_coverage_below_threshold_routes_build_prompt():
     assert d.mark_done is False
 
 
-def test_verify_method_budget_exhausted_escalates():
+def test_verify_method_budget_exhausted_auto_skips():
+    """单方法预算耗尽不再 ask_user, 改为自动跳过当前方法。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
                       iteration=config.method_round_budget())
     d = decisions.decide_after_verify(ctx)
-    assert d.route == Route.ASK_USER
-    assert d.status == "needs_input"
+    assert d.route == Route.MAKE_PLAN
+    assert d.exit_code == config.EXIT_CONTINUE
+    assert d.auto_skip_method is True
+    assert d.skip_all_pending is False
+    assert str(config.method_round_budget()) in d.auto_skip_reason
     assert d.reset_trajectory is True
 
 
-def test_verify_escalation_includes_test_status():
-    """升级消息应反映测试状态, 而非仅覆盖率。"""
-    # 测试失败时, 升级消息应包含测试失败信息
+def test_verify_auto_skip_summary_includes_test_status():
+    """跳过消息应反映测试状态, 而非仅覆盖率。"""
     test = TestResult(tests=1, failures=2, errors=1, report_found=True)
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
                       test=test, tests_green=False,
                       iteration=config.method_round_budget())
     d = decisions.decide_after_verify(ctx)
-    assert "测试失败" in d.question
-    assert "Failures 2" in d.question
-    assert "Errors 1" in d.question
     assert "测试失败" in d.summary
+    assert "Failures 2" in d.summary
+    assert "Errors 1" in d.summary
 
-    # 测试全绿时, 升级消息应体现测试全绿
+    # 测试全绿时, 跳过消息应体现测试全绿
     ctx_green = _verify_ctx(method=_method(covered=5, missed=5),
                             iteration=config.method_round_budget())
     d_green = decisions.decide_after_verify(ctx_green)
-    assert "测试全绿" in d_green.question
     assert "测试全绿" in d_green.summary
 
 
-def test_verify_global_budget_exhausted_escalates():
+def test_verify_global_budget_exhausted_skips_all_pending():
+    """全局预算耗尽 -> 跳过全部未达标方法(不再 ask_user)。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
                       iteration=2, global_iteration=config.global_round_budget())
     d = decisions.decide_after_verify(ctx)
-    assert d.route == Route.ASK_USER
+    assert d.route == Route.MAKE_PLAN
+    assert d.auto_skip_method is True
+    assert d.skip_all_pending is True
     assert "全局" in d.summary
+    assert "全局" in d.auto_skip_reason
 
 
 def test_verify_method_budget_bonus_extends_window():
-    """--grant-rounds 追加的单方法预算窗口计入有效预算, 不再每轮必问。"""
+    """追加的单方法预算窗口计入有效预算(窗口内不跳过)。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
                       iteration=config.method_round_budget(),
                       method_round_bonus=3)
     d = decisions.decide_after_verify(ctx)
     assert d.route == Route.BUILD_PROMPT          # 8 < 8+3, 继续迭代
-    # 窗口耗尽后再次升级, 且消息体现有效上限
+    assert d.auto_skip_method is False
+    # 窗口耗尽后自动跳过, 且原因体现有效上限
     ctx2 = _verify_ctx(method=_method(covered=5, missed=5),
                        iteration=config.method_round_budget() + 3,
                        method_round_bonus=3)
     d2 = decisions.decide_after_verify(ctx2)
-    assert d2.route == Route.ASK_USER
-    assert str(config.method_round_budget() + 3) in d2.question
+    assert d2.route == Route.MAKE_PLAN
+    assert d2.auto_skip_method is True
+    assert str(config.method_round_budget() + 3) in d2.auto_skip_reason
 
 
 def test_verify_global_budget_bonus_extends_window():
@@ -144,56 +151,81 @@ def test_verify_global_budget_bonus_extends_window():
                       global_round_bonus=5)
     d = decisions.decide_after_verify(ctx)
     assert d.route == Route.BUILD_PROMPT          # 30 < 30+5, 继续迭代
+    assert d.auto_skip_method is False
 
 
-def test_verify_escalations_carry_resume_options():
-    """所有 verify 升级都携带 resume 恢复指引(继续/跳过/调门槛/终止)。"""
-    # 预算类: 继续 = make_plan --grant-rounds
-    ctx = _verify_ctx(method=_method(covered=5, missed=5),
-                      iteration=config.method_round_budget())
-    d = decisions.decide_after_verify(ctx)
-    assert [r.option for r in d.resume] == ["continue", "skip_method",
-                                            "adjust_threshold", "terminate"]
-    cont = d.resume[0]
-    assert cont.script == "make_plan.py"
-    assert cont.params == ["--grant-rounds", str(config.RESUME_GRANT_ROUNDS)]
-    adjust = d.resume[2]
-    assert adjust.script == "make_plan.py" and "N" in adjust.params
-    terminate = d.resume[3]
-    assert terminate.script == ""
+def test_verify_budget_decisions_never_ask_user():
+    """预算/轨迹类耗尽一律自动跳过: 不产生 ask_user, 也不携带 resume。"""
+    cases = [
+        # 单方法预算耗尽
+        _verify_ctx(method=_method(covered=5, missed=5),
+                    iteration=config.method_round_budget()),
+        # 全局预算耗尽
+        _verify_ctx(method=_method(covered=5, missed=5),
+                    iteration=2, global_iteration=config.global_round_budget()),
+        # 连续测试失败
+        _verify_ctx(method=_method(covered=5, missed=5,
+                                   results=[TestOutcome(1, 0)] * config.TEST_FAIL_STREAK_ROUNDS),
+                    test=TestResult(tests=1, failures=1, errors=0, report_found=True),
+                    tests_green=False, iteration=3),
+        # 连续无提升
+        _verify_ctx(method=_method(covered=5, missed=5,
+                                   rates=[30.0, 30.0, 30.0]),
+                    iteration=3),
+    ]
+    for ctx in cases:
+        d = decisions.decide_after_verify(ctx)
+        assert d.route == Route.MAKE_PLAN
+        assert d.status == "success"
+        assert d.auto_skip_method is True
+        assert d.auto_skip_reason
+        assert d.resume == []
+        assert d.question is None
 
-    # 轨迹类(连续失败): 继续 = build_prompt(轨迹已复位, 无需追加预算)
-    results = [TestOutcome(1, 0)] * config.TEST_FAIL_STREAK_ROUNDS
-    ctx2 = _verify_ctx(method=_method(covered=5, missed=5, results=results),
-                       test=TestResult(tests=1, failures=1, errors=0, report_found=True),
-                       tests_green=False, iteration=3)
-    d2 = decisions.decide_after_verify(ctx2)
-    assert d2.resume[0].script == "build_prompt.py"
-    assert d2.resume[1].params == ["--skip-current"]
-
-    # 非升级决策不携带 resume
-    d3 = decisions.decide_after_verify(_verify_ctx())
-    assert d3.resume == []
+    # 非跳过决策同样不携带 resume
+    assert decisions.decide_after_verify(_verify_ctx()).resume == []
 
 
-def test_init_final_check_streak_escalation_carries_resume():
-    """终验不绿升级携带恢复指引(retry 经 make_plan 路由回终验)。"""
+def test_init_final_check_streak_finishes_unmet():
+    """终验连续不绿且无待修复方法 -> 未达标收尾(不再 ask_user)。"""
     test = TestResult(tests=1, failures=1, errors=0, report_found=True)
     d = decisions.decide_after_init(_init_ctx(
         final_check=True, test=test, tests_green=False, scope_met=True,
-        final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT))
-    assert d.route == Route.ASK_USER
-    assert [r.option for r in d.resume] == ["retry", "adjust_threshold", "terminate"]
-    assert d.resume[0].script == "make_plan.py"
+        final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT,
+        report="REPORT-TEXT"))
+    assert d.route == Route.FINISH
+    assert d.exit_code == config.EXIT_OK
+    assert d.resume == []
+    assert d.report == "REPORT-TEXT"
 
 
-def test_verify_test_failure_streak_escalates_before_build_prompt():
+def test_init_final_check_env_uncertain_streak_finishes_unverified():
+    """终验连续结果不可信(无失败用例)达上限 -> 未复核收尾, 不混同测试失败。
+
+    回归: 该路径曾与“测试不绿”共用未达标 summary, 而报告按未复核渲染,
+    两者自相矛盾。
+    """
+    test = TestResult(tests=0, failures=0, errors=0, report_found=False)
+    d = decisions.decide_after_init(_init_ctx(
+        final_check=True, test=test, tests_green=False, scope_met=True,
+        final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT,
+        report="REPORT-TEXT"))
+    assert d.route == Route.FINISH
+    assert d.exit_code == config.EXIT_OK
+    assert "未能复核达标" in d.summary
+    assert "未达标" not in d.summary
+    assert d.report == "REPORT-TEXT"
+
+
+def test_verify_test_failure_streak_auto_skips_before_build_prompt():
     results = [TestOutcome(1, 0)] * config.TEST_FAIL_STREAK_ROUNDS
     ctx = _verify_ctx(method=_method(covered=5, missed=5, results=results),
                       test=TestResult(tests=1, failures=1, errors=0, report_found=True),
                       tests_green=False, iteration=3)
     d = decisions.decide_after_verify(ctx)
-    assert d.route == Route.ASK_USER
+    assert d.route == Route.MAKE_PLAN
+    assert d.auto_skip_method is True
+    assert "测试失败" in d.auto_skip_reason
     assert d.reset_trajectory is True
 
 
@@ -264,12 +296,13 @@ def test_init_not_green_routes_make_plan_failed():
     assert d.status == "failed"
 
 
-def test_init_final_check_streak_escalates():
+def test_init_final_check_streak_finishes_unmet_with_failures_listed():
     test = TestResult(tests=1, failures=1, errors=0, report_found=True)
     d = decisions.decide_after_init(_init_ctx(
         final_check=True, test=test, tests_green=False, scope_met=True,
         final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT))
-    assert d.route == Route.ASK_USER
+    assert d.route == Route.FINISH
+    assert str(config.FINAL_CHECK_FAIL_STREAK_LIMIT) in d.summary
 
 
 def test_init_final_check_failures_in_target_routes_write_code_with_make_plan():
@@ -288,8 +321,8 @@ def test_init_final_check_failures_in_target_routes_write_code_with_make_plan():
     assert d.reset_trajectory is True
 
 
-def test_init_final_check_failures_outside_target_escalates():
-    """终验失败用例包含非目标类 -> 立即 ask_user(技能无权修复, 不必等 streak)。"""
+def test_init_final_check_failures_outside_target_finishes_unmet():
+    """终验失败用例包含非目标类 -> 未达标收尾(技能无权修复, 不必等 streak)。"""
     fc = FailedCase(class_name="com.other.OtherTest", method="testY",
                     type="java.lang.AssertionError", message="boom")
     test = TestResult(tests=2, failures=1, errors=0, report_found=True,
@@ -297,13 +330,89 @@ def test_init_final_check_failures_outside_target_escalates():
     d = decisions.decide_after_init(_init_ctx(
         final_check=True, test=test, tests_green=False, scope_met=True,
         final_check_fail_streak=0, test_simple="FooTest"))
-    assert d.route == Route.ASK_USER
+    assert d.route == Route.FINISH
     assert d.on_complete is None
+    assert "非目标类" in d.summary
+
+
+def test_init_final_check_environment_issue_retries_make_plan():
+    """终验不绿但无失败用例(报告缺失/清理失败) -> 走重试路径, 不误判未达标收尾。"""
+    # 报告缺失: 无失败用例但测试不绿 -> 重试
+    test = TestResult(tests=0, failures=0, errors=0, report_found=False)
+    d = decisions.decide_after_init(_init_ctx(
+        final_check=True, test=test, tests_green=False, scope_met=True,
+        final_check_fail_streak=0, test_simple="FooTest"))
+    assert d.route == Route.MAKE_PLAN
+    assert d.exit_code == config.EXIT_CONTINUE
+    assert d.status == "failed"
+
+    # 报告齐全但 surefire 目录清理失败(环境问题) -> 同样重试
+    test2 = TestResult(tests=3, failures=0, errors=0, report_found=True)
+    d2 = decisions.decide_after_init(_init_ctx(
+        final_check=True, test=test2, tests_green=False, scope_met=True,
+        final_check_fail_streak=0, test_simple="FooTest", uncleaned=True))
+    assert d2.route == Route.MAKE_PLAN
+    assert d2.exit_code == config.EXIT_CONTINUE
+
+    # streak 达上限时仍有界收敛为未达标收尾(有界重试, 不无限空转)
+    d3 = decisions.decide_after_init(_init_ctx(
+        final_check=True, test=TestResult(report_found=False), tests_green=False,
+        scope_met=True,
+        final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT,
+        test_simple="FooTest"))
+    assert d3.route == Route.FINISH
 
 
 # --------------------------------------------------------------------------- #
 # decide_after_plan + 计划域函数
 # --------------------------------------------------------------------------- #
+def test_init_scope_not_met_without_pending_finishes_unmet():
+    """无 pending 可补却未达标 -> 未达标收尾(不因 scope_met=False 回 make_plan 空转)。
+
+    method 模式下目标方法被跳过时 scope_met 为 False, 但队列已空 —— 此时回
+    make_plan 只会再次空手进入终验, 因此终态判定看 failing_count。
+    """
+    d = decisions.decide_after_init(_init_ctx(
+        final_check=True, tests_green=True, scope_met=False, class_met=False,
+        failing_count=0, class_rate=90.0, report="UNMET-REPORT"))
+    assert d.route == Route.FINISH
+    assert d.exit_code == config.EXIT_OK
+    assert d.report == "UNMET-REPORT"
+
+
+def test_init_method_mode_skipped_target_red_tests_streak_finishes_unmet():
+    """method 模式: 目标方法被跳过(scope_met=False)且队列已空, 终验连续不绿达上限
+    -> 仍有界收敛为未达标收尾。
+
+    回归: 分支曾用 scope_met 判"已无待修复方法", method 模式下该值为 False ->
+        分支永不触发 -> 终验不绿失去上界(与 failing_count==0 的终态判定矛盾)。
+    """
+    d = decisions.decide_after_init(_init_ctx(
+        final_check=True, method_mode=True, scope_met=False, failing_count=0,
+        tests_green=False,
+        test=TestResult(tests=1, failures=1, errors=0, report_found=True),
+        final_check_fail_streak=config.FINAL_CHECK_FAIL_STREAK_LIMIT))
+    assert d.route == Route.FINISH
+    assert d.exit_code == config.EXIT_OK
+
+
+def test_init_method_mode_skipped_target_failures_in_target_routes_write_code():
+    """method 模式: 目标方法被跳过但队列已空, 终验失败用例全在目标测试类
+    -> 仍走自动修复(write_code), 不因 scope_met=False 而误判无可修复方法。
+    """
+    fc = FailedCase(class_name="com.example.FooTest", method="testX",
+                    type="java.lang.AssertionError", message="boom")
+    d = decisions.decide_after_init(_init_ctx(
+        final_check=True, method_mode=True, scope_met=False, failing_count=0,
+        tests_green=False, test_simple="FooTest",
+        test=TestResult(tests=2, failures=1, errors=0, report_found=True,
+                        failed_cases=[fc]),
+        final_check_fail_streak=0))
+    assert d.route == Route.WRITE_CODE
+    assert d.on_complete is not None
+    assert d.on_complete.script == "make_plan.py"
+
+
 def test_plan_has_pending_routes_build_prompt():
     d = decisions.decide_after_plan(decisions.PlanContext(
         has_pending=True, final_checked=False, current_label="foo(int)",
@@ -328,6 +437,18 @@ def test_plan_empty_checked_finish_carries_report():
         has_pending=False, final_checked=True, report="REPORT-TEXT"))
     assert d.route == Route.FINISH
     assert d.report == "REPORT-TEXT"
+
+
+def test_plan_empty_always_routes_final_check():
+    """队列空且未终验 -> 一律进终验, 由 init_is_met 实测判定(不预判未达标)。
+
+    方法被跳过、类级看似不达标时也一样: 迭代期只跑目标测试类, 与终验口径不同,
+    预先收尾会把实际达标的类误判为未达标。
+    """
+    d = decisions.decide_after_plan(decisions.PlanContext(
+        has_pending=False, final_checked=False,
+        coverage_path="/w/coverage.json", state_path="/w/state.json"))
+    assert d.route == Route.FINAL_CHECK
 
 
 def test_sort_failing_orders_by_rate_then_missed():

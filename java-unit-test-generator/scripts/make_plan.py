@@ -4,10 +4,11 @@
 工作流位置:
     init_coverage 未达标后进入本脚本; 每次推进一个"当前最值得补测"的方法,
     是 build_prompt <-> verify_coverage 迭代循环的调度中枢(SKILL.md §1/§5)。
-    同时是 ask_user 升级后用户决策的唯一落地通道(SKILL.md §6):
+    同时是递归恢复通道(SKILL.md §6):
         --skip-current    跳过当前方法(状态写 skipped)
         --set-threshold N 调整门槛(并按新门槛重评估方法状态)
         --grant-rounds N  "继续"= 追加预算窗口(单方法/全局各 +N 轮)
+        --unskip NAME,..  恢复被跳过的方法(状态改回 pending 并重开预算窗口)
 
 行为:
     - 首次运行(state 无 plan): 计算测试类路径, 生成计划快照, 并在 stdout 打印
@@ -22,7 +23,7 @@
 输入:
     --workdir 或 --project-root 定位 workdir; 读取 <workdir>/state.json
     (必须已由 init_coverage 生成, 否则状态错误 exit 3)。
-    用户决策三参数互斥, 一次只落地一个。
+    --skip-current / --set-threshold 与其他恢复参数互斥; --unskip 可与 --grant-rounds 组合。
 
 输出(NEXT_STEP):
     有未达标方法 -> run_script build_prompt.py(exit 0);
@@ -44,22 +45,24 @@ from jaut import config, decisions, report  # noqa: E402
 from jaut.cli import EmitContext, add_common_args, require_workdir, run_cli  # noqa: E402
 from jaut.cli import StepError  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import Decision, MethodCoverage, MethodStatus, State  # noqa: E402
+from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, State  # noqa: E402
 from jaut.state import StateStore  # noqa: E402
 
 SCRIPT_NAME = "make_plan"
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """注册命令行参数: 共享的 --workdir / --project-root 与用户决策三参数(互斥)。"""
+    """注册命令行参数: 共享的 --workdir / --project-root 与恢复决策参数。"""
     add_common_args(parser)
-    group = parser.add_argument_group("用户决策落地(ask_user 升级后的恢复命令, 三选一)")
+    group = parser.add_argument_group("恢复决策落地(SKILL.md §6)")
     group.add_argument("--skip-current", action="store_true",
                        help="跳过当前方法: current_method 状态改 skipped 并推进游标")
     group.add_argument("--set-threshold", type=float, default=None, metavar="N",
                        help="调整覆盖率门槛(0<N≤100): 更新 state.threshold 并按新门槛重评估")
     group.add_argument("--grant-rounds", type=int, default=None, metavar="N",
                        help="追加预算窗口: 单方法与全局预算各 +N 轮, 并复位当前方法轨迹")
+    group.add_argument("--unskip", default=None, metavar="NAME1,NAME2,...",
+                       help="恢复被跳过的方法: 状态改回 pending 并重开预算窗口")
 
 
 def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
@@ -67,7 +70,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 
     步骤:
         1. 定位 workdir 并读取 state.json(缺失 -> 状态错误 exit 3);
-        2. 落地用户决策(--skip-current / --set-threshold / --grant-rounds, 互斥);
+        2. 落地恢复决策(--skip-current / --set-threshold / --unskip / --grant-rounds);
         3. 首次运行生成完整计划并打印摘要, 否则直接取排序后的未达标方法;
         4. 推进 current_method 游标(切换方法时清零轮次/轨迹/单方法窗口)并落盘;
         5. 交 decisions.decide_after_plan 产出路由决策。
@@ -104,22 +107,25 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 
 
 def _apply_user_decision(args: argparse.Namespace, state: State, logger) -> None:
-    """落地用户在 ask_user 升级后的决策(SKILL.md §6: 跳过/调门槛/继续)。"""
-    ops = [bool(args.skip_current), args.set_threshold is not None,
-           args.grant_rounds is not None]
-    if sum(ops) > 1:
+    """落地用户的恢复决策(SKILL.md §6: 跳过/调门槛/恢复被跳过的方法/追加预算)。"""
+    exclusive = [bool(args.skip_current), args.set_threshold is not None]
+    if sum(exclusive) > 1 or (any(exclusive) and (args.unskip or args.grant_rounds is not None)):
         raise StepError.state_error(
-            "--skip-current / --set-threshold / --grant-rounds 互斥, 一次只落地一个用户决策")
+            "--skip-current / --set-threshold 与其他恢复参数互斥, 一次只落地一个; "
+            "--unskip 可与 --grant-rounds 组合")
     if args.skip_current:
         _skip_current(state, logger)
     elif args.set_threshold is not None:
         _set_threshold(state, args.set_threshold, logger)
-    elif args.grant_rounds is not None:
-        _grant_rounds(state, args.grant_rounds, logger)
+    else:
+        if args.unskip:
+            _unskip(state, args.unskip, logger)
+        if args.grant_rounds is not None:
+            _grant_rounds(state, args.grant_rounds, logger)
 
 
-def _skip_current(state: State, logger) -> None:
-    """跳过当前方法: 状态改 skipped(SKILL.md §6 "跳过必须写入 state.json")。"""
+def _skip_current(state: State, logger, reason: str = "手动跳过") -> None:
+    """跳过当前方法: 状态改 skipped 并记录原因(SKILL.md §6 "跳过必须写入 state.json")。"""
     if state.current_method is None:
         raise StepError.state_error("无可跳过的当前方法(current_method 为空)")
     entry = state.find_method(state.current_method)
@@ -127,8 +133,68 @@ def _skip_current(state: State, logger) -> None:
         raise StepError.state_error(
             f"state 中找不到当前方法: {state.current_method.label()}")
     entry.status = MethodStatus.SKIPPED
+    entry.skip_reason = reason
     state.validate_fail_streak = 0
-    logger.info(f"用户决策: 跳过方法 {entry.key.label()}")
+    logger.info(f"跳过方法 {entry.key.label()}: {reason}")
+
+
+def _unskip(state: State, names: str, logger) -> None:
+    """恢复被跳过的方法: 状态改回 pending, 清跳过原因并重开预算窗口(SKILL.md §6)。
+
+    跳过原因多为预算/轨迹耗尽, 因此恢复必须同时追加全局预算窗口, 否则下一轮
+    会被 decide_after_verify 立刻再次跳过。仅"有跳过原因"的方法可恢复: 范围外
+    (如 --method 未纳入)的方法 skip_reason 为空, 恢复它会与本次范围矛盾。
+
+    Args:
+        state: 当前状态(会被就地更新)。
+        names: 逗号分隔的方法名列表(--unskip 原值)。
+        logger: 文件日志器。
+
+    Raises:
+        StepError: 方法名缺失/未找到/非 skipped/无跳过原因(状态错误 exit 3)。
+    """
+    wanted = [n.strip() for n in names.split(",") if n.strip()]
+    if not wanted:
+        raise StepError.state_error("--unskip 需要方法名列表: --unskip name1,name2")
+    # 恢复按方法名进行: --method/方法组都按名限定范围, 同名重载全部共享该范围
+    # (_target_method_done 要求每个重载都 done)。只取首个同名条目会让剩余重载继续
+    # 阻塞达标, 或在首个已 done 时直接报错, 使被跳过的重载永远无法恢复。
+    revived: list[MethodCoverage] = []
+    seen: set[MethodKey] = set()
+    for name in wanted:
+        matches = [m for m in state.methods if m.key.name == name]
+        if not matches:
+            raise StepError.state_error(f"state 中找不到方法: {name}")
+        revivable = [m for m in matches
+                     if m.status == MethodStatus.SKIPPED and m.skip_reason]
+        if not revivable:
+            if any(m.status == MethodStatus.SKIPPED for m in matches):
+                raise StepError.state_error(
+                    f"方法 {name} 无跳过原因(范围为排除的方法不可恢复): "
+                    "如需覆盖它, 请重新运行 init_coverage")
+            statuses = ", ".join(sorted({m.status.value for m in matches}))
+            raise StepError.state_error(
+                f"方法 {name} 当前状态为 {statuses}, 只有被跳过的方法才能恢复")
+        for entry in revivable:
+            if entry.key not in seen:
+                seen.add(entry.key)
+                revived.append(entry)
+
+    for entry in revived:
+        entry.status = MethodStatus.PENDING
+        entry.skip_reason = None
+        entry.reset_trajectory()
+    # 当前方法即被恢复方法时游标不切换, _advance_cursor 不会清零, 需就地重开单方法窗口
+    if state.current_method is not None \
+            and any(m.key == state.current_method for m in revived):
+        state.iteration = 0
+        state.method_round_bonus = 0
+    state.global_round_bonus += config.global_round_budget()
+    state.validate_fail_streak = 0
+    labels = ", ".join(m.key.label() for m in revived)
+    logger.info(
+        f"恢复被跳过的方法: {labels}(全局有效上限 "
+        f"{config.global_round_budget() + state.global_round_bonus} 轮)")
 
 
 def _set_threshold(state: State, threshold: float, logger) -> None:
@@ -257,10 +323,41 @@ def _advance_cursor(state: State, failing: list[MethodCoverage], store: StateSto
 
     store.save(state)
     logger.info("无未达标方法, 进入终验或收尾")
+    # 队列空一律进终验: 是否达标由 init_coverage 实测后交 decisions.init_is_met 判定
+    # (单一事实源), 不用迭代期的覆盖率快照预判达标。
+    # final_checked 是上一轮终验结论, 仅当与当前口径一致(见 _final_check_still_valid)
+    # 才可直接收尾; 调门槛/终验后覆盖率回落等漂移按未终验处理, 重走 final-check
+    # 实测, 防止陈旧结论渲染出与实测相反的 PASS 收尾报告
+    final_valid = _final_check_still_valid(state)
+    if state.final_checked and not final_valid:
+        logger.warning(
+            f"终验结论已过期(覆盖率/门槛口径漂移): 类级覆盖率 "
+            f"{state.class_coverage.rate:.1f}%, 门槛 {state.threshold}%, 重走终验")
     return decisions.PlanContext(
-        has_pending=False, final_checked=state.final_checked,
+        has_pending=False, final_checked=final_valid,
         coverage_path=coverage_path, state_path=state_path,
-        report=report.render_finish_report(state) if state.final_checked else "")
+        report=report.render_finish_report(state) if final_valid else "")
+
+
+def _final_check_still_valid(state: State) -> bool:
+    """队列空时, 持久化的终验结论(final_checked)是否仍与当前口径一致。
+
+    口径与 init_is_met 对齐(测试绿已由终验轮确认, 此处只查覆盖率口径):
+      - method 模式: 目标方法(同名重载全部)done 且达标;
+      - class 模式: 类级覆盖率 >= 门槛。
+    不一致(调门槛后回落、终验结论早于后续回写等)返回 False, 交 make_plan 重走
+    final-check 实测。
+    """
+    if not state.final_checked:
+        return False
+    if state.target_method:
+        in_scope = [m for m in state.methods
+                    if m.key.name == state.target_method]
+        return (bool(in_scope)
+                and all(m.status == MethodStatus.DONE
+                        and m.coverage_met(state.threshold)
+                        for m in in_scope))
+    return state.class_coverage.rate >= state.threshold
 
 
 def main(argv: list[str] | None = None) -> int:

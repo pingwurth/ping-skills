@@ -52,7 +52,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 
 - 快速模式仍受 §3 全局约束与 `references/UnitTestRules.md` 约束，且**无脚本兜底**，必须自行自查：只允许写 `src/test/java/**/<TargetTest>.java`；禁止改 `src/main/java/**`、`pom.xml`、配置；禁止 `try-catch`（异常路径用 `assertThrows`）；每个用例以断言结尾；禁止 `@Disabled`、删除用例、同义反复断言等消红手段。
 - 某方法无法在不改生产代码的前提下测试时，在 `plan.md` 标注 `跳过` + 原因，继续下一个方法，不阻塞整体流程；**不得改生产代码使其可测**。
-- 快速模式不产出 `state.json`、无覆盖率与流程判定，做完即结束，不进入 §6 升级协议、§7 Final Check、§8 Finish 报告。
+- 快速模式不产出 `state.json`、无覆盖率与流程判定，做完即结束，不进入 §6 预算与跳过、§7 Final Check、§8 Finish 报告。
 
 ### 0.2 标准模式 todo 清单
 
@@ -61,8 +61,8 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 - [ ] 2. 初始化并跑首轮覆盖率：init_coverage.py --project-root <worktree> --class <FQCN 或源文件> [--method <方法名>] --workdir <workdir>
 - [ ] 3. 制定迭代计划：make_plan.py --workdir <workdir>
 - [ ] 4. 循环：build_prompt.py → LLM write_code → 逐字执行 next_step.on_complete → validate_rules.py → verify_coverage.py（均带 --workdir <workdir>）
-- [ ] 5. 未达标回到第 3 项换方法/重排计划；达标或触发升级条件则退出循环
-- [ ] 6. 升级为 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令
+- [ ] 5. 未达标回到第 3 项换方法/重排计划；达标、或方法被预算耗尽自动跳过且队列清空则退出循环
+- [ ] 6. 收到 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令(预算耗尽已改为自动跳过, 此门禁仅用于工作树选择与异常中断)
 - [ ] 7. 目标方法全部完成后：init_coverage.py --project-root <worktree> --final-check 全量终验
 - [ ] 8. 逐字转述 finish 报告（§8）；收尾清理由用户手动执行
 ```
@@ -79,7 +79,7 @@ select_worktree → init_coverage → make_plan → build_prompt → LLM write_c
                                                                                                    ↓
                                                                                               build_prompt/make_plan
                                                                                                    ↓
-                                                                                              final-check → finish/ask_user
+                                                                                              final-check → finish(达标/未达标)
 ```
 
 详细命令和参数见 `references/workflow-details.md`。
@@ -106,13 +106,23 @@ select_worktree → init_coverage → make_plan → build_prompt → LLM write_c
 
 `make_plan.py` 选择当前最值得补测的方法。`build_prompt.py` 为 LLM 提供：目标类/方法、生产代码、现有测试、当前覆盖率、上轮测试结果、`mvn.log`、测试规则、允许修改范围。LLM 保存测试文件后，**逐字执行 `next_step.on_complete` 的 `script` + `params`**，不得自行运行其他命令。旧协议块无 `on_complete` 字段时，运行 `validate_rules.py --workdir <workdir>`。
 
-## 6. 不收敛与升级
+## 6. 不收敛与自动跳过
 
-同一方法出现 `连续 3 轮无有效覆盖率提升` 或 `连续 3 轮测试失败` 时，升级为 `ask_user`。默认预算：单方法最多 8 轮，全局最多 30 轮（可通过环境变量 `JAVA_UT_METHOD_ROUND_BUDGET`、`JAVA_UT_GLOBAL_ROUND_BUDGET` 覆盖）。超过预算时，升级为 `ask_user`。用户可以：继续、跳过方法、调整门槛、终止。恢复命令以 `next_step.resume` 为准，用户答复后**逐字执行对应命令**，禁止手改 `state.json`。`validate_rules` 连续 5 轮规范违规未通过时，升级为 `ask_user`。用户可以：继续修复、跳过方法、终止。恢复命令以 `next_step.resume` 为准。详细策略见 `references/upgrade-strategy.md`。
+同一方法出现 `连续 3 轮无有效覆盖率提升` 或 `连续 3 轮测试失败` 时，**自动跳过该方法**。默认预算：单方法最多 8 轮，全局最多 30 轮（可通过环境变量 `JAVA_UT_METHOD_ROUND_BUDGET`、`JAVA_UT_GLOBAL_ROUND_BUDGET` 覆盖）。超预算或轨迹不收敛时不再询问用户，一律自动跳过：
+
+- 单方法预算耗尽、连续失败、连续无提升、`validate_rules` 连续 5 轮违规 → 当前方法标记 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`，回 `make_plan.py` 推进下一方法；
+- 全局预算耗尽 → 跳过全部未达标方法；
+- 跳过后已无待补测方法 → 队列空仍会跑一次全量终验实测：达标则正常 finish（PASS），未达标才以未达标收尾（finish 报告显示 `最终状态: 未达标` 与逐方法跳过原因）；终验环境不可信（surefire 报告缺失/无法解析/目录清理失败且无失败用例）时按未复核收尾（`最终状态: 未复核(测试结果不可信)`，环境修复后可重跑终验复核）。`--method` 模式下以目标方法自身是否达标为准，方法被跳过时不会判 PASS。
+
+被自动跳过的方法为终态，恢复必须走脚本：`make_plan.py --unskip <方法名[,方法名]>`（状态改回 pending 并重开预算窗口，可配 `--grant-rounds N`；同名重载会一并恢复）；`--grant-rounds` / `--set-threshold` 都不能复活 skipped 方法。
+
+LLM 只逐字执行 `next_step`，**禁止手改 `state.json`**。详细策略见 `references/upgrade-strategy.md`。
 
 ## 7. Final Check
 
 所有目标方法完成后，运行 `init_coverage.py --final-check` 执行目标模块全量测试。Class 模式：Class Line Coverage >= threshold AND 不存在未达标目标方法 AND 测试全部通过。Method 模式：目标方法 Line Coverage >= threshold AND 测试全部通过。
+
+终验结论（`final_checked`）持久化于 `state.json`，但**与当前口径一致才可直接收尾**：`make_plan` 发现队列空时会复核"已终验"结论——调门槛、终验后覆盖率回落等漂移会使结论过期，此时按未终验处理重新走全量终验实测，不会用陈旧结论渲染 PASS 收尾报告。
 
 ## 8. Finish
 
