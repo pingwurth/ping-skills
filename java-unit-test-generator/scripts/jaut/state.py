@@ -96,36 +96,42 @@ class StateStore:
 
         使用独立的 .lock 文件, 避免与 state.json 的 os.replace 替换冲突。
         POSIX 使用 fcntl.flock, Windows 使用 msvcrt.locking。
+
+        锁文件常驻不删: unlock 后 unlink 与后来者 open 新 inode 存在竞态
+        (旧 inode 上阻塞的等待方与新 inode 上立即获锁的后来者会同时"持锁"),
+        会破坏互斥; 残留锁由 24 小时未更新检测兜底(获锁时刷新 mtime)。
         """
         lock_path = self.path.with_name(config.STATE_FILENAME + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # 检测残留锁文件(超过 24 小时)
+
+        # 检测残留锁文件(超过 24 小时未更新; 锁文件常驻属正常设计)
         if lock_path.exists():
             try:
                 import time
                 lock_age = time.time() - lock_path.stat().st_mtime
                 if lock_age > 24 * 3600:  # 24 小时
                     module_logger().warning(
-                        f"检测到残留锁文件 {lock_path} (存在 {lock_age/3600:.1f} 小时), "
-                        f"如果确认没有其他进程在运行, 可手动删除该文件"
+                        f"检测到 24 小时未更新的锁文件 {lock_path} (可能为异常残留, "
+                        f"如果确认没有其他进程在运行, 可手动删除该文件)"
                     )
             except (OSError, ImportError):
                 pass
-        
+
         fp = open(lock_path, "a", encoding="utf-8")
         try:
             _lock_file(fp)
+            # 获锁后刷新 mtime: 残留检测以"最近一次获锁时间"为准
+            try:
+                os.utime(lock_path)
+            except OSError:
+                pass
             yield
         finally:
             try:
                 _unlock_file(fp)
             finally:
                 fp.close()
-                try:
-                    lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                # 不 unlink: unlock 后删除与后来者 open 新 inode 存在竞态, 会破坏互斥
 
     def load(self) -> Optional[State]:
         """读取并反序列化状态; 文件缺失或损坏返回 None(由调用方按状态错误流转)。"""

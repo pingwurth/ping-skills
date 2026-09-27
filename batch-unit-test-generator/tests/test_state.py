@@ -1,4 +1,5 @@
-"""state 单测: State 序列化往返、from_dict 容错默认、StateStore 原子读写。"""
+"""state 单测: State 序列化往返、from_dict 容错默认、StateStore 原子读写、
+batch_state.json 共享读写(save/load_batch_state)。"""
 
 from __future__ import annotations
 
@@ -6,6 +7,8 @@ from pathlib import Path
 
 from jaut import config
 from jaut.models import (
+    BatchClassEntry,
+    BatchState,
     ClassCoverage,
     MethodCoverage,
     MethodKey,
@@ -13,7 +16,7 @@ from jaut.models import (
     State,
     TestOutcome,
 )
-from jaut.state import StateStore, default_workdir
+from jaut.state import StateStore, default_workdir, load_batch_state, save_batch_state
 
 
 def _sample_state() -> State:
@@ -214,3 +217,53 @@ def test_state_skip_pending_methods_sweeps_with_unified_reason():
     assert pending.skip_reason == f"类级预算耗尽({base}/{base} 轮), 未达标方法不再迭代"
     assert done.status == MethodStatus.DONE        # 非 pending 不被扫到
     assert done.skip_reason is None
+
+
+# --------------------------------------------------------------------------- #
+# batch_state.json 共享读写(batch_init/next/update/finish 四入口上移复用)
+# --------------------------------------------------------------------------- #
+def _sample_batch_state(project_root: str) -> BatchState:
+    return BatchState(
+        project_root=project_root, target_branch="master", diff_mode="two",
+        threshold=80.0, classes=[
+            BatchClassEntry(fqcn="com.A", simple_name="A", source_file="A.java",
+                            module=".", workdir="wd", status="pending",
+                            baseline_rate=40.0),
+        ])
+
+
+def test_save_and_load_batch_state_round_trip(tmp_path: Path):
+    """共享写入原子(tmp+fsync+replace)且可读回等价对象。"""
+    path = tmp_path / "batch_state.json"
+    bs = _sample_batch_state(str(tmp_path))
+    save_batch_state(path, bs)
+    assert path.is_file()
+    loaded = load_batch_state(path)
+    assert loaded is not None
+    assert loaded == bs
+
+
+def test_load_batch_state_missing_returns_none(tmp_path: Path):
+    assert load_batch_state(tmp_path / "absent.json") is None
+
+
+def test_load_batch_state_corrupt_json_returns_none(tmp_path: Path):
+    """非法 JSON 降级 None(入口转 StepError, 不裸穿透 traceback)。"""
+    path = tmp_path / "batch_state.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert load_batch_state(path) is None
+
+
+def test_load_batch_state_non_object_returns_none(tmp_path: Path):
+    path = tmp_path / "batch_state.json"
+    path.write_text("[1, 2]", encoding="utf-8")
+    assert load_batch_state(path) is None
+
+
+def test_load_batch_state_bad_field_types_returns_none(tmp_path: Path):
+    """字段类型坏(schema_version 非数字/classes 非列表)降级 None。"""
+    path = tmp_path / "batch_state.json"
+    path.write_text('{"schema_version": "not-a-number"}', encoding="utf-8")
+    assert load_batch_state(path) is None
+    path.write_text('{"classes": {"a": 1}}', encoding="utf-8")
+    assert load_batch_state(path) is None

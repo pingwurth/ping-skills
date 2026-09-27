@@ -25,7 +25,8 @@
     → 有 recheck → run_script batch_next; 全部确认 → finish 携带批量最终报告
 
 输入:
-    --project-root(必填) [--skip-mvn](跳过 mvn, 用于 mock 测试)
+    --project-root(必填) [--jacoco-version V](默认沿用活跃类 state 记录)
+    [--skip-mvn](跳过 mvn, 用于 mock 测试)
 
 输出(NEXT_STEP):
     有 recheck → run_script batch_next.py(重入队摘要);
@@ -35,19 +36,18 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
 
 import _path_setup  # noqa: F401
 
-from jaut import config, jacoco, maven, report, surefire  # noqa: E402
+from jaut import config, jacoco, maven, report, surefire, testcollect  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.lockutil import batch_lock  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
 from jaut.models import BatchState, Decision, MethodStatus, Route, State  # noqa: E402
-from jaut.state import StateStore, default_workdir  # noqa: E402
+from jaut.state import (StateStore, default_workdir, load_batch_state,  # noqa: E402
+                        save_batch_state)
 
 SCRIPT_NAME = "batch_finish"
 # 终态: 不复核覆盖率/测试, 只进最终报告(skipped=跳过, unmet=未达标, failed=失败)
@@ -56,6 +56,9 @@ _TERMINAL_STATUSES = ("skipped", "unmet", "failed")
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--project-root", required=True)
+    parser.add_argument("--jacoco-version", default=None,
+                        help="终验挂载的 JaCoCo 版本(默认沿用活跃类 state.json"
+                             " 记录的版本, 与基线一致)")
     parser.add_argument("--skip-mvn", action="store_true",
                         help="跳过 mvn 执行(用于测试)")
     parser.add_argument("--workdir", default=None)
@@ -75,9 +78,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             question="请先运行 batch_init.py")
 
     with batch_lock(batch_state_path):
-        with open(batch_state_path, encoding="utf-8") as f:
-            batch_data = json.load(f)
-        batch_state = BatchState.from_dict(batch_data)
+        batch_state = load_batch_state(batch_state_path)
+        if batch_state is None:
+            # is_file 检查已通过, 此处 None 即文件损坏(非法 JSON/结构)
+            raise StepError.state_error(
+                f"batch_state.json 已损坏(无法解析): {batch_state_path}",
+                question="请检查文件是否被外部修改; 如需重新开始请删除该文件后"
+                          "重跑 batch_init.py")
 
         # 终验对象: 非终态类(正常情况下只有 done/recheck/unverified)。
         # skipped/unmet/failed 为终态, 不参与复核 mvn 与覆盖率解析, 只进最终报告;
@@ -92,37 +99,10 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             logger.info("无活跃类(全部 skipped/unmet/failed), 跳过 mvn 与覆盖率解析")
             return _finish_all(batch_state, batch_workdir, logger, [])
 
-        if not args.skip_mvn:
-            # 清理旧报告 → 按需 mvn
-            maven.clean_jacoco_dirs(project_root, modules)
-            uncleaned = maven.clean_surefire_dirs(project_root, modules)
-            if uncleaned:
-                logger.warning(f"surefire 目录清理失败: {uncleaned}")
-
-            # 收集测试类列表(按需执行)
-            test_classes = _collect_test_classes(project_root, active_entries)
-            logger.info(f"涉及测试类: {test_classes}")
-
-            mvn_log = str(batch_workdir / "batch-mvn.log")
-            mvn_cmd = maven.build_batch_mvn_cmd(
-                project_root, modules=modules, test_classes=test_classes,
-                jacoco_version=config.DEFAULT_JACOCO_VERSION)
-            if mvn_cmd is None:
-                raise StepError.exec_error("未找到 mvn", question="请安装 mvn")
-            logger.info(f"执行按需终验 mvn: {' '.join(mvn_cmd)}")
-            mvn_result = maven.run_mvn(mvn_cmd, cwd=str(project_root),
-                                        log_file=mvn_log)
-            if not mvn_result.ok:
-                raise StepError.exec_error(
-                    "mvn 执行失败, 详见 batch-mvn.log",
-                    question=f"mvn 执行失败, 详见 {mvn_log}",
-                    artifacts=[{"path": mvn_log, "kind": "mvn_log"}])
-        else:
-            uncleaned = []
-            mvn_log = str(batch_workdir / "batch-mvn.log")
-
-        # 类 state.json: 终验复核要沿用迭代期的覆盖率排除模式(init 写入的
-        # coverage_excludes), 否则 Lombok/MapStruct 等排除配置被静默忽略, 终验覆盖率会回落
+        # 类 state.json: 终验要沿用迭代期的覆盖率排除模式(init 写入的
+        # coverage_excludes)与 JaCoCo 版本(batch_init --jacoco-version 写入),
+        # 否则 Lombok/MapStruct 等排除配置被静默忽略终验覆盖率会回落,
+        # 且基线与终验挂载不同版本插件
         class_states: dict[str, State | None] = {}
         for entry in batch_state.classes:
             if entry.status in _TERMINAL_STATUSES:
@@ -133,6 +113,59 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             for pattern in (st.coverage_excludes if st is not None else []):
                 if pattern not in merged_excludes:
                     merged_excludes.append(pattern)
+
+        # 终验挂载版本: 显式 --jacoco-version 优先; 未传时沿用活跃类
+        # state.json 记录的版本(旧行为硬编码默认值, 与基线不一致)
+        if args.jacoco_version:
+            jacoco_version = args.jacoco_version
+        else:
+            versions = {st.jacoco_version for st in class_states.values()
+                        if st is not None and st.jacoco_version}
+            jacoco_version = (next(iter(versions)) if versions
+                              else config.DEFAULT_JACOCO_VERSION)
+        logger.info(f"终验 JaCoCo 版本: {jacoco_version}")
+
+        if not args.skip_mvn:
+            # 清理旧报告 → 按需 mvn
+            maven.clean_jacoco_dirs(project_root, modules)
+            uncleaned = maven.clean_surefire_dirs(project_root, modules)
+            if uncleaned:
+                logger.warning(f"surefire 目录清理失败: {uncleaned}")
+
+            # 收集测试类列表(按需执行): 无任何已存在测试类的活跃类创建桩
+            # 测试类(与基线同语义), 保证 -Dtest 恒非空、终验能产出真实覆盖率
+            # (否则子代理未写测试的类会因零测试无报告而判 unverified 空转)
+            test_classes, stub_files = testcollect.collect_test_classes_with_stub(
+                project_root, [(e.module, e.fqcn) for e in active_entries], logger)
+            logger.info(f"涉及测试类: {test_classes}")
+
+            mvn_log = str(batch_workdir / "batch-mvn.log")
+            try:
+                mvn_cmd = maven.build_batch_mvn_cmd(
+                    project_root, modules=modules, test_classes=test_classes,
+                    jacoco_version=jacoco_version)
+                if mvn_cmd is None:
+                    raise StepError.exec_error("未找到 mvn", question="请安装 mvn")
+                logger.info(f"执行按需终验 mvn: {' '.join(mvn_cmd)}")
+                mvn_result = maven.run_mvn(mvn_cmd, cwd=str(project_root),
+                                            log_file=mvn_log)
+                if not mvn_result.ok:
+                    raise StepError.exec_error(
+                        "mvn 执行失败, 详见 batch-mvn.log",
+                        question=f"mvn 执行失败, 详见 {mvn_log}",
+                        artifacts=[{"path": mvn_log, "kind": "mvn_log"}])
+            except StepError:
+                # 失败回滚桩测试文件, 避免在用户项目中留下意外文件
+                testcollect.remove_stub_files(stub_files, logger,
+                                               reason="批量终验失败, 回滚桩测试")
+                raise
+
+            # 终验 mvn 完成, 清理桩测试文件(临时占位, 不留在用户项目)
+            testcollect.remove_stub_files(stub_files, logger,
+                                           reason="批量终验完成, 清理桩测试")
+        else:
+            uncleaned = []
+            mvn_log = str(batch_workdir / "batch-mvn.log")
 
         # 多模块聚合解析
         parsed_all = jacoco.aggregate_jacoco_xml(project_root, modules,
@@ -166,12 +199,12 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                            if class_state is not None and class_state.test_class_simple
                            else f"{entry.simple_name}Test")
             # 失败归因须覆盖本类全部测试类命名变体: 终验 mvn 执行
-            # _find_test_classes 收集的 Test/Tests/IT 三种命名, 只按
-            # test_simple 匹配会把 FooTests/FooIT 的失败误判为"其他类的失败",
-            # 无辜类被假标 done(达标)
+            # testcollect.find_test_classes 收集的 Test/Tests/IT/TestCase/
+            # Test 前缀 5 种命名变体, 只按 test_simple 匹配会把 FooTests/
+            # FooIT 的失败误判为"其他类的失败", 无辜类被假标 done(达标)
             own_simples = {t.rsplit(".", 1)[-1]
-                           for t in _find_test_classes(project_root, entry.module,
-                                                       entry.fqcn)}
+                           for t in testcollect.find_test_classes(
+                               project_root, entry.module, entry.fqcn)}
             own_simples.add(test_simple)
             own_failures = [fc for simple in sorted(own_simples)
                             for fc in test.failures_in_class(simple)]
@@ -268,7 +301,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             class_results.append({"fqcn": entry.fqcn, "final_rate": final_rate,
                                    "test_green": own_ok})
 
-        _save_batch_state(batch_state_path, batch_state)
+        save_batch_state(batch_state_path, batch_state)
 
         if recheck_list:
             # 有 recheck → run_script batch_next
@@ -314,53 +347,6 @@ def _finish_all(batch_state: BatchState, batch_workdir: Path, logger,
         report=finish_report)
     return decision, EmitContext(workdir=batch_workdir,
                                   scripts_dir=Path(__file__).resolve().parent)
-
-
-def _save_batch_state(path: Path, batch_state: BatchState) -> None:
-    """原子写入 batch_state.json。"""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(batch_state.to_dict(), f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-
-def _find_test_classes(project_root: Path, module: str, target_class: str) -> list[str]:
-    """查找目标类对应的测试类(按常见命名规则搜索)。
-
-    搜索策略:
-       1. {SimpleClassName}Test.java
-    2. {SimpleClassName}Tests.java
-    3. {SimpleClassName}IT.java (集成测试)
-    """
-    simple_name = target_class.rsplit(".", 1)[-1] if "." in target_class else target_class
-    test_dir = project_root / module / "src" / "test" / "java"
-    if not test_dir.is_dir():
-        return []
-
-    # 计算包路径
-    package_path = target_class.rsplit(".", 1)[0].replace(".", "/") if "." in target_class else ""
-    search_dir = test_dir / package_path if package_path else test_dir
-
-    test_classes = []
-    for suffix in ["Test", "Tests", "IT"]:
-        test_file = search_dir / f"{simple_name}{suffix}.java"
-        if test_file.is_file():
-            # 转换为 FQCN
-            test_fqcn = f"{target_class.rsplit('.', 1)[0]}.{simple_name}{suffix}" if "." in target_class else f"{simple_name}{suffix}"
-            test_classes.append(test_fqcn)
-
-    return test_classes
-
-
-def _collect_test_classes(project_root: Path, entries: list) -> list[str]:
-    """收集所有活跃类对应的测试类列表。"""
-    all_test_classes = []
-    for entry in entries:
-        test_classes = _find_test_classes(project_root, entry.module, entry.fqcn)
-        all_test_classes.extend(test_classes)
-    return list(set(all_test_classes))  # 去重
 
 
 def main(argv: list[str] | None = None) -> int:

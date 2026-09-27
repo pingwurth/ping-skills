@@ -32,7 +32,7 @@ from scripts.batch_finish import handler
 
 def _make_args(project_root: Path, workdir: Path) -> argparse.Namespace:
     return argparse.Namespace(project_root=str(project_root), skip_mvn=True,
-                              workdir=str(workdir))
+                              jacoco_version=None, workdir=str(workdir))
 
 
 def _locked_mock():
@@ -185,7 +185,7 @@ def test_handler_skips_mvn_when_all_classes_are_terminal(tmp_path):
          patch("scripts.batch_finish.surefire.aggregate_surefire_reports") as mock_sf:
         # skip_mvn=False: 这里要验证的是脚本自身的"无活跃类"短路, 而非外部跳过
         args = argparse.Namespace(project_root=str(tmp_path), skip_mvn=False,
-                                  workdir=str(workdir))
+                                  jacoco_version=None, workdir=str(workdir))
         decision, _ = handler(args)
 
     assert decision.route == Route.FINISH

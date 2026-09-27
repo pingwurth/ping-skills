@@ -322,6 +322,23 @@ class TestProgressReporter:
         reporter._pid = None
         assert reporter._is_process_alive() is False
 
+    def test_is_process_alive_windows_delegates_to_windows_probe(self):
+        """Windows 下进程存活探测应委托 _windows_process_alive 而非 os.kill(H2)。"""
+        with patch("os.name", "nt"), \
+             patch("jaut.proc._windows_process_alive", return_value=True) as mock_probe:
+            reporter = proc._ProgressReporter(timeout=1800)
+            reporter._pid = 4242
+            assert reporter._is_process_alive() is True
+            mock_probe.assert_called_once_with(4242)
+
+    def test_is_process_alive_windows_reports_dead_process(self):
+        """Windows 探测返回 False 时 _is_process_alive 应为 False。"""
+        with patch("os.name", "nt"), \
+             patch("jaut.proc._windows_process_alive", return_value=False):
+            reporter = proc._ProgressReporter(timeout=1800)
+            reporter._pid = 4242
+            assert reporter._is_process_alive() is False
+
     def test_progress_thread_stops_when_process_exits(self, tmp_path):
         """验证进度线程在进程退出后自动停止，不再写入文件。"""
         import json

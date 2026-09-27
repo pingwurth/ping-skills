@@ -10,7 +10,7 @@ import pytest
 from jaut import config
 from jaut.models import (
     BatchClassEntry, BatchState, ClassCoverage, MethodCoverage,
-    MethodKey, MethodStatus, State,
+    MethodKey, MethodStatus, Route, State,
 )
 from jaut.report import render_class_complete_report, render_batch_finish_report
 
@@ -586,3 +586,362 @@ def test_batch_update_counts_auto_skipped_methods(tmp_path):
         encoding="utf-8"))
     assert data["classes"][0]["escalations"] == 1   # 只计带 skip_reason 的自动跳过
     assert decision.report is not None or decision.summary  # 落账完成
+
+
+# --------------------------------------------------------------------------- #
+# batch_init 覆盖率排除模式(P2-5): 逐类精确字面量, 取代永不命中的全局通配
+# --------------------------------------------------------------------------- #
+def _make_candidate(project_root: Path, fqcn: str, content: str) -> dict:
+    pkg, _, simple = fqcn.rpartition(".")
+    rel = f"src/main/java/{pkg.replace('.', '/')}/{simple}.java" if pkg \
+        else f"src/main/java/{simple}.java"
+    path = project_root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {"fqcn": fqcn, "source_file": rel, "module": "."}
+
+
+def _excludes_args(extra=None):
+    import argparse
+    return argparse.Namespace(coverage_exclude=extra)
+
+
+def test_build_coverage_excludes_builder_literal(tmp_path):
+    """@Builder 生成内部类 <FQCN>$<Simple>Builder(结尾 SimpleBuilder, 非 *$Builder)。"""
+    from batch_init import _build_coverage_excludes
+    cand = _make_candidate(tmp_path, "com.foo.Foo", "public class Foo {\n@Builder\n}\n")
+    excludes = _build_coverage_excludes([cand], _excludes_args(), tmp_path)
+    assert "com.foo.Foo$FooBuilder" in excludes
+    assert not any("*" in e for e in excludes)   # 不再有全局通配
+
+
+def test_build_coverage_excludes_superbuilder_impl(tmp_path):
+    """@SuperBuilder 额外生成 <Simple>BuilderImpl。"""
+    from batch_init import _build_coverage_excludes
+    cand = _make_candidate(tmp_path, "com.foo.Super", "public class Super {\n@SuperBuilder\n}\n")
+    excludes = _build_coverage_excludes([cand], _excludes_args(), tmp_path)
+    assert "com.foo.Super$SuperBuilder" in excludes
+    assert "com.foo.Super$SuperBuilderImpl" in excludes
+
+
+def test_build_coverage_excludes_mapper_toplevel_impl(tmp_path):
+    """MapStruct @Mapper 生成同包顶层类 <pkg>.<Simple>Impl(无 $)。"""
+    from batch_init import _build_coverage_excludes
+    cand = _make_candidate(tmp_path, "com.foo.Map", "public interface Map {\n@Mapper\n}\n")
+    excludes = _build_coverage_excludes([cand], _excludes_args(), tmp_path)
+    assert "com.foo.MapImpl" in excludes
+    assert not any("$" in e for e in excludes)
+
+
+def test_build_coverage_excludes_value_data_not_excluded(tmp_path):
+    """@Value/@Data 不生成新类(仅变换原类字节码), 不再保守排除。"""
+    from batch_init import _build_coverage_excludes
+    cand = _make_candidate(tmp_path, "com.foo.Vo", "public class Vo {\n@Value\n@Data\n}\n")
+    excludes = _build_coverage_excludes([cand], _excludes_args(), tmp_path)
+    assert excludes == []
+
+
+def test_build_coverage_excludes_multiple_annotations_all_appended(tmp_path):
+    """命中多个注解时全部追加(旧版 break 会吞掉后续模式)。"""
+    from batch_init import _build_coverage_excludes
+    cand = _make_candidate(
+        tmp_path, "com.foo.Both", "public class Both {\n@Builder\n@Mapper\n}\n")
+    excludes = _build_coverage_excludes([cand], _excludes_args(), tmp_path)
+    assert "com.foo.Both$BothBuilder" in excludes
+    assert "com.foo.BothImpl" in excludes
+
+
+def test_build_coverage_excludes_explicit_patterns_passthrough(tmp_path):
+    """显式 --coverage-exclude 原样保留(方法级 @Builder 等场景的唯一出路)。"""
+    from batch_init import _build_coverage_excludes
+    cand = _make_candidate(tmp_path, "com.foo.Plain", "public class Plain {}\n")
+    excludes = _build_coverage_excludes(
+        [cand], _excludes_args(["Foo$FooBuilder", " com.bar.** "]), tmp_path)
+    assert "Foo$FooBuilder" in excludes
+    assert "com.bar.**" in excludes   # strip 清理空白
+
+
+# --------------------------------------------------------------------------- #
+# batch_init _select_classes 校验(P3-19): 不静默空选
+# --------------------------------------------------------------------------- #
+def test_select_classes_top_n_invalid():
+    """top:0 / top:abc 报 state_error, 不静默空选假 finish。"""
+    from jaut.cli import StepError
+    from batch_init import _select_classes
+    with pytest.raises(StepError) as ei:
+        _select_classes([], "top:0")
+    assert "正整数" in ei.value.decision.summary
+    with pytest.raises(StepError):
+        _select_classes([], "top:abc")
+
+
+def test_select_classes_unknown_fqcn_lists_candidates():
+    """拼错 FQCN 报错并列出候选清单, 引导用户核对。"""
+    from jaut.cli import StepError
+    from batch_init import _select_classes
+    candidates = [{"fqcn": "com.foo.A"}, {"fqcn": "com.foo.B"}]
+    with pytest.raises(StepError) as ei:
+        _select_classes(candidates, "com.foo.C")
+    assert "com.foo.A" in (ei.value.decision.question or "")
+    assert "候选清单" in (ei.value.decision.question or "")
+
+
+def test_select_classes_all_and_top_and_fqcn():
+    from batch_init import _select_classes
+    candidates = [{"fqcn": "com.foo.A"}, {"fqcn": "com.foo.B"}]
+    assert _select_classes(candidates, "all") == candidates
+    assert _select_classes(candidates, "top:1") == candidates[:1]
+    assert _select_classes(candidates, "com.foo.B") == [candidates[1]]
+
+
+# --------------------------------------------------------------------------- #
+# batch_diff git 失败显式报错(P2-7): 不再静默吞错伪装"无候选类"
+# --------------------------------------------------------------------------- #
+def _git_result(ok: bool, stdout=None, stderr=None, returncode=0):
+    from jaut.proc import CommandResult
+    return CommandResult(ok=ok, returncode=returncode if ok else 128,
+                         stdout=stdout, stderr=stderr)
+
+
+def test_get_diff_files_git_diff_failure_raises(tmp_path):
+    """git diff 失败(分支拼错/仓库异常)抛 exec_error, 含 stderr 上下文。"""
+    from jaut.cli import StepError
+    from batch_diff import _get_diff_files
+    from unittest.mock import patch
+    with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
+         patch("jaut.proc.run_command",
+               side_effect=[_git_result(True, stdout="abc123\n"),
+                            _git_result(False, stderr="fatal: bad revision")]):
+        with pytest.raises(StepError) as ei:
+            _get_diff_files(tmp_path, "master", "two")
+    assert "git diff 失败" in ei.value.decision.summary
+    assert "fatal: bad revision" in ei.value.decision.summary
+
+
+def test_get_diff_files_three_merge_base_failure_suggests_two(tmp_path):
+    """显式三点模式 merge-base 失败: 报错并建议 --diff-mode two, 不再裸
+    AttributeError(None.strip())。"""
+    from jaut.cli import StepError
+    from batch_diff import _get_diff_files
+    from unittest.mock import patch
+    with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
+         patch("jaut.proc.run_command",
+               return_value=_git_result(False, stderr="fatal: not a valid ref")):
+        with pytest.raises(StepError) as ei:
+            _get_diff_files(tmp_path, "master", "three")
+    assert "--diff-mode two" in (ei.value.decision.question or "")
+
+
+def test_get_diff_files_empty_stdout_returns_empty_list(tmp_path):
+    """差异真正为空: 返回 [], 不误报 git 故障。"""
+    from batch_diff import _get_diff_files
+    from unittest.mock import patch
+    with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
+         patch("jaut.proc.run_command",
+               side_effect=[_git_result(True, stdout="abc123\n"),
+                            _git_result(True, stdout="")]):
+        assert _get_diff_files(tmp_path, "master", "two") == []
+
+
+# --------------------------------------------------------------------------- #
+# batch_diff 确认门禁(P2-8/P3-12): question 用真实 --classes 参数,
+# candidates.json 落盘 diff_mode
+# --------------------------------------------------------------------------- #
+def test_batch_diff_gate_question_and_diff_mode_persisted(tmp_path):
+    """门禁 question/resume 引导真实存在的 --classes 参数(旧文案 --all/--top N
+    不存在, 逐字执行会 argparse exit 2); diff_mode 写入 candidates.json。"""
+    import argparse
+    import json as _json
+    from unittest.mock import MagicMock, patch
+    from batch_diff import handler as diff_handler
+
+    workdir = tmp_path / "diffwork"
+    workdir.mkdir(parents=True, exist_ok=True)
+    src = tmp_path / "src" / "main" / "java" / "com" / "foo" / "Foo.java"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(
+        "package com.foo;\npublic class Foo {\n"
+        "    public int add(int a, int b) { return a + b; }\n}\n",
+        encoding="utf-8")
+
+    locked = MagicMock()
+    locked.__enter__ = MagicMock(return_value=None)
+    locked.__exit__ = MagicMock(return_value=False)
+    with patch("batch_diff.setup_logger"), \
+         patch("batch_diff._resolve_target_branch", return_value="master"), \
+         patch("batch_diff._get_diff_files",
+               return_value=[("src/main/java/com/foo/Foo.java", 10, 2)]), \
+         patch("batch_diff.gitops.current_branch", return_value="feature"), \
+         patch("batch_diff.maven.find_module_for_source", return_value="."), \
+         patch("batch_diff._detect_existing_test", return_value=False):
+        decision, _ = diff_handler(argparse.Namespace(
+            project_root=str(tmp_path), target="auto", diff_mode="two",
+            exclude_glob=None, sort_policy="module-coverage",
+            workdir=str(workdir)))
+
+    assert decision.route == Route.ASK_USER
+    # P2-8: 引导命令必须逐字可执行(真实参数形态)
+    assert "--classes all --threshold 80" in decision.question
+    assert "--classes top:N" in decision.question
+    assert "--all" not in decision.question
+    assert "--top N" not in decision.question
+    resume_continue = decision.resume[0]
+    assert resume_continue.script == "batch_init.py"
+    assert "--classes" in resume_continue.params
+    assert "all" in resume_continue.params
+    # P3-12: diff_mode 落盘, 断点续跑时 batch_state 记录真实值(旧恒 three)
+    data = _json.loads((workdir / "batch_candidates.json").read_text(
+        encoding="utf-8"))
+    assert data["diff_mode"] == "two"
+    assert data["target_branch"] == "master"
+    assert data["candidates"][0]["fqcn"] == "com.foo.Foo"
+
+
+# --------------------------------------------------------------------------- #
+# batch_update P1-1: 子代理未启动类内迭代 → ask_user, 不再静默标 done
+# --------------------------------------------------------------------------- #
+def test_batch_update_unstarted_class_asks_user(tmp_path):
+    """in_progress 类 state 可读但无进行中方法且仍有 pending: 不得静默标
+    done(0 轮、基线率冒充 final_rate 的假落账), 应 ask_user 附 3 个 resume。"""
+    import argparse
+    from unittest.mock import MagicMock, patch
+    from batch_update import handler as update_handler
+
+    workdir = tmp_path / "batchwork"
+    workdir.mkdir(parents=True, exist_ok=True)
+    entry = BatchClassEntry(fqcn="com.example.A", simple_name="A",
+                            source_file="A.java", module=".",
+                            workdir=str(tmp_path / "classes" / "A"),
+                            status="in_progress", baseline_rate=40.0)
+    batch_state = BatchState(project_root=str(tmp_path), target_branch="master",
+                             threshold=80.0, classes=[entry])
+    (workdir / config.BATCH_STATE_FILENAME).write_text(
+        json.dumps(batch_state.to_dict(), ensure_ascii=False), encoding="utf-8")
+
+    pending = MethodCoverage(key=MethodKey("doStuff", "()V"), covered=0,
+                             missed=10, status=MethodStatus.PENDING)
+    class_state = State(project_root=str(tmp_path), target_class="com.example.A",
+                        module=".", threshold=80.0, batch_mode=True,
+                        class_coverage=ClassCoverage.of(0, 10), methods=[pending])
+
+    locked = MagicMock()
+    locked.__enter__ = MagicMock(return_value=None)
+    locked.__exit__ = MagicMock(return_value=False)
+    with patch("batch_update.setup_logger"), \
+         patch("batch_update.batch_lock", return_value=locked), \
+         patch("batch_update.StateStore") as MockStore:
+        MockStore.return_value.load.return_value = class_state
+        decision, _ = update_handler(argparse.Namespace(
+            project_root=str(tmp_path), fqcn="com.example.A", skip_class=None,
+            reason=None, mark_failed=None, workdir=str(workdir)))
+
+    assert decision.route == Route.ASK_USER
+    assert "子代理未开始类内迭代" in decision.question
+    assert "继续委派" in decision.question
+    assert "跳过该类" in decision.question
+    assert "终止批量" in decision.question
+    options = {r.option for r in decision.resume}
+    assert options == {"continue", "skip_class", "terminate"}
+    skip_resume = next(r for r in decision.resume if r.option == "skip_class")
+    assert skip_resume.script == "batch_update.py"
+    assert "--skip-class" in skip_resume.params
+    # 落账不失真: 状态保持 in_progress 等待用户决策
+    data = json.loads((workdir / config.BATCH_STATE_FILENAME).read_text(
+        encoding="utf-8"))
+    assert data["classes"][0]["status"] == "in_progress"
+
+
+# --------------------------------------------------------------------------- #
+# batch_init P1-2: 桩兜底 + 假 finish 拦截(零报告不 exit 0) + 失败回滚
+# --------------------------------------------------------------------------- #
+def test_batch_init_no_report_raises_and_rolls_back_stub(tmp_path):
+    """mvn "成功"但零模块产出 jacoco 报告: fail-closed 抛 exec_error(旧行为
+    全类剔为"无覆盖率数据"后 exit 0 假 finish); 同时回滚本次创建的桩测试。"""
+    import argparse
+    from unittest.mock import MagicMock, patch
+    from jaut.proc import CommandResult
+    from jaut.cli import StepError
+    from batch_init import handler as init_handler
+
+    workdir = tmp_path / "batchwork"
+    workdir.mkdir(parents=True, exist_ok=True)
+    # 候选类: 无任何已存在测试类 → collect 会创建桩
+    candidates = [{
+        "fqcn": "com.foo.Solo", "source_file": "src/main/java/com/foo/Solo.java",
+        "module": ".", "diff_add": 5, "diff_del": 0,
+        "has_existing_tests": False, "method_count": 1,
+    }]
+    (workdir / "batch_candidates.json").write_text(
+        json.dumps({"target_branch": "master", "diff_mode": "two",
+                    "candidates": candidates, "sort_policy": "module-coverage"}),
+        encoding="utf-8")
+
+    locked = MagicMock()
+    locked.__enter__ = MagicMock(return_value=None)
+    locked.__exit__ = MagicMock(return_value=False)
+    with patch("batch_init.setup_logger"), \
+         patch("batch_init.gitops.record_git_baseline", return_value={}), \
+         patch("batch_init.gitops.current_branch", return_value="feat"), \
+         patch("batch_init.maven.is_multi_module", return_value=False), \
+         patch("batch_init.maven.clean_jacoco_dirs"), \
+         patch("batch_init.maven.clean_surefire_dirs", return_value=[]), \
+         patch("batch_init.maven.build_batch_mvn_cmd", return_value=["mvn", "test"]), \
+         patch("batch_init.maven.run_mvn",
+               return_value=CommandResult(ok=True, returncode=0)), \
+         patch("batch_init.jacoco.aggregate_jacoco_xml", return_value={}):
+        with pytest.raises(StepError) as ei:
+            init_handler(argparse.Namespace(
+                project_root=str(tmp_path), classes="all", threshold=80.0,
+                target="auto", coverage_exclude=None,
+                jacoco_version="0.8.12", workdir=str(workdir)))
+
+    assert "所有涉及模块均未产出" in ei.value.decision.summary
+    # 桩测试文件已回滚: 不在用户项目留下意外文件
+    stub = (tmp_path / "src" / "test" / "java" / "com" / "foo" / "SoloTest.java")
+    assert not stub.exists()
+    # 失败不落 batch_state(下次可重跑 init)
+    assert not (workdir / config.BATCH_STATE_FILENAME).exists()
+
+
+def test_batch_init_mvn_failure_rolls_back_stub(tmp_path):
+    """mvn 失败: StepError 且桩测试文件回滚(不污染用户项目)。"""
+    import argparse
+    from unittest.mock import MagicMock, patch
+    from jaut.proc import CommandResult
+    from jaut.cli import StepError
+    from batch_init import handler as init_handler
+
+    workdir = tmp_path / "batchwork"
+    workdir.mkdir(parents=True, exist_ok=True)
+    candidates = [{
+        "fqcn": "com.foo.Solo", "source_file": "src/main/java/com/foo/Solo.java",
+        "module": ".", "diff_add": 5, "diff_del": 0,
+        "has_existing_tests": False, "method_count": 1,
+    }]
+    (workdir / "batch_candidates.json").write_text(
+        json.dumps({"target_branch": "master", "diff_mode": "two",
+                    "candidates": candidates, "sort_policy": "module-coverage"}),
+        encoding="utf-8")
+
+    locked = MagicMock()
+    locked.__enter__ = MagicMock(return_value=None)
+    locked.__exit__ = MagicMock(return_value=False)
+    with patch("batch_init.setup_logger"), \
+         patch("batch_init.gitops.record_git_baseline", return_value={}), \
+         patch("batch_init.gitops.current_branch", return_value="feat"), \
+         patch("batch_init.maven.is_multi_module", return_value=False), \
+         patch("batch_init.maven.clean_jacoco_dirs"), \
+         patch("batch_init.maven.clean_surefire_dirs", return_value=[]), \
+         patch("batch_init.maven.build_batch_mvn_cmd", return_value=["mvn", "test"]), \
+         patch("batch_init.maven.run_mvn",
+               return_value=CommandResult(ok=False, returncode=1,
+                                          stderr="BUILD FAILURE")):
+        with pytest.raises(StepError) as ei:
+            init_handler(argparse.Namespace(
+                project_root=str(tmp_path), classes="all", threshold=80.0,
+                target="auto", coverage_exclude=None,
+                jacoco_version="0.8.12", workdir=str(workdir)))
+
+    assert "mvn 执行失败" in ei.value.decision.summary
+    stub = (tmp_path / "src" / "test" / "java" / "com" / "foo" / "SoloTest.java")
+    assert not stub.exists()

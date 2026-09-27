@@ -24,8 +24,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -35,8 +33,9 @@ from jaut import config, decisions  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.lockutil import batch_lock  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import BatchState, Decision, MethodStatus, Route  # noqa: E402
-from jaut.state import StateStore, default_workdir  # noqa: E402
+from jaut.models import BatchState, Decision, MethodStatus, ResumeOption, Route  # noqa: E402
+from jaut.state import (StateStore, default_workdir, load_batch_state,  # noqa: E402
+                        save_batch_state)
 
 SCRIPT_NAME = "batch_update"
 
@@ -66,9 +65,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             question="请先运行 batch_init.py")
 
     with batch_lock(batch_state_path):
-        with open(batch_state_path, encoding="utf-8") as f:
-            batch_data = json.load(f)
-        batch_state = BatchState.from_dict(batch_data)
+        batch_state = load_batch_state(batch_state_path)
+        if batch_state is None:
+            # is_file 检查已通过, 此处 None 即文件损坏(非法 JSON/结构)
+            raise StepError.state_error(
+                f"batch_state.json 已损坏(无法解析): {batch_state_path}",
+                question="请检查文件是否被外部修改; 如需重新开始请删除该文件后"
+                          "重跑 batch_init.py")
 
         # --skip-class 模式
         if args.skip_class:
@@ -77,7 +80,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 raise StepError.state_error(f"未找到类: {args.skip_class}")
             entry.status = "skipped"
             entry.skip_reason = args.reason or "用户跳过"
-            _save_batch_state(batch_state_path, batch_state)
+            save_batch_state(batch_state_path, batch_state)
             logger.info(f"跳过类: {args.skip_class}({entry.skip_reason})")
             return _continue_or_finish(batch_state, batch_workdir, logger)
 
@@ -88,7 +91,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 raise StepError.state_error(f"未找到类: {args.mark_failed}")
             entry.status = "failed"
             entry.skip_reason = args.reason or "标记失败"
-            _save_batch_state(batch_state_path, batch_state)
+            save_batch_state(batch_state_path, batch_state)
             logger.info(f"标记失败: {args.mark_failed}({entry.skip_reason})")
             return _continue_or_finish(batch_state, batch_workdir, logger)
 
@@ -139,7 +142,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                         logger.info(
                             f"类 {fqcn} 方法组 {completed_group}/{len(entry.method_groups)} "
                             f"完成, 推进到下一组")
-                        _save_batch_state(batch_state_path, batch_state)
+                        save_batch_state(batch_state_path, batch_state)
                         # 继续认领(batch_next 会拿到下一组)
                         decision = Decision(
                             status="success", exit_code=config.EXIT_OK,
@@ -171,38 +174,51 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                     logger.info(
                         f"类 {fqcn} 完成: 覆盖率 {entry.baseline_rate:.1f}% -> "
                         f"{entry.final_rate:.1f}%, 轮次 {entry.rounds_used}")
-            elif class_state.current_method is not None:
-                # 异常中断(预算耗尽的正常路径已改为类内自动跳过, 不会落到这里):
-                # 通常是 mvn 环境/依赖失败(exit 2)或用户主动中止, 保持 in_progress 交由用户决定
+            else:
+                # 未完成(仍有 pending 方法), 保持 in_progress 交由用户决定:
+                # - current_method 非空: 子代理异常中断(预算耗尽的正常路径已改为
+                #   类内自动跳过, 不会落到这里), 通常是 mvn 环境/依赖失败(exit 2)
+                #   或用户主动中止;
+                # - current_method 为空: 子代理从未真正启动类内迭代(委派后缺件即停/
+                #   直接失败返回), 不应静默标 done(落账会失真: 0 轮、基线率冒充
+                #   final_rate), 也不符合 SKILL.md §3.2.2 的中断转述承诺。
                 logger.info(f"类 {fqcn} 仍有 {len(pending)} 个 pending 方法, 保持 in_progress")
                 entry.rounds_used = class_state.class_round_used
-                _save_batch_state(batch_state_path, batch_state)
+                save_batch_state(batch_state_path, batch_state)
 
                 # 转述中断原因(含子代理实际中断线索)
                 reason_detail = _infer_escalation_reason(class_state)
+                if class_state.current_method is None:
+                    reason_detail = (reason_detail
+                                     or "原因: 子代理未开始类内迭代(无进行中的方法)。")
                 question = (
                     f"类 {fqcn} 的子代理报告类内迭代未完成"
                     f"(剩余 {len(pending)} 个待补方法, 已用 {entry.rounds_used} 轮)。"
                     f"{reason_detail}"
                     "请选择: 继续委派 / 跳过该类 / 终止批量。"
                 )
+                # resume 携带三个选项的逐字执行命令(SKILL.md §0.2: 用户答复后
+                # 逐字执行对应命令; 旧行为缺失 resume, 用户需自行拼装命令)
+                resume = [
+                    ResumeOption(option="continue", label="继续委派该类",
+                                 script="batch_next.py",
+                                 params=["--project-root", str(project_root)]),
+                    ResumeOption(option="skip_class", label="跳过该类",
+                                 script="batch_update.py",
+                                 params=["--project-root", str(project_root),
+                                         "--skip-class", fqcn,
+                                         "--reason", "<原因>"],
+                                 note="需把 <原因> 替换为跳过原因(如 mvn 不可用)"),
+                    ResumeOption(option="terminate", label="终止批量"),
+                ]
                 decision = Decision(
                     status="needs_input", exit_code=config.EXIT_CONTINUE,
                     summary=f"类 {fqcn} 未完成, 需用户决策",
                     route=Route.ASK_USER, reason="子代理未完成, 需用户决策",
-                    question=question)
+                    question=question, resume=resume)
                 return decision, EmitContext(workdir=batch_workdir)
-            else:
-                # 队列空但未终验 → 在批量模式下等同于 done
-                entry.status = "done"
-                entry.final_rate = class_state.class_coverage.rate
-                entry.rounds_used = class_state.class_round_used
-                entry.escalations = _auto_skipped_count(class_state)
-                logger.info(
-                    f"类 {fqcn} 完成(队列空): 覆盖率 {entry.baseline_rate:.1f}% -> "
-                    f"{entry.final_rate:.1f}%, 轮次 {entry.rounds_used}")
 
-        _save_batch_state(batch_state_path, batch_state)
+        save_batch_state(batch_state_path, batch_state)
 
         # 统计已完成数(unmet 与 skipped/failed 同为终态, 见 BatchState.all_done)
         done_count = sum(1 for c in batch_state.classes
@@ -322,16 +338,6 @@ def _continue_or_finish(batch_state: BatchState, batch_workdir: Path,
             route=Route.BATCH_NEXT, reason="继续认领下一类")
     return decision, EmitContext(workdir=batch_workdir,
                                  scripts_dir=Path(__file__).resolve().parent)
-
-
-def _save_batch_state(path: Path, batch_state: BatchState) -> None:
-    """原子写入 batch_state.json。"""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(batch_state.to_dict(), f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
 
 
 def main(argv: list[str] | None = None) -> int:

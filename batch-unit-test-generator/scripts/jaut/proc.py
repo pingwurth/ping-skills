@@ -26,6 +26,27 @@ from . import config
 from .logutil import module_logger
 
 
+def _windows_process_alive(pid: int) -> bool:
+    """Windows 进程存活探测: OpenProcess(SYNCHRONIZE) + WaitForSingleObject 零等待。
+
+    不能用 os.kill(pid, 0): Windows 上 signal 0 映射为 CTRL_C_EVENT, 实际执行
+    GenerateConsoleCtrlEvent(0, pid), 会向以 CREATE_NEW_PROCESS_GROUP 启动的
+    mvn 子进程组发送 Ctrl+C, 周期性探测会中断构建。
+    """
+    import ctypes
+
+    SYNCHRONIZE = 0x00100000
+    WAIT_TIMEOUT = 0x102
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 @dataclass
 class CommandResult:
     """命令执行结果。
@@ -85,9 +106,15 @@ class _ProgressReporter:
             self._report()
 
     def _is_process_alive(self) -> bool:
-        """检查进程是否仍在运行。"""
+        """检查进程是否仍在运行。
+
+        POSIX 用 signal 0 无害探测; Windows 走 _windows_process_alive
+        (os.kill(pid, 0) 在 Windows 上是 CTRL_C_EVENT, 不得用于探测)。
+        """
         if self._pid is None:
             return False
+        if os.name == "nt":
+            return _windows_process_alive(self._pid)
         try:
             os.kill(self._pid, 0)  # 信号 0: 不发送信号, 仅检查进程存在
             return True

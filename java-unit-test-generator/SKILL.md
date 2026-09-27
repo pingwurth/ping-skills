@@ -63,7 +63,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 - [ ] 4. 循环：build_prompt.py → LLM write_code → 逐字执行 next_step.on_complete → validate_rules.py → verify_coverage.py（均带 --workdir <workdir>）
 - [ ] 5. 未达标回到第 3 项换方法/重排计划；达标、或方法被预算耗尽自动跳过且队列清空则退出循环
 - [ ] 6. 收到 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令(预算耗尽已改为自动跳过, 此门禁仅用于工作树选择与异常中断)
-- [ ] 7. 目标方法全部完成后：init_coverage.py --project-root <worktree> --final-check 全量终验
+- [ ] 7. 目标方法全部完成后：init_coverage.py --project-root <worktree> --class <目标类FQCN 或源文件> --final-check 全量终验（终验与 init 同为必传 --class；多目标类场景还需 --workdir 指向该类的专属目录）
 - [ ] 8. 逐字转述 finish 报告（§8）；收尾清理由用户手动执行
 ```
 

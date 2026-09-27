@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -44,15 +44,12 @@ def setup_logger(script_name: str, workdir: str | Path) -> logging.Logger:
     return logger
 
 
-def get_logger(script_name: str) -> logging.Logger:
-    """取已初始化的 logger(不创建 handler)。"""
-    return logging.getLogger(_logger_name(script_name))
-
-
 def module_logger() -> logging.Logger:
     """模块级兜底 logger, 防止工具函数在未 setup 时直接调用报错。
-    
-    将 FileHandler 挂到命名空间根 java_ut，子 logger 靠 propagate 汇聚。
+
+    将 FileHandler 挂到命名空间根 java_ut, 子 logger 靠 propagate 汇聚。
+    兜底日志位于系统临时目录 java-unit-test-generator/logs/common.log,
+    首次建立时向 stderr 打印一次实际路径(stdout 保留给 NEXT_STEP 协议块)。
     """
     global _module_logger
     if _module_logger is None:
@@ -71,5 +68,7 @@ def module_logger() -> logging.Logger:
             root_logger.addHandler(handler)
             root_logger.setLevel(logging.DEBUG)
             root_logger.propagate = False
+            print(f"[jaut] 模块级兜底日志(未 setup_logger 时使用): {log_dir / 'common.log'}",
+                  file=sys.stderr)
         _module_logger = root_logger
     return _module_logger

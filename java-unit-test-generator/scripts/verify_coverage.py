@@ -99,12 +99,16 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         logger.info(f"执行 fast-single-cov.sh: module={module}, class={state.target_class}, test={test_simple}")
         result = maven.run_fast_single_cov(
             project_root, module, state.target_class, test_simple, mvn_log, no_am=True)
-        # <argLine> 降级: 脚本失败时回退到 mvn test jacoco:report
+        # <argLine> 降级: 仅对可恢复失败(如 exec 未生成)回退到 mvn test jacoco:report,
+        # 与 init_coverage.py 同口径; 编译/测试失败时降级同样会失败, 留给后续错误分支处置
         if not result.ok:
-            logger.warning("fast-single-cov.sh 失败, 降级到 mvn test jacoco:report")
-            maven.clean_jacoco_dirs(project_root, [module])
-            result = maven.run_mvn_test_with_jacoco(
-                project_root, module, test_simple, state.jacoco_version, mvn_log, state=state)
+            if maven._is_fallbackable_failure(mvn_log):
+                logger.warning("fast-single-cov.sh 失败, 降级到 mvn test jacoco:report")
+                maven.clean_jacoco_dirs(project_root, [module])
+                result = maven.run_mvn_test_with_jacoco(
+                    project_root, module, test_simple, state.jacoco_version, mvn_log, state=state)
+            else:
+                logger.error("fast-single-cov.sh 失败且降级无意义(编译/测试问题), 详见 %s", mvn_log)
         if not result.ok:
             # P0-6 修复: 区分编译失败与环境/依赖失败
             # 编译失败 -> 记录观测(轮次+1)并路由到 write_code 自愈

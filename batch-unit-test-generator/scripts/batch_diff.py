@@ -12,7 +12,7 @@
     → 源路径→FQCN + 模块定位 → 探测已有测试类 → 候选清单 → ask_user 确认门禁
 
 输出(NEXT_STEP):
-    有候选类 → ask_user(呈现清单, 请求范围 --all/--top N/--classes 与门槛);
+    有候选类 → ask_user(呈现清单, 请求范围 --classes all|top:N|FQCN 与门槛);
     无候选类 → finish(差异为空)。
 """
 
@@ -28,10 +28,10 @@ from pathlib import Path
 
 import _path_setup  # noqa: F401  — 初始化 sys.path 以导入 jaut 包
 
-from jaut import config, gitops, javasrc, maven  # noqa: E402
+from jaut import config, gitops, javasrc, maven, testcollect  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import Decision, Route  # noqa: E402
+from jaut.models import Decision, ResumeOption, Route  # noqa: E402
 from jaut.protocol import make_next_step  # noqa: E402
 
 SCRIPT_NAME = "batch_diff"
@@ -178,30 +178,40 @@ def _parse_pom_jacoco_excludes(project_root: Path) -> list[str]:
 
 
 def _detect_existing_test(project_root: Path, fqcn: str, module: str) -> bool:
-    """探测 src/test/java 下是否已有对应测试类。"""
-    pkg, _, simple = fqcn.rpartition(".")
-    pkg_dir = pkg.replace(".", "/") if pkg else ""
-    test_names = [simple + s for s in TEST_CLASS_SUFFIXES] + [TEST_CLASS_PREFIX + simple]
-    module_dir = project_root if module == "." else project_root / module
-    base = module_dir / "src" / "test" / "java"
-    if pkg_dir:
-        base = base / pkg_dir
-    for name in test_names:
-        if (base / f"{name}.java").is_file():
-            return True
-    return False
+    """探测 src/test/java 下是否已有对应测试类。
+
+    与批量收集执行同口径(testcollect: Test/Tests/IT/TestCase 后缀 + Test
+    前缀): 旧版探测不含 IT, 会被执行的 FooIT 不被视为"已有测试", 反向
+    旧版探测的 FooTestCase/TestFoo 又不会被基线与终验执行。
+    """
+    return testcollect.has_existing_test(project_root, module, fqcn)
 
 
 # --------------------------------------------------------------------------- #
 # Git diff
 # --------------------------------------------------------------------------- #
 def _resolve_target_branch(project_root: Path, target: str | None) -> str | None:
-    """自动探测目标分支(master > main > develop), 或使用指定值。"""
+    """自动探测目标分支(master > main > develop), 或使用指定值。
+
+    显式指定的分支先校验存在性: 拼错时 fail-fast 报明确错误, 而不是留给
+    后续 git diff 静默失败(旧行为返回 [] → 假报"过滤后无候选类", 把 git
+    故障伪装成内容过滤结果)。
+    """
     from jaut.proc import resolve_tool, run_command
 
-    if target and target != "auto":
-        return target
     git = resolve_tool("git")
+    if target and target != "auto":
+        if git is not None:
+            verify = gitops.run_command(  # type: ignore[attr-defined]
+                [git, "rev-parse", "--verify", target],
+                cwd=str(project_root), capture=True,
+                timeout=config.GIT_COMMAND_TIMEOUT_SECONDS)
+            if not verify.ok:
+                raise StepError.exec_error(
+                    f"目标分支不存在或无法解析: {target}",
+                    question=f"请确认 --target 的分支名拼写(当前值: {target}), "
+                              f"或改用 --target auto 自动探测")
+        return target
     if git is None:
         return None
     for branch in config.DEFAULT_TARGET_BRANCHES:
@@ -216,7 +226,12 @@ def _resolve_target_branch(project_root: Path, target: str | None) -> str | None
 
 def _get_diff_files(project_root: Path, target: str | None,
                     diff_mode: str = "auto") -> list[tuple[str, int, int]]:
-    """返回差异文件列表 [(路径, 增行, 删行)]; 不可用返回空列表。"""
+    """返回差异文件列表 [(路径, 增行, 删行)]。
+
+    git 不可用或差异真为空返回空列表; git 命令失败(分支拼错/仓库异常)
+    抛 StepError.exec_error —— 旧行为静默吞错返回 [], 会被误报为"过滤后
+    无候选类", 把 git 故障伪装成内容过滤结果误导用户与 LLM。
+    """
     from jaut.proc import resolve_tool, run_command
 
     git = resolve_tool("git")
@@ -232,14 +247,22 @@ def _get_diff_files(project_root: Path, target: str | None,
     merge_base_cmd = [git, "merge-base", target, "HEAD"]
     mb_result = run_command(merge_base_cmd, cwd=cwd, capture=True,
                             timeout=config.GIT_COMMAND_TIMEOUT_SECONDS)
-    if diff_mode == "three" or (diff_mode == "auto" and mb_result.ok and mb_result.stdout):
+    mb_ok = bool(mb_result.ok and mb_result.stdout)
+    if diff_mode == "three" and not mb_ok:
+        # 显式三点模式不可静默降级: 报错并建议改两点(旧行为直接
+        # None.strip() 抛 AttributeError, 退出码 2 内部错误无上下文)
+        raise StepError.exec_error(
+            f"merge-base {target}...HEAD 失败{_stderr_tail(mb_result)}",
+            question=f"三点差异模式需要 merge-base 可用; 可改用 "
+                      f"--diff-mode two 以 {target}..HEAD 两点对比重试")
+    if diff_mode == "three" or (diff_mode == "auto" and mb_ok):
         base = mb_result.stdout.strip()
         diff_ref = f"{base}...HEAD"
     elif diff_mode == "two":
         diff_ref = f"{target}..HEAD"
     else:
         # auto: 三点可用则用三点, 否则两点
-        if mb_result.ok and mb_result.stdout:
+        if mb_ok:
             base = mb_result.stdout.strip()
             diff_ref = f"{base}...HEAD"
         else:
@@ -249,8 +272,12 @@ def _get_diff_files(project_root: Path, target: str | None,
     name_cmd = [git, "diff", "--name-only", "--diff-filter=ACMR", diff_ref]
     name_result = run_command(name_cmd, cwd=cwd, capture=True,
                               timeout=config.GIT_COMMAND_TIMEOUT_SECONDS)
-    if not name_result.ok or not name_result.stdout:
-        return []
+    if not name_result.ok:
+        raise StepError.exec_error(
+            f"git diff 失败(基准 {diff_ref}){_stderr_tail(name_result)}",
+            question=f"请检查目标分支 {target} 是否存在、以及 git 仓库状态")
+    if not name_result.stdout:
+        return []  # 真正的差异为空
 
     files = [f.strip() for f in name_result.stdout.splitlines() if f.strip()]
 
@@ -275,6 +302,13 @@ def _get_diff_files(project_root: Path, target: str | None,
         add, dele = stats.get(f, (0, 0))
         result.append((f, add, dele))
     return result
+
+
+def _stderr_tail(result) -> str:
+    """取命令 stderr 末行作为错误上下文(无则空串)。"""
+    stderr = (result.stderr or "").strip()
+    lines = stderr.splitlines()
+    return f": {lines[-1]}" if lines else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -419,26 +453,48 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         f"排序策略: {args.sort_policy}",
         "",
         "请确认批量补测范围与门槛:",
-        "  - 全部: --all --threshold 80",
-        f"  - 前 N 个: --top N --threshold 80",
+        "  - 全部: --classes all --threshold 80",
+        "  - 前 N 个: --classes top:N --threshold 80",
         "  - 指定类: --classes <FQCN,...> --threshold 80",
         "",
-        "确认后运行 batch_init.py 开始批量基线。",
+        "确认后运行 batch_init.py 开始批量基线(参数与 batch_init.py --classes 一致)。",
     ])
     question = "\n".join(lines)
 
-    # 保存候选清单到 workdir 供 batch_init 读取
+    # resume 携带三种范围的逐字执行命令(SKILL.md §0.2/§3.1: 用户答复后逐字
+    # 执行对应命令; 旧行为缺失 resume, 用户需自行拼装 batch_init 命令)
+    resume = [
+        ResumeOption(option="continue", label="全部类 --classes all",
+                     script="batch_init.py",
+                     params=["--project-root", str(project_root),
+                             "--classes", "all", "--threshold", "80"]),
+        ResumeOption(option="custom", label="前 N 个 --classes top:N",
+                     script="batch_init.py",
+                     params=["--project-root", str(project_root),
+                             "--classes", "top:N", "--threshold", "80"],
+                     note="需把 N 替换为类数量, 80 可换为实际门槛"),
+        ResumeOption(option="choice", label="指定类 --classes <FQCN,...>",
+                     script="batch_init.py",
+                     params=["--project-root", str(project_root),
+                             "--classes", "<FQCN,...>", "--threshold", "80"],
+                     note="需把 <FQCN,...> 替换为候选清单中的类名, 80 可换为实际门槛"),
+        ResumeOption(option="terminate", label="取消批量补测"),
+    ]
+
+    # 保存候选清单到 workdir 供 batch_init 读取(diff_mode 供 batch_state
+    # 断点续跑时真实记录, 旧行为 batch_init 侧恒取默认值 three)
     import json
     candidates_file = workdir / "batch_candidates.json"
     with open(candidates_file, "w", encoding="utf-8") as f:
-        json.dump({"target_branch": target, "candidates": candidates,
-                   "sort_policy": args.sort_policy}, f, ensure_ascii=False, indent=2)
+        json.dump({"target_branch": target, "diff_mode": args.diff_mode,
+                   "candidates": candidates, "sort_policy": args.sort_policy},
+                  f, ensure_ascii=False, indent=2)
 
     decision = Decision(
         status="needs_input", exit_code=config.EXIT_CONTINUE,
         summary=f"差异分析完成: {len(candidates)} 个候选类, 等待用户确认范围与门槛",
         route=Route.ASK_USER, reason="确认门禁: 用户需确认批量补测范围与门槛",
-        question=question)
+        question=question, resume=resume)
     return decision, EmitContext(workdir=workdir)
 
 

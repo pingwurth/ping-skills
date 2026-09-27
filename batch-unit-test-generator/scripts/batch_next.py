@@ -7,7 +7,7 @@
 
 流程:
     读 batch_state.json(文件锁) → 取首个 pending/recheck → 标记 in_progress
-    → 输出 write_code 型委派指令(worktree/FQCN/类workdir/scripts路径/门槛/预算)
+    → 输出 ask_user 型委派指令(worktree/FQCN/类workdir/scripts路径/门槛/预算)
     → 无 pending/recheck → run_script batch_finish.py
 
 断点续跑:
@@ -24,8 +24,6 @@
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import shlex
 import sys
 from datetime import datetime, timezone
@@ -37,8 +35,9 @@ from jaut import config  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.lockutil import batch_lock  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import BatchClassEntry, BatchState, Decision, Route  # noqa: E402
-from jaut.state import StateStore, default_workdir  # noqa: E402
+from jaut.models import BatchClassEntry, Decision, Route  # noqa: E402
+from jaut.state import (StateStore, default_workdir, load_batch_state,  # noqa: E402
+                        save_batch_state)
 
 SCRIPT_NAME = "batch_next"
 
@@ -64,9 +63,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             question="请先运行 batch_init.py")
 
     with batch_lock(batch_state_path):
-        with open(batch_state_path, encoding="utf-8") as f:
-            batch_data = json.load(f)
-        batch_state = BatchState.from_dict(batch_data)
+        batch_state = load_batch_state(batch_state_path)
+        if batch_state is None:
+            # is_file 检查已通过, 此处 None 即文件损坏(非法 JSON/结构)
+            raise StepError.state_error(
+                f"batch_state.json 已损坏(无法解析): {batch_state_path}",
+                question="请检查文件是否被外部修改; 如需重新开始请删除该文件后"
+                          "重跑 batch_init.py")
 
         # --reset-claim: 复位僵死 in_progress
         if args.reset_claim:
@@ -77,7 +80,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 entry.status = "pending"
                 entry.claimed_at = None
                 logger.info(f"复位 in_progress -> pending: {args.reset_claim}")
-            _save_batch_state(batch_state_path, batch_state)
+            save_batch_state(batch_state_path, batch_state)
 
         # 优先处理已有 in_progress(断点续跑)
         in_progress = None
@@ -107,7 +110,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             entry.status = "in_progress"
             entry.claimed_at = datetime.now(timezone.utc).isoformat()
             entry.attempts += 1
-            _save_batch_state(batch_state_path, batch_state)
+            save_batch_state(batch_state_path, batch_state)
 
         # 输出委派要件(剩余预算按类的有效预算算: 大类探索模式翻倍)
         class_budget, exploring = _effective_class_budget(entry)
@@ -181,16 +184,6 @@ def _effective_class_budget(entry: BatchClassEntry) -> tuple[int, bool]:
     if state is None:
         return config.batch_class_round_budget(), False
     return state.class_round_budget, bool(state.exploration_mode)
-
-
-def _save_batch_state(path: Path, batch_state: BatchState) -> None:
-    """原子写入 batch_state.json。"""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(batch_state.to_dict(), f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
 
 
 def main(argv: list[str] | None = None) -> int:

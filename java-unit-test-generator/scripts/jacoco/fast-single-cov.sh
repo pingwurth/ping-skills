@@ -1,21 +1,31 @@
 #!/bin/bash
+# 不启用 set -e: mvn surefire:test 测试失败(退出码非 0)时仍需继续生成覆盖率报告,
+# 测试是否通过由 surefire 报告判定(与 batch 侧"失败即退出"语义不同)
+set -uo pipefail
 
 # ==============================================================================
-# 用法: ./fast-single-cov.sh [选项] <模块名> <目标类全限定名> <测试类全限定名> [日志文件路径]
+# 用法: ./fast-single-cov.sh [选项] <模块名> <目标类全限定名> <测试类全限定名>
 #
 # 选项:
 #   --project-root <path>  指定项目根目录(默认自动向上查找 pom.xml)
 #   --no-am                跳过依赖模块编译
 #
-# 注: 日志文件路径(第4位置参数)由脚本接收但不用, 实际日志由 Python 调用方通过 stdout 管道捕获。
+# 注: 所有日志由 Python 调用方通过 stdout 管道捕获到 log_file。
 #
 # 示例:
-#   ./fast-single-cov.sh --project-root /path/to/project user-service com.example.Foo com.example.FooTest /tmp/cov.log
+#   ./fast-single-cov.sh --project-root /path/to/project user-service com.example.Foo com.example.FooTest
 #   ./fast-single-cov.sh user-service com.example.Foo com.example.FooTest
 # ==============================================================================
 
 # 脚本所在目录
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+
+# 临时文件管理: 脚本退出时(含信号/错误退出)自动清理, 避免中断时 /tmp 残留
+MVN_LOG=""
+cleanup() {
+    [ -n "$MVN_LOG" ] && rm -f "$MVN_LOG"
+}
+trap cleanup EXIT
 
 # ---- 正式解析命名参数 ----
 NO_AM=false
@@ -39,13 +49,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 还原位置参数
-set -- "${POSITIONAL[@]}"
+# 还原位置参数(bash<4.4 空数组 + set -u 需 ${arr[@]+...} 防误报)
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 # 模块名、目标类、测试类
-MODULE_DIR=$1
-TARGET_CLASS=$2
-TARGET_TEST=$3
+MODULE_DIR=${1:-}
+TARGET_CLASS=${2:-}
+TARGET_TEST=${3:-}
 
 # 确定项目根目录: 优先使用显式指定, 否则自动查找
 if [ -n "$EXPLICIT_PROJECT_ROOT" ]; then
@@ -75,7 +85,7 @@ echo "📁 项目根目录: $PROJECT_ROOT"
 # 1. 参数校验
 if [ -z "$MODULE_DIR" ] || [ -z "$TARGET_CLASS" ] || [ -z "$TARGET_TEST" ]; then
     echo "❌ 错误: 缺少参数！"
-    echo "用法: $0 <模块名> <目标类> <测试类> [日志文件] [--no-am]"
+    echo "用法: $0 <模块名> <目标类> <测试类> [--no-am]"
     exit 1
 fi
 
@@ -92,7 +102,6 @@ EXEC_FILE="$ABS_MODULE_DIR/target/jacoco.exec"
 REPORT_DIR="$ABS_MODULE_DIR/target/site/jacoco"
 XML_FILE="$REPORT_DIR/jacoco.xml"
 CSV_FILE="$REPORT_DIR/jacoco.csv"
-JSON_FILE="$ABS_MODULE_DIR/target/state.json"
 
 # 检查工具是否存在
 if [ ! -f "$JACOCO_AGENT" ] || [ ! -f "$JACOCO_CLI" ]; then
@@ -123,7 +132,11 @@ if [ $? -ne 0 ]; then echo "❌ 编译失败！"; exit 1; fi
 # 4. 运行测试并收集覆盖率数据
 echo "🏃 [2/4] 运行测试并收集数据..."
 # 🌟 核心修复：使用绝对路径的 agent，并强制 forkCount=1 确保 JVM 启动
-ARG_LINE="-javaagent:$JACOCO_AGENT=destfile=$EXEC_FILE,includes=$TARGET_CLASS"
+# includes 必须追加内部类通配: 仅精确类名不插桩 Foo$Bar / Foo$1 等内部类,
+# 而报告生成含全部 classfiles, 内部类会按 0 覆盖计入, 系统性低估类级覆盖率;
+# JaCoCo includes 以 ':' 分隔多模式、支持 '*' 通配, '$' 为内部类分隔符
+# (bash 双引号内 \$ 为字面 $; 已用仓内 jacocoagent.jar 实测验证)
+ARG_LINE="-javaagent:$JACOCO_AGENT=destfile=$EXEC_FILE,includes=$TARGET_CLASS:${TARGET_CLASS}\$*"
 
 # 将 Maven 输出保存到临时文件，以便检查是否真的跑了测试
 MVN_LOG=$(mktemp)

@@ -197,8 +197,23 @@ def parse_jacoco_config(project_root: str | Path, *,
     return result
 
 
+def _local_tag(el: ET.Element) -> str:
+    """去掉命名空间前缀的标签名。
+
+    pom.xml 常带默认 xmlns, ElementTree 解析后 tag 形如
+    "{http://maven.apache.org/POM/4.0.0}modules"; rsplit 后取尾部即可得到
+    namespace 无关的局部名。
+    """
+    return str(el.tag).rsplit("}", 1)[-1]
+
+
 def is_multi_module(project_root: str | Path) -> bool:
-    """根 pom 是否声明 <modules>(决定是否使用 -pl/-am)。"""
+    """根 pom 直接子元素是否声明 <modules>(决定是否使用 -pl/-am)。
+
+    只认 <project> 根级 <modules>, 不匹配 <profiles><profile><modules>:
+    Maven profile 可声明自己的 modules, 任意深度匹配会把带 profile-modules
+    的单模块项目误判为多模块。
+    """
     pom = Path(project_root) / "pom.xml"
     if not pom.is_file():
         return False
@@ -206,11 +221,14 @@ def is_multi_module(project_root: str | Path) -> bool:
         root = ET.parse(pom).getroot()
     except (ET.ParseError, OSError):
         return False
-    return any(str(el.tag).endswith("modules") for el in root.iter())
+    return any(_local_tag(el) == "modules" for el in root)
 
 
 def get_maven_modules(project_root: str | Path) -> list[str]:
-    """解析根 pom.xml，返回模块目录列表；非多模块返回 ['.']。"""
+    """解析根 pom 根级 <modules>，返回模块目录列表；非多模块返回 ['.']。
+
+    同 is_multi_module: 只取 <project> 根级 <modules>, 忽略 profile 内声明。
+    """
     pom = Path(project_root) / "pom.xml"
     if not pom.is_file():
         return ["."]
@@ -220,10 +238,10 @@ def get_maven_modules(project_root: str | Path) -> list[str]:
         return ["."]
     root = tree.getroot()
     modules = []
-    for el in root.iter():
-        if str(el.tag).endswith("modules"):
+    for el in root:
+        if _local_tag(el) == "modules":
             for mod_el in el:
-                if str(mod_el.tag).endswith("module") and mod_el.text:
+                if _local_tag(mod_el) == "module" and mod_el.text:
                     modules.append(mod_el.text.strip())
             break
     return modules if modules else ["."]
@@ -255,7 +273,8 @@ def build_mvn_cmd(project_root: str | Path, *,
 
     Args:
         project_root: 项目根目录。
-        test_classes: 测试类列表(必填, SKILL.md §3: 无论在什么情况下执行 mvn test 必须用 -Dtest 指定测试类)。
+        test_classes: 测试类列表(必填; mvn test 一律以 -Dtest 定向执行目标测试类,
+            空列表会退化为模块全量测试)。
         jacoco_version: JaCoCo 版本。
         module: Maven 模块名。
         state: 状态对象(用于缓存)。
@@ -273,7 +292,7 @@ def build_mvn_cmd(project_root: str | Path, *,
         coord = f"org.jacoco:jacoco-maven-plugin:{jacoco_version}"
         log.info(f"pom 未配置 jacoco-maven-plugin, 使用完整坐标挂载(版本 {jacoco_version})")
         cmd += [f"{coord}:prepare-agent", "test", f"{coord}:report"]
-    # SKILL.md §3: 无论在什么情况下执行 mvn test 必须用 -Dtest 指定测试类
+    # -Dtest 定向执行目标测试类: 空列表会退化为模块全量测试
     if not test_classes:
         raise ValueError("test_classes 不能为空, 必须指定至少一个测试类")
     cmd.append("-Dtest=" + ",".join(test_classes))
@@ -344,7 +363,8 @@ def run_fast_single_cov(
         module: Maven 模块名(脚本第1参数)。
         target_class: 目标类 FQCN(脚本第2参数)。
         test_class: 测试类 FQCN(脚本第3参数)。
-        log_file: 日志文件路径(脚本内部所有输出重定向到此文件)。
+        log_file: 日志文件路径(run_command 把脚本 stdout 写入该文件;
+            脚本自身不接收日志参数, 内部 mvn 输出走脚本临时文件)。
         no_am: 是否跳过依赖模块编译(verify 阶段依赖已预装时传 True)。
         timeout: 超时秒数(默认 mvn_timeout)。
 
@@ -366,7 +386,7 @@ def run_fast_single_cov(
     cmd = [
         "bash", str(script),
         "--project-root", str(project_root),
-        module, target_class, test_class, log_file,
+        module, target_class, test_class,
     ]
     if no_am:
         cmd.append("--no-am")

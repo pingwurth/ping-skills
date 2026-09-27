@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 _SCHEMA_PATH = Path(__file__).resolve().parent.parent / "protocol" / "next-step.schema.json"
-# java skill 的合法裸 finish 脚本排除表(见 SKILL.md §8)
+# 本 skill 的合法裸 finish 脚本排除表(见 SKILL.md §8)
 _EXPECTED_EXCLUSIONS = ["select_worktree.py", "batch_diff.py", "batch_init.py"]
 
 

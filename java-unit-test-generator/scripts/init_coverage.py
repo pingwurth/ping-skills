@@ -139,7 +139,8 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         (Decision, EmitContext): 决策(finish / make_plan / ask_user)与路由上下文。
 
     Raises:
-        StepError: 项目根缺失、目标类无法解析、mvn/报告/环境失败(exit 2)。
+        StepError: 项目根缺失、目标类无法解析、mvn/报告/环境失败(exit 2);
+        终验模式 state.json 缺失/损坏(exit 3, 不得静默降级为全新 init)。
     """
     project_root = Path(args.project_root).resolve()
     if not project_root.is_dir():
@@ -170,6 +171,16 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 
     with store.locked():
         prev_state = store.load() if args.final_check else None
+        # 终验要求延续既有进度: state 缺失/损坏时不得静默按全新 init 处理,
+        # 否则 threshold/excludes/target_method 等全部丢失(如 80≤rate<90 的假 PASS)
+        if args.final_check and prev_state is None:
+            raise StepError.state_error(
+                f"终验模式要求 {store.path} 存在且可读(先完成 init 轮)",
+                question=(
+                    f"state.json 缺失或损坏: {store.path}, 终验需要延续 init 轮的进度与门槛。"
+                    f"请检查 --workdir/--project-root 是否指向正确的目录;"
+                    f"若确无既有状态, 请重跑 init_coverage.py 起始轮")
+            )
         # 排除模式: 显式传入优先; 终验未传时沿用 init 轮取值(与 threshold 同模式)
         if args.coverage_exclude is not None:
             coverage_excludes = [p.strip() for p in args.coverage_exclude if p.strip()]

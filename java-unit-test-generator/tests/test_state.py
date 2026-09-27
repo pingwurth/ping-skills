@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from jaut import config
@@ -163,3 +165,24 @@ def test_locked_sequential_round_trip(tmp_path: Path):
     with store.locked():
         loaded = store.load()
     assert loaded is not None and loaded.target_class == "com.x.Foo"
+
+
+def test_locked_keeps_lock_file_after_release(tmp_path: Path):
+    """锁文件常驻不删(M4): unlock 后 unlink 与后来者 open 新 inode 存在竞态。"""
+    store = StateStore(tmp_path)
+    lock_file = tmp_path / (config.STATE_FILENAME + ".lock")
+    with store.locked():
+        assert lock_file.is_file()
+    assert lock_file.is_file()
+
+
+def test_locked_refreshes_stale_lock_mtime(tmp_path: Path):
+    """获锁时应刷新锁文件 mtime: 残留检测以最近一次获锁时间为准(M4)。"""
+    store = StateStore(tmp_path)
+    lock_file = tmp_path / (config.STATE_FILENAME + ".lock")
+    # 预置"残留"锁文件, mtime 回拨到一天前
+    lock_file.write_text("", encoding="utf-8")
+    stale = time.time() - 86400
+    os.utime(lock_file, (stale, stale))
+    with store.locked():
+        assert lock_file.stat().st_mtime > stale

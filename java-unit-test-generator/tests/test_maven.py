@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -305,6 +306,46 @@ def test_is_multi_module_invalid_xml(tmp_path):
     assert maven.is_multi_module(tmp_path) is False
 
 
+def test_is_multi_module_ignores_profile_modules(tmp_path):
+    """仅 <profiles> 内声明 modules 的项目不应误判为多模块(L4)。"""
+    _write_pom(tmp_path, """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>profiled</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <profiles>
+    <profile>
+      <id>extra</id>
+      <modules>
+        <module>extra-module</module>
+      </modules>
+    </profile>
+  </profiles>
+</project>
+""")
+    assert maven.is_multi_module(tmp_path) is False
+    assert maven.get_maven_modules(tmp_path) == ["."]
+
+
+def test_is_multi_module_namespaced_root_modules(tmp_path):
+    """带默认 xmlns 的根级 modules(真实 pom 常态)应正确识别为多模块(L4)。"""
+    _write_pom(tmp_path, """<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>parent</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <modules>
+    <module>module-a</module>
+    <module>module-b</module>
+  </modules>
+</project>
+""")
+    assert maven.is_multi_module(tmp_path) is True
+    assert maven.get_maven_modules(tmp_path) == ["module-a", "module-b"]
+
+
 # --------------------------------------------------------------------------- #
 # get_maven_modules
 # --------------------------------------------------------------------------- #
@@ -564,6 +605,37 @@ def test_run_fast_single_cov_uses_config_timeout(tmp_path, _ensure_jacoco_script
             str(tmp_path / "mvn.log"))
     _, kwargs = mock_run.call_args
     assert kwargs["timeout"] == 888
+
+
+# --------------------------------------------------------------------------- #
+# fast-single-cov.sh 脚本内容(H1 / L3 回归)
+# --------------------------------------------------------------------------- #
+def _fast_single_cov_script_path() -> Path:
+    return Path(maven.__file__).resolve().parent.parent / "jacoco" / "fast-single-cov.sh"
+
+
+def test_fast_single_cov_script_passes_bash_syntax_check():
+    """脚本应通过 bash -n 语法检查(L3: set -uo pipefail/trap 改造后无语法错误)。"""
+    result = subprocess.run(
+        ["bash", "-n", str(_fast_single_cov_script_path())], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_fast_single_cov_script_includes_inner_classes():
+    """agent includes 应带内部类通配(H1): 精确类名不插桩 Foo$Inner, 覆盖率会被低估。"""
+    content = _fast_single_cov_script_path().read_text(encoding="utf-8")
+    # agent 对点号/斜杠格式归一化, 精确类名 Foo 不插桩 Foo$Bar/Foo$1 等内部类,
+    # 必须附加 ${TARGET_CLASS}\$* 通配才能采集内部类探针数据
+    assert "includes=$TARGET_CLASS:${TARGET_CLASS}\\$*" in content
+
+
+def test_fast_single_cov_script_has_no_dead_code():
+    """死变量 JSON_FILE 已删, trap 清理与 set -uo pipefail 已就位(L3)。"""
+    content = _fast_single_cov_script_path().read_text(encoding="utf-8")
+    assert "JSON_FILE" not in content
+    assert "trap cleanup EXIT" in content
+    assert 'MVN_LOG=""' in content
+    assert "set -uo pipefail" in content
 
 
 # --------------------------------------------------------------------------- #

@@ -2,6 +2,8 @@
 
 state.json 必须原子写入(临时文件 + os.replace + fsync), 避免半截状态破坏断点续跑。
 加载委托 models.State.from_dict, 对缺失键填默认值以兼容旧版本状态文件。
+批量侧另有 batch_state.json 的共享读写(save/load_batch_state), 供
+batch_init/next/update/finish 四入口复用。
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from typing import Optional
 
 from . import config
 from .logutil import module_logger
-from .models import State
+from .models import BatchState, State
 
 if sys.platform == "win32":
     import msvcrt
@@ -38,6 +40,39 @@ else:
 def default_workdir(project_root: str | Path) -> Path:
     """默认工作目录: <project-root>/.agent/batch-unit-test-generator。"""
     return Path(project_root).joinpath(*config.WORKDIR_PARTS)
+
+
+def save_batch_state(path: Path, batch_state: BatchState) -> None:
+    """原子写入 batch_state.json(batch_init/next/update/finish 共用)。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(batch_state.to_dict(), f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def load_batch_state(path: Path) -> Optional[BatchState]:
+    """读取 batch_state.json; 缺失或损坏返回 None(损坏细节进日志)。
+
+    与 StateStore.load 的降级语义一致; 区别是批量入口(next/update/finish)
+    对 None 抛 StepError.state_error 提示用户处置, 不让裸异常穿透 traceback。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        module_logger().warning(f"batch_state.json 读取失败, 视为缺失: {path} ({exc})")
+        return None
+    if not isinstance(data, dict):
+        module_logger().warning(f"batch_state.json 结构非法(非对象): {path}")
+        return None
+    try:
+        return BatchState.from_dict(data)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        module_logger().warning(f"batch_state.json 字段结构非法: {path} ({exc})")
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -96,36 +131,42 @@ class StateStore:
 
         使用独立的 .lock 文件, 避免与 state.json 的 os.replace 替换冲突。
         POSIX 使用 fcntl.flock, Windows 使用 msvcrt.locking。
+
+        锁文件常驻不删: unlock 后 unlink 与后来者 open 新 inode 存在竞态
+        (旧 inode 上阻塞的等待方与新 inode 上立即获锁的后来者会同时"持锁"),
+        会破坏互斥; 残留锁由 24 小时未更新检测兜底(获锁时刷新 mtime)。
         """
         lock_path = self.path.with_name(config.STATE_FILENAME + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # 检测残留锁文件(超过 24 小时)
+
+        # 检测残留锁文件(超过 24 小时未更新; 锁文件常驻属正常设计)
         if lock_path.exists():
             try:
                 import time
                 lock_age = time.time() - lock_path.stat().st_mtime
                 if lock_age > 24 * 3600:  # 24 小时
                     module_logger().warning(
-                        f"检测到残留锁文件 {lock_path} (存在 {lock_age/3600:.1f} 小时), "
-                        f"如果确认没有其他进程在运行, 可手动删除该文件"
+                        f"检测到 24 小时未更新的锁文件 {lock_path} (可能为异常残留, "
+                        f"如果确认没有其他进程在运行, 可手动删除该文件)"
                     )
             except (OSError, ImportError):
                 pass
-        
+
         fp = open(lock_path, "a", encoding="utf-8")
         try:
             _lock_file(fp)
+            # 获锁后刷新 mtime: 残留检测以"最近一次获锁时间"为准
+            try:
+                os.utime(lock_path)
+            except OSError:
+                pass
             yield
         finally:
             try:
                 _unlock_file(fp)
             finally:
                 fp.close()
-                try:
-                    lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                # 不 unlink: unlock 后删除与后来者 open 新 inode 存在竞态, 会破坏互斥
 
     def load(self) -> Optional[State]:
         """读取并反序列化状态; 文件缺失或损坏返回 None(由调用方按状态错误流转)。"""

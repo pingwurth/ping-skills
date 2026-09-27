@@ -230,6 +230,76 @@ def test_handler_raises_when_no_current_method(tmp_path):
     assert "current_method" in exc_info.value.decision.summary
 
 
+# --------------------------------------------------------------------------- #
+# 降级门控(L1 回归): 仅可恢复失败才回退 mvn test jacoco:report
+# --------------------------------------------------------------------------- #
+def test_handler_skips_fallback_for_compile_failure(tmp_path):
+    """fast-single-cov.sh 编译失败时不降级(L1): 降级同样会失败, 直接进错误分支。"""
+    state = _make_state(tmp_path)
+    Path(state.mvn_log).write_text(
+        "🔨 [1/4] 编译模块及依赖...\n❌ 编译失败！\n", encoding="utf-8")
+
+    with patch("scripts.verify_coverage.StateStore") as MockStore, \
+         patch("scripts.verify_coverage.setup_logger"), \
+         patch("scripts.verify_coverage.maven.clean_jacoco_dirs"), \
+         patch("scripts.verify_coverage.maven.clean_surefire_dirs", return_value=[]), \
+         patch("scripts.verify_coverage.maven.run_fast_single_cov",
+               return_value=MagicMock(ok=False)), \
+         patch("scripts.verify_coverage.maven.run_mvn_test_with_jacoco") as mock_fallback, \
+         patch("scripts.verify_coverage.maven.parse_compile_errors", return_value=[]):
+        MockStore.return_value.locked.return_value = _locked_mock()
+        MockStore.return_value.load.return_value = state
+
+        with pytest.raises(StepError) as exc_info:
+            handler(_make_args(str(tmp_path)))
+
+    mock_fallback.assert_not_called()
+    assert exc_info.value.decision.exit_code == config.EXIT_ERROR
+    assert "依赖解析或环境问题" in exc_info.value.decision.summary
+
+
+def test_handler_falls_back_when_exec_not_generated(tmp_path):
+    """exec 未生成(argLine 写死)时门控放行, 降级到 mvn test jacoco:report(L1)。"""
+    state = _make_state(tmp_path)
+    Path(state.mvn_log).write_text(
+        "Tests run: 1, Failures: 0\n"
+        "❌ 致命错误: 测试跑完了，但依然未找到覆盖率数据文件\n", encoding="utf-8")
+
+    method_entry = MagicMock(spec=MethodCoverage)
+    method_entry.key = state.current_method
+    method_entry.rate = 30.0
+    method_entry.status = MethodStatus.PENDING
+
+    mock_test = TestResult(tests=5, failures=0, errors=0, skipped=0, report_found=True, parse_errors=0)
+
+    with patch("scripts.verify_coverage.StateStore") as MockStore, \
+         patch("scripts.verify_coverage.setup_logger"), \
+         patch("scripts.verify_coverage.maven.clean_jacoco_dirs"), \
+         patch("scripts.verify_coverage.maven.clean_surefire_dirs", return_value=[]), \
+         patch("scripts.verify_coverage.maven.run_fast_single_cov",
+               return_value=MagicMock(ok=False)), \
+         patch("scripts.verify_coverage.maven.run_mvn_test_with_jacoco",
+               return_value=MagicMock(ok=True)) as mock_fallback, \
+         patch("scripts.verify_coverage.maven.parse_compile_errors", return_value=[]), \
+         patch("scripts.verify_coverage.surefire.parse_surefire_reports", return_value=mock_test), \
+         patch("scripts.verify_coverage.jacoco.report_paths",
+               return_value=(Path("x.xml"), Path("x.csv"))), \
+         patch("scripts.verify_coverage.Path.is_file", return_value=True), \
+         patch("scripts.verify_coverage._record_observation") as mock_record, \
+         patch("scripts.verify_coverage.decisions.decide_after_verify") as mock_decide:
+        MockStore.return_value.locked.return_value = _locked_mock()
+        MockStore.return_value.load.return_value = state
+        mock_record.return_value = (method_entry, 30.0)
+        mock_decide.return_value = Decision(
+            status="success", exit_code=config.EXIT_CONTINUE, summary="build_prompt",
+            route=Route.BUILD_PROMPT, reason="未达标")
+
+        decision, ectx = handler(_make_args(str(tmp_path)))
+
+    mock_fallback.assert_called_once()
+    assert decision.route == Route.BUILD_PROMPT
+
+
 def test_handler_raises_when_both_coverage_methods_fail(tmp_path):
     """fast-single-cov.sh 与 mvn 降级方案均失败时应抛出 StepError。"""
     state = _make_state(tmp_path)

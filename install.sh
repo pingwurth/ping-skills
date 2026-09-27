@@ -11,11 +11,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── 可选的工具列表及其对应的目录名 ────────────────────────────────
 TOOLS=("claude" "qwen" "qoder" "opencode")
 
-# ── 扫描脚本目录下的所有 skill 子目录（排除自身和隐藏目录） ──────
+# ── 扫描脚本目录下所有含 SKILL.md 的 skill 子目录（排除隐藏目录） ──
 discover_skills() {
     local skills=()
     for d in "$SCRIPT_DIR"/*/; do
         [ -d "$d" ] || continue
+        # skill 的判定标准：目录内必须存在 SKILL.md
+        [ -f "$d/SKILL.md" ] || continue
         local name
         name="$(basename "$d")"
         # 跳过隐藏目录和非目录文件
@@ -220,7 +222,7 @@ all_skills=()
 read -ra all_skills <<< "$(discover_skills)"
 
 if [[ ${#all_skills[@]} -eq 0 ]]; then
-    echo "错误: 在 '$SCRIPT_DIR' 中未找到任何 skill 目录" >&2
+    echo "错误: 在 '$SCRIPT_DIR' 中未找到任何含 SKILL.md 的 skill 目录" >&2
     exit 1
 fi
 

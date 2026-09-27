@@ -159,6 +159,27 @@ def test_handler_final_check_mode_uses_prev_threshold(tmp_path):
                                        excludes=["com.example.dto.*"])
 
 
+def test_handler_final_check_missing_state_fails_fast(tmp_path):
+    """终验模式: state.json 缺失/损坏时 fail-fast(exit 3), 不得静默按全新 init 处理(M3)。"""
+    args = _make_args(tmp_path, final_check=True)
+
+    with patch("scripts.init_coverage.javasrc.resolve_target") as mock_resolve, \
+         patch("scripts.init_coverage.StateStore") as MockStore, \
+         patch("scripts.init_coverage.setup_logger"):
+        mock_resolve.return_value = ("com.example.MyService", Path("src/main/java/MyService.java"))
+        MockStore.return_value.locked.return_value.__enter__ = MagicMock(return_value=None)
+        MockStore.return_value.locked.return_value.__exit__ = MagicMock(return_value=False)
+        MockStore.return_value.load.return_value = None   # state 缺失/损坏
+        MockStore.return_value.path = tmp_path / "state.json"
+
+        with pytest.raises(StepError) as exc_info:
+            handler(args)
+
+    assert exc_info.value.decision.exit_code == config.EXIT_STATE
+    assert "终验" in exc_info.value.decision.summary
+    assert "state.json" in exc_info.value.decision.question
+
+
 def test_handler_persists_coverage_excludes(tmp_path):
     """基线模式: --coverage-exclude 去空白后写入 state, 解析与类覆盖率均带 excludes。"""
     args = _make_args(tmp_path, coverage_exclude=["com.example.dto.*", " *$Builder "])

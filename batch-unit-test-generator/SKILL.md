@@ -37,7 +37,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 
 ```markdown
 - [ ] 1. 确认 git 工作树：select_worktree.py，拿到 <worktree>
-- [ ] 2. 差异分析与范围确认：batch_diff.py --project-root <worktree> → 转述候选类清单，等用户确认范围（--all / --top N / --classes <FQCN,...>；快速模式不看门槛，无覆盖率目标）
+- [ ] 2. 差异分析与范围确认：batch_diff.py --project-root <worktree> → 转述候选类清单，等用户确认范围（--classes all / --classes top:N / --classes <FQCN,...>；快速模式不看门槛，无覆盖率目标）
 - [ ] 3. 逐类串行处理，一次只处理一个类（不使用子代理），对每个类重复第 4~8 项
 - [ ] 4. 探索该类/方法的生产源码：确认 FQCN 与源文件、列出全部方法、识别依赖与分支
 - [ ] 5. 探索对应测试类的源码：定位测试文件、已有用例、可复用的 mock/基类/工具方法
@@ -66,7 +66,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 ```markdown
 - [ ] 1. 确认 git 工作树：select_worktree.py，拿到 <worktree>
 - [ ] 2. 差异分析：batch_diff.py --project-root <worktree>
-- [ ] 3. 范围与门槛确认门禁：转述候选类清单，等用户确认范围（--all / --top N / --classes）与门槛
+- [ ] 3. 范围与门槛确认门禁：转述候选类清单，等用户确认范围（--classes all / top:N / <FQCN,...>）与门槛
 - [ ] 4. 批量基线：batch_init.py --project-root <worktree> --classes <已确认范围> --threshold <门槛>
 - [ ] 5. 循环认领与委派：batch_next.py 认领 pending 类 → 委派子代理 batch-class-writer 跑类内迭代 → 子代理交付报告 → batch_update.py 落账 → 尚有剩余类则回到本项
 - [ ] 6. 收到 ask_user 时逐字转述 question 与 resume，等用户答复后逐字执行对应命令(预算耗尽已改为自动跳过, 此门禁仅用于范围确认与异常中断)
@@ -84,7 +84,7 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 select_worktree (拷贝复用, 整个批次仅一次)
       ↓
 batch_diff (差异分析+过滤 → 候选类清单 → ask_user 确认门禁)
-      ↓  用户确认范围(--all/--top N/--classes)与门槛
+      ↓  用户确认范围(--classes all/top:N/FQCN,...)与门槛
 batch_init (install 一次 + 全量 mvn 一次 → 各类基线 state.json + batch_state.json)
       ↓
 batch_next (原子认领下一 pending 类 → 输出子代理委派要件)
@@ -122,7 +122,7 @@ python scripts/batch_next.py --project-root <worktree> [--reset-claim <FQCN>] [-
 python scripts/batch_update.py --project-root <worktree> [--fqcn <FQCN>] [--skip-class <FQCN> --reason <text>] [--mark-failed <FQCN> --reason <text>] [--workdir <dir>]
 
 # 第六步: 批量终验(所有类 done/skipped 后)
-python scripts/batch_finish.py --project-root <worktree> [--skip-mvn] [--workdir <dir>]
+python scripts/batch_finish.py --project-root <worktree> [--skip-mvn] [--jacoco-version V] [--workdir <dir>]
 ```
 
 > **注**：所有脚本均支持 `--workdir` 参数用于指定工作目录（默认为 `<project-root>/.agent/batch-unit-test-generator/`）。详细参数说明请运行 `python scripts/<脚本名>.py --help`。
@@ -206,24 +206,29 @@ python scripts/batch_finish.py --project-root <worktree> [--skip-mvn] [--workdir
 1. **显式排除**：通过 `--coverage-exclude PATTERN` 参数指定排除模式（可重复）。
 2. **启发式排除**：自动检测源码中的 Lombok/MapStruct 注解并排除生成的类。
 
-**Lombok 启发式排除规则**：
-- `@Builder` → 排除 `*$Builder`
-- `@Value` → 排除 `*$Value`
-- `@Data` → 排除 `*$Data`（保守排除）
+**Lombok 启发式排除规则**（按候选类逐类生成精确字面量，非通配）：
+- `@Builder` / `@SuperBuilder` → 排除 `<FQCN>$<Simple>Builder`（Lombok 生成的内部类）
+- `@SuperBuilder` → 另排除 `<FQCN>$<Simple>BuilderImpl`
+- `@Value` / `@Data` 不排除（不生成新类，仅变换原类字节码）
 
 **MapStruct 启发式排除规则**：
-- `@Mapper` → 排除 `*$MapperImpl`
+- `@Mapper` → 排除同包顶层实现类 `<包名>.<Simple>Impl`（无 `$`）
+
+方法级 `@Builder` 生成的内部类名与类级不同，需 `--coverage-exclude` 显式排除（更稳妥的做法：配置 `lombok.addLombokGeneratedAnnotation`，见 `references/UnitTestRules.md`）。历史版本的 `*$Builder` / `*$MapperImpl` 全局通配从未命中真实生成类，且会误伤手写内部类，已废弃。
 
 ### 测试类收集策略
 
 `batch_init.py` 和 `batch_finish.py` 按以下规则收集测试类列表：
 
-1. **搜索规则**：在 `src/test/java` 同包目录下搜索以下命名模式的测试类：
+1. **搜索规则**：在 `src/test/java` 同包目录下搜索以下命名模式的测试类（与 `batch_diff` 已有测试探测、`batch_finish` 失败归因同口径）：
    - `{SimpleClassName}Test.java`
    - `{SimpleClassName}Tests.java`
    - `{SimpleClassName}IT.java`（集成测试）
+   - `{SimpleClassName}TestCase.java`
+   - `Test{SimpleClassName}.java`
 2. **去重逻辑**：收集后自动去重，避免重复执行。
 3. **按需执行**：仅执行与目标类相关的测试类，减少 mvn 执行时间。
+4. **桩兜底**：无任何已存在测试类的目标类，会临时创建仅含类声明的最小桩测试类（不导入 JUnit，避免版本冲突），保证 `-Dtest` 恒非空（空列表会退化为模块全量测试）且零测试模块也能产出 JaCoCo 报告；mvn 失败自动回滚桩文件，成功后自动清理，不在用户项目留下意外文件。
 
 ### 大类配置参数
 
@@ -305,7 +310,7 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 ## 7. 完成标准与最终交付
 
 - **类内完成**：所有方法 done/skipped → 子代理输出交付报告（含类内完成报告）。
-- **批量终验**：`batch_finish` 一次全量 mvn → 每个活跃类（done/recheck/unverified）刷新覆盖率与测试 → 按类判定（覆盖率达标 + 结果可信 + 失败用例不在本类）→ 确认 done；否则 → 有补测空间（存在 pending 方法）→ recheck 重入队；无补测空间 → unmet 未达标终态（记录 skip_reason 并入最终报告）；环境不可信（surefire 报告缺失/目录清理失败）且无补测空间 → unverified 待复核（非终态，环境修复后重跑 `batch_finish` 重新终验）。终态类（skipped/unmet/failed）不参与复核，只进最终报告；全部类均为终态时跳过 mvn 直接出报告。整批 `tests_green` 是聚合值，别的类红灯不会把本类打成 unmet；本类失败归因覆盖该类全部测试类命名变体（`{Simple}Test`/`{Simple}Tests`/`{Simple}IT`），既有 `FooTests` 的失败不会漏算成"其他类的失败"。
+- **批量终验**：`batch_finish` 一次全量 mvn → 每个活跃类（done/recheck/unverified）刷新覆盖率与测试 → 按类判定（覆盖率达标 + 结果可信 + 失败用例不在本类）→ 确认 done；否则 → 有补测空间（存在 pending 方法）→ recheck 重入队；无补测空间 → unmet 未达标终态（记录 skip_reason 并入最终报告）；环境不可信（surefire 报告缺失/目录清理失败）且无补测空间 → unverified 待复核（非终态，环境修复后重跑 `batch_finish` 重新终验）。终态类（skipped/unmet/failed）不参与复核，只进最终报告；全部类均为终态时跳过 mvn 直接出报告。整批 `tests_green` 是聚合值，别的类红灯不会把本类打成 unmet；本类失败归因覆盖该类全部测试类命名变体（`{Simple}Test`/`{Simple}Tests`/`{Simple}IT`/`{Simple}TestCase`/`Test{Simple}`），既有 `FooTests` 的失败不会漏算成"其他类的失败"。
 - **最终报告**：全部确认 → `finish` 携带 `render_batch_finish_report`（各类 before→after、达标/跳过/失败/未达标清单、总轮次、总自动跳过方法数、终验结果、worktree 清理提醒），LLM 逐字转述。
 
 ---
@@ -322,3 +327,5 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 本 `SKILL.md` 中的 Workflow / 门禁 / 委派 / 终验 / 报告均指**标准模式**；快速模式见 §0.1，仅保留 `select_worktree` + `batch_diff`，不使用子代理、不跑 mvn。
 
 与 `SKILL.md` 冲突时以 `SKILL.md` 为准。
+
+> 上述优先级适用于技能**安装到宿主项目后运行**时。在仓库内开发维护本 skill 时（写代码、改协议），冲突裁定顺序以仓库根 `AGENTS.md` 为准：`protocol/next-step.schema.json` > `references/UnitTestRules.md` > `SKILL.md` > 判断。

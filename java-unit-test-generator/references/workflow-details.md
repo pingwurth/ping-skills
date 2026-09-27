@@ -135,6 +135,8 @@ python scripts/init_coverage.py --project-root <worktree> --class <FQCN 或源�
 
 `mvn.log` 可能很大，先用 grep 定位 `[ERROR]`、`BUILD FAILURE`、`FAILURE!` 与测试失败摘要，不要整读文件。
 
+脚本主日志只写 `<workdir>/logs/`。`jaut` 内部工具函数在脚本尚未 `setup_logger` 时会落到模块级兜底日志——系统临时目录 `java-unit-test-generator/logs/common.log`，首次建立时会向 stderr 打印一次实际路径；若 `<workdir>/logs/` 缺失对应记录，可先查该兜底文件。
+
 ---
 
 ## 7. Maven 长时间执行

@@ -197,8 +197,23 @@ def parse_jacoco_config(project_root: str | Path, *,
     return result
 
 
+def _local_tag(el: ET.Element) -> str:
+    """去掉命名空间前缀的标签名。
+
+    pom.xml 常带默认 xmlns, ElementTree 解析后 tag 形如
+    "{http://maven.apache.org/POM/4.0.0}modules"; rsplit 后取尾部即可得到
+    namespace 无关的局部名。
+    """
+    return str(el.tag).rsplit("}", 1)[-1]
+
+
 def is_multi_module(project_root: str | Path) -> bool:
-    """根 pom 是否声明 <modules>(决定是否使用 -pl/-am)。"""
+    """根 pom 直接子元素是否声明 <modules>(决定是否使用 -pl/-am)。
+
+    只认 <project> 根级 <modules>, 不匹配 <profiles><profile><modules>:
+    Maven profile 可声明自己的 modules, 任意深度匹配会把带 profile-modules
+    的单模块项目误判为多模块。
+    """
     pom = Path(project_root) / "pom.xml"
     if not pom.is_file():
         return False
@@ -206,11 +221,14 @@ def is_multi_module(project_root: str | Path) -> bool:
         root = ET.parse(pom).getroot()
     except (ET.ParseError, OSError):
         return False
-    return any(str(el.tag).endswith("modules") for el in root.iter())
+    return any(_local_tag(el) == "modules" for el in root)
 
 
 def get_maven_modules(project_root: str | Path) -> list[str]:
-    """解析根 pom.xml，返回模块目录列表；非多模块返回 ['.']。"""
+    """解析根 pom 根级 <modules>，返回模块目录列表；非多模块返回 ['.']。
+
+    同 is_multi_module: 只取 <project> 根级 <modules>, 忽略 profile 内声明。
+    """
     pom = Path(project_root) / "pom.xml"
     if not pom.is_file():
         return ["."]
@@ -220,10 +238,10 @@ def get_maven_modules(project_root: str | Path) -> list[str]:
         return ["."]
     root = tree.getroot()
     modules = []
-    for el in root.iter():
-        if str(el.tag).endswith("modules"):
+    for el in root:
+        if _local_tag(el) == "modules":
             for mod_el in el:
-                if str(mod_el.tag).endswith("module") and mod_el.text:
+                if _local_tag(mod_el) == "module" and mod_el.text:
                     modules.append(mod_el.text.strip())
             break
     return modules if modules else ["."]
@@ -255,8 +273,8 @@ def build_mvn_cmd(project_root: str | Path, *,
 
     Args:
         project_root: 项目根目录。
-        test_classes: 测试类列表(必填, SKILL.md §3: 无论在什么情况下执行 mvn test
-            必须用 -Dtest 指定测试类)。
+        test_classes: 测试类列表(必填; mvn test 一律以 -Dtest 定向执行目标测试类,
+            空列表会退化为模块全量测试, 详见 SKILL.md §4)。
         jacoco_version: JaCoCo 版本。
         module: Maven 模块名。
         state: 状态对象(用于缓存)。

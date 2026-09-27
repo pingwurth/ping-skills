@@ -135,6 +135,7 @@ class NoMainSourceEditRule:
     2. 路径在基线中但哈希为空 -> 豁免(旧格式兼容, 无哈希信息)
     3. 路径在基线中且哈希匹配 -> 豁免(文件未被修改)
     4. 路径在基线中但哈希不匹配 -> 违规(文件已被用户修改, LLM 不应再修改)
+    5. 删除检测: 仅基线中的文件被删除才违规(init 前已删除的文件不在基线, 豁免)
     """
 
     id = "d"
@@ -164,14 +165,16 @@ class NoMainSourceEditRule:
                 violations.append(Violation(
                     rule_id=self.id, line=0, path=p,
                     message=f"src/main/java 下文件已被用户修改: {p}(违反规则 d, 文件内容与基线不一致, "
-                            f"请还原或使用 --acknowledge 豁免)"))
+                            f"请还原)"))
         # 检测删除的主源码文件(P0-3 修复: 删除同样属于违规)
+        # 以基线为准: 仅基线中存在(init 时已被快照)的文件被删除才构成违规,
+        # init 前已删除的文件不在基线中, 不应归咎于本次测试生成流程
         deleted = git_deleted_main_source_paths(ctx.project_root)
         if deleted:
             violations.extend(
                 Violation(rule_id=self.id, line=0, path=p,
                           message=f"src/main/java 下文件被删除: {p}(违反规则 d, 禁止删除用户已有文件)")
-                for p in sorted(deleted)
+                for p in sorted(p for p in deleted if p in baseline_paths)
             )
         return violations
 

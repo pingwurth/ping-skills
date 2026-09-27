@@ -47,13 +47,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 还原位置参数
-set -- "${POSITIONAL[@]}"
+# 还原位置参数(bash<4.4 空数组 + set -u 需 ${arr[@]+...} 防误报)
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 # 模块名、目标类、测试类
-MODULE_DIR=$1
-TARGET_CLASS=$2
-TARGET_TEST=$3
+MODULE_DIR=${1:-}
+TARGET_CLASS=${2:-}
+TARGET_TEST=${3:-}
 
 # 确定项目根目录: 优先使用显式指定, 否则自动查找
 if [ -n "$EXPLICIT_PROJECT_ROOT" ]; then
@@ -100,7 +100,6 @@ EXEC_FILE="$ABS_MODULE_DIR/target/jacoco.exec"
 REPORT_DIR="$ABS_MODULE_DIR/target/site/jacoco"
 XML_FILE="$REPORT_DIR/jacoco.xml"
 CSV_FILE="$REPORT_DIR/jacoco.csv"
-JSON_FILE="$ABS_MODULE_DIR/target/state.json"
 
 # 检查工具是否存在
 if [ ! -f "$JACOCO_AGENT" ] || [ ! -f "$JACOCO_CLI" ]; then
@@ -131,7 +130,11 @@ if [ $? -ne 0 ]; then echo "❌ 编译失败！"; exit 1; fi
 # 4. 运行测试并收集覆盖率数据
 echo "🏃 [2/4] 运行测试并收集数据..."
 # 🌟 核心修复：使用绝对路径的 agent，并强制 forkCount=1 确保 JVM 启动
-ARG_LINE="-javaagent:$JACOCO_AGENT=destfile=$EXEC_FILE,includes=$TARGET_CLASS"
+# includes 必须追加内部类通配: 仅精确类名不插桩 Foo$Bar / Foo$1 等内部类,
+# 而报告生成含全部 classfiles, 内部类会按 0 覆盖计入, 系统性低估类级覆盖率;
+# JaCoCo includes 以 ':' 分隔多模式、支持 '*' 通配, '$' 为内部类分隔符
+# (bash 双引号内 \$ 为字面 $; 已用仓内 jacocoagent.jar 实测验证)
+ARG_LINE="-javaagent:$JACOCO_AGENT=destfile=$EXEC_FILE,includes=$TARGET_CLASS:${TARGET_CLASS}\$*"
 
 # 先写临时文件(避免管道缓冲问题), 完成后再输出到 stdout 供 Python run_command 捕获
 MVN_LOG=$(mktemp)

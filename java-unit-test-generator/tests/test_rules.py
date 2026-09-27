@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from jaut import javasrc, rules
 
 
@@ -66,3 +68,38 @@ def test_violation_render():
 def test_default_registry_contains_c_and_d():
     ids = {r.id for r in rules.HARD_RULES}
     assert ids == {"c", "d"}
+
+
+# --------------------------------------------------------------------------- #
+# 规则 d: 违规提示与删除检测基线(M1 / L5 回归)
+# --------------------------------------------------------------------------- #
+def test_rule_d_changed_file_message_has_no_acknowledge_flag():
+    """基线外变更的违规提示不得再引用幽灵参数 --acknowledge(M1)。"""
+    with patch("jaut.rules.git_changed_paths", return_value=["src/main/java/Foo.java"]), \
+         patch("jaut.rules.git_deleted_main_source_paths", return_value=[]):
+        v = rules.NoMainSourceEditRule().check(_ctx("x", project_root="/proj", baseline={}))
+    assert len(v) == 1
+    assert "--acknowledge" not in v[0].message
+    assert "请还原" in v[0].message
+
+
+def test_rule_d_ignores_deletion_not_in_baseline():
+    """基线外的删除(init 轮之前已删除)不应归咎于本次测试生成流程(L5)。"""
+    with patch("jaut.rules.git_changed_paths", return_value=[]), \
+         patch("jaut.rules.git_deleted_main_source_paths",
+               return_value=["src/main/java/Old.java"]):
+        v = rules.NoMainSourceEditRule().check(_ctx("x", project_root="/proj", baseline={}))
+    assert v == []
+
+
+def test_rule_d_flags_deletion_in_baseline():
+    """基线中的文件被删除应违规(删除检测与基线对齐)。"""
+    with patch("jaut.rules.git_changed_paths", return_value=[]), \
+         patch("jaut.rules.git_deleted_main_source_paths",
+               return_value=["src/main/java/Old.java"]):
+        v = rules.NoMainSourceEditRule().check(
+            _ctx("x", project_root="/proj",
+                 baseline={"src/main/java/Old.java": "deadbeef"}))
+    assert len(v) == 1
+    assert "删除" in v[0].message
+    assert v[0].path == "src/main/java/Old.java"

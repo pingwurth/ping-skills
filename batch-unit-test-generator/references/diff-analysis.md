@@ -27,7 +27,7 @@
 
 ## 5. 已有测试类探测
 
-扫描 `src/test/java` 同包目录下 `*Test.java` / `*Tests.java` / `*TestCase.java` / `Test*.java`。
+扫描 `src/test/java` 同包目录下 `*Test.java` / `*Tests.java` / `*IT.java` / `*TestCase.java` / `Test*.java`（与 `batch_init` / `batch_finish` 的测试类收集同口径，命名变体全集见 SKILL.md §4）。
 
 ## 6. 排序策略
 
