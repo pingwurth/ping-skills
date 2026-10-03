@@ -166,7 +166,9 @@ python scripts/batch_finish.py --project-root <worktree> [--skip-mvn] [--jacoco-
 - 连续 `NO_IMPROVEMENT_ROUNDS`(3) 轮覆盖率无提升
 - `validate_rules` 连续 `VALIDATE_FAIL_STREAK_LIMIT`(5) 轮规范违规未通过
 
-跳过动作：方法状态写 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`，随后回
+跳过动作：方法状态写 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`，来源写入
+`methods[].skip_source = "auto"`（手动 `--skip-current` 为 `"manual"`，二者都带原因、都可由
+`--unskip` 恢复，但只有 `auto` 计入最终报告的「总自动跳过方法数」），随后回
 `make_plan.py` 推进下一方法；队列清空则由 `decide_after_plan` 输出类内完成报告收尾。
 
 **类级预算**：`class_round_used >= BATCH_CLASS_ROUND_BUDGET`（默认 30 轮，大类探索模式翻倍）
@@ -303,7 +305,7 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 - **批次级**：`batch_state.json` 记录各类状态（pending/in_progress/done/skipped/failed/recheck/unmet/unverified，unmet 为未达标终态，unverified 为环境不可信待复核的非终态）。中断后 `batch_next` 直接续跑（已有 in_progress 直接重新输出委派要件）。
 - **类级**：`classes/<类名>/state.json` 记录类内迭代进度。子代理从 `make_plan` 续跑（state.json 存在则自动恢复游标）。
 - **僵死复位**：`batch_next --reset-claim <FQCN>` 将僵死 in_progress 复位为 pending。
-- **类内跳过恢复**：被自动跳过的方法为终态，用 `make_plan.py --unskip <方法名[,方法名]>`（状态改回 pending，并重开全局与类级预算窗口，可配 `--grant-rounds N`；同名重载会一并恢复）；`--grant-rounds` / `--set-threshold` 都不能复活 skipped 方法。
+- **类内跳过恢复**：被跳过的方法（自动跳过 `skip_source=auto` 或用户 `--skip-current` 手动跳过 `skip_source=manual`，两者都带 `skip_reason`）为终态，用 `make_plan.py --unskip <方法名[,方法名]>`（状态改回 pending，并清空原因/来源、重开全局与类级预算窗口，可配 `--grant-rounds N`；同名重载会一并恢复）；`--grant-rounds` / `--set-threshold` 都不能复活 skipped 方法。
 
 ---
 
@@ -311,7 +313,7 @@ mvn 执行可能超过 30 分钟（大项目）。对于运行 mvn 的脚本（`
 
 - **类内完成**：所有方法 done/skipped → 子代理输出交付报告（含类内完成报告）。
 - **批量终验**：`batch_finish` 一次全量 mvn → 每个活跃类（done/recheck/unverified）刷新覆盖率与测试 → 按类判定（覆盖率达标 + 结果可信 + 失败用例不在本类）→ 确认 done；否则 → 有补测空间（存在 pending 方法）→ recheck 重入队；无补测空间 → unmet 未达标终态（记录 skip_reason 并入最终报告）；环境不可信（surefire 报告缺失/目录清理失败）且无补测空间 → unverified 待复核（非终态，环境修复后重跑 `batch_finish` 重新终验）。终态类（skipped/unmet/failed）不参与复核，只进最终报告；全部类均为终态时跳过 mvn 直接出报告。整批 `tests_green` 是聚合值，别的类红灯不会把本类打成 unmet；本类失败归因覆盖该类全部测试类命名变体（`{Simple}Test`/`{Simple}Tests`/`{Simple}IT`/`{Simple}TestCase`/`Test{Simple}`），既有 `FooTests` 的失败不会漏算成"其他类的失败"。
-- **最终报告**：全部确认 → `finish` 携带 `render_batch_finish_report`（各类 before→after、达标/跳过/失败/未达标清单、总轮次、总自动跳过方法数、终验结果、worktree 清理提醒），LLM 逐字转述。
+- **最终报告**：全部确认 → `finish` 携带 `render_batch_finish_report`（各类 before→after、达标/跳过/失败/未达标清单、总轮次、总自动跳过方法数（口径 = 类内 `skip_source=auto` 的方法数，手动 `--skip-current` 与组外过滤跳过不计）、终验结果、worktree 清理提醒），LLM 逐字转述。
 
 ---
 

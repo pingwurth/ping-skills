@@ -112,7 +112,8 @@ def test_handler_unmet_terminal_when_no_compensable_methods(tmp_path):
     assert decision.exit_code == config.EXIT_OK
     data = _read_batch_state(workdir)
     assert data["classes"][0]["status"] == "unmet"
-    assert "未达标终态" in data["classes"][0]["skip_reason"]
+    assert "无可补测方法" in data["classes"][0]["skip_reason"]
+    assert "未达标终态" not in data["classes"][0]["skip_reason"]   # 标签只在报告层
     assert "未达标(1 类)" in decision.report
 
 
@@ -166,7 +167,8 @@ def test_handler_skips_mvn_when_all_classes_are_terminal(tmp_path):
         _make_entry(tmp_path, fqcn="com.example.Skipped", simple_name="Skipped",
                     status="skipped", skip_reason="用户跳过"),
         _make_entry(tmp_path, fqcn="com.example.Unmet", simple_name="Unmet",
-                    status="unmet", skip_reason="未达标终态: 覆盖率 33.3% < 80.0%"),
+                    status="unmet",
+                    skip_reason="覆盖率 33.3% < 80.0%; 无可补测方法(方法均已跳过或完成)"),
         _make_entry(tmp_path, fqcn="com.example.Failed", simple_name="Failed",
                     status="failed", skip_reason="state.json 不存在"),
     ]
@@ -335,11 +337,12 @@ def test_handler_unverified_when_environment_uncertain_without_pending(tmp_path)
     assert data["classes"][0]["status"] == "unverified"
     reason = data["classes"][0]["skip_reason"]
     assert "测试结果不可信" in reason
-    assert "待环境复核" in reason
+    assert "待环境复核" not in reason   # 标签只在报告层, 存储层为裸原因
     assert "本类测试不绿" not in reason
     assert class_state.final_checked is False
     assert "待环境复核 1" in decision.summary
-    assert "待环境复核" in decision.report
+    assert "(待环境复核: 测试结果不可信" in decision.report
+    assert "待环境复核: 待环境复核" not in decision.report   # 标签不叠加
 
 
 def test_handler_unverified_when_report_unparseable(tmp_path):

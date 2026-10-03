@@ -17,7 +17,8 @@ validate_rules 连续 5 轮规范违规未通过
 ```
 
 跳过动作由脚本落地：`methods[].status = skipped` 且写入 `methods[].skip_reason`（人类可读的原因，
-如 `单方法迭代已达上限 8 轮仍未达标(当前 50.0%)`），随后路由 `make_plan.py` 推进队列中的下一个
+如 `单方法迭代已达上限 8 轮仍未达标(当前 50.0%)`）与 `methods[].skip_source = "auto"`（来源标记，
+自动跳过 vs 用户 `--skip-current` 手动跳过 `"manual"`），随后路由 `make_plan.py` 推进队列中的下一个
 未达标方法。
 
 ---
@@ -48,7 +49,7 @@ global_round_bonus   全局预算追加（终验延续）
 ## 3. 跳过语义
 
 ```text
-当前方法 -> status=skipped + skip_reason
+当前方法 -> status=skipped + skip_reason + skip_source=auto
 队列仍有未达标方法 -> make_plan.py 选下一个方法继续
 队列已空(方法全部 done/skipped) -> 仍重跑一次终验, 实测后再定达标/未达标
 ```
@@ -101,16 +102,17 @@ python scripts/make_plan.py --workdir <workdir> --set-threshold N      # 调整�
 python scripts/make_plan.py --workdir <workdir> --unskip name1,name2   # 恢复被跳过的方法
 ```
 
-被自动跳过（`status=skipped` 且带 `skip_reason`）的方法**只能用 `--unskip` 恢复**：
+被跳过的终态方法（`status=skipped` 且带 `skip_reason`，自动跳过与手动跳过同）**只能用 `--unskip` 恢复**：
 `--grant-rounds` 只加预算窗口、`--set-threshold` 只在 done↔pending 间重分类，都不会复活
-skipped 方法（`pending_methods()` 不含 skipped）。
+skipped 方法（`pending_methods()` 不含 skipped）。用户 `--skip-current` 的手动跳过同样带
+`skip_reason`（固定为 `手动跳过`）与 `skip_source=manual`，恢复通道相同。
 
 `--unskip` 的动作：
 
 ```text
 校验: 方法名必须存在、status=skipped 且 skip_reason 非空(范围外方法不可恢复)
       方法名匹配全部同名重载(重载共享 --method 范围), 一次恢复所有带原因的 skipped 重载
-落地: status=pending, 清空 skip_reason, 复位该方法的轮次/测试轨迹
+落地: status=pending, 清空 skip_reason 与 skip_source, 复位该方法的轮次/测试轨迹
 预算: 全局窗口 +GLOBAL_ROUND_BUDGET(跳过原因多为预算耗尽, 不追加则下一轮立刻再次跳过)
       当前方法即被恢复方法时, 就地清零 iteration 与 method_round_bonus(游标不切换)
 ```

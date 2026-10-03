@@ -36,7 +36,6 @@ from .models import (
     MethodStatus,
     NextCommand,
     Route,
-    State,
     TestOutcome,
     TestResult,
 )
@@ -106,10 +105,14 @@ def test_simple_name(fqcn: str) -> str:
 # --------------------------------------------------------------------------- #
 # 自动跳过(预算耗尽/不收敛的统一动作)
 # --------------------------------------------------------------------------- #
-def _auto_skip(ctx: VerifyContext, metrics: dict, artifacts: list, *,
-               reason: str, summary: str,
+def _auto_skip(metrics: dict, artifacts: list, *,
+               reason: str, summary: str, label: str,
                skip_all: bool = False) -> Decision:
     """预算耗尽/不收敛: 跳过当前方法(或全部 pending)并回 make_plan 推进队列。
+
+    label 标识跳过触发类别(预算耗尽/连续测试失败不收敛/连续覆盖率无提升), 作为
+    Decision.reason 展示标签逐字进入 next_step; reason 为落入 skip_reason 的
+    详细原因。
 
     skip_all=True 时同时跳过所有剩余 pending 方法(全局/类级预算耗尽的语义);
     两种情况都路由 MAKE_PLAN, 由 decide_after_plan 决定下一个方法或收尾。
@@ -119,7 +122,7 @@ def _auto_skip(ctx: VerifyContext, metrics: dict, artifacts: list, *,
     return Decision(
         status="success", exit_code=config.EXIT_CONTINUE, summary=summary,
         route=Route.MAKE_PLAN,
-        reason="预算耗尽, 自动跳过" if not skip_all else "预算耗尽, 跳过全部未达标方法",
+        reason=f"{label}, 自动跳过" if not skip_all else f"{label}, 跳过全部未达标方法",
         artifacts=artifacts, metrics=metrics,
         auto_skip_method=True, auto_skip_reason=reason,
         skip_all_pending=skip_all, reset_trajectory=True)
@@ -184,7 +187,7 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
     method_budget = config.METHOD_ROUND_BUDGET + ctx.method_round_bonus
     if ctx.iteration >= method_budget:
         return _auto_skip(
-            ctx, metrics, artifacts,
+            metrics, artifacts, label="预算耗尽",
             reason=f"单方法迭代已达上限 {method_budget} 轮仍未达标(当前 {after_rate:.1f}%)",
             summary=(f"方法 {ctx.label} 已达单方法迭代上限 {method_budget} 轮"
                      f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 自动跳过"))
@@ -192,7 +195,7 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
     global_budget = config.GLOBAL_ROUND_BUDGET + ctx.global_round_bonus
     if ctx.global_iteration >= global_budget:
         return _auto_skip(
-            ctx, metrics, artifacts, skip_all=True,
+            metrics, artifacts, skip_all=True, label="全局预算耗尽",
             reason=f"全局迭代已达上限 {global_budget} 轮, 未达标方法不再迭代",
             summary=(f"全局迭代已达上限 {global_budget} 轮"
                      f"(方法 {ctx.label} 当前 {after_rate:.1f}%, {_test_status(ctx)}), "
@@ -201,7 +204,7 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
     if test_failure_streak(ctx.method.round_test_results):
         trajectory = [(r.failures, r.errors) for r in ctx.method.round_test_results]
         return _auto_skip(
-            ctx, metrics, artifacts,
+            metrics, artifacts, label="连续测试失败不收敛",
             reason=(f"连续 {config.TEST_FAIL_STREAK_ROUNDS} 轮测试失败不收敛"
                     f"(每轮 Failures/Errors: {trajectory})"),
             summary=(f"方法 {ctx.label} 连续 {config.TEST_FAIL_STREAK_ROUNDS} 轮测试失败不收敛, "
@@ -210,7 +213,7 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
     if no_improvement(ctx.method.round_rates, threshold=ctx.threshold):
         trajectory = list(ctx.method.round_rates)
         return _auto_skip(
-            ctx, metrics, artifacts,
+            metrics, artifacts, label="连续覆盖率无提升",
             reason=(f"连续 {config.NO_IMPROVEMENT_ROUNDS} 轮覆盖率无提升"
                     f"(覆盖率轨迹: {trajectory})"),
             summary=(f"方法 {ctx.label} 连续 {config.NO_IMPROVEMENT_ROUNDS} 轮覆盖率无提升"

@@ -9,6 +9,7 @@ POSIX 使用 fcntl.flock, Windows 使用 msvcrt.locking。
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import sys
 from pathlib import Path
@@ -19,13 +20,17 @@ if sys.platform == "win32":
 
     def _lock_file(fp: IO) -> None:
         # LK_LOCK 每次最多阻塞约 10 秒后抛 OSError, 而批量终验 mvn 可持锁
-        # 30 分钟 —— 循环重试直到获锁, 与 POSIX flock 的无限阻塞语义对齐
+        # 30 分钟 —— 仅锁被占用时循环重试直到获锁, 与 POSIX flock 的无限
+        # 阻塞语义对齐; 其余 OSError(无效句柄/权限等)不可恢复, 直接抛出
+        # 以免无限重试挂起整个批量流程
         while True:
             try:
                 msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
                 return
-            except OSError:
-                continue
+            except OSError as exc:
+                # msvcrt 以 EACCES(锁被占用)/EDEADLK 表示锁竞争, 才可重试
+                if exc.errno not in (errno.EDEADLK, errno.EACCES):
+                    raise
 
     def _unlock_file(fp: IO) -> None:
         msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)

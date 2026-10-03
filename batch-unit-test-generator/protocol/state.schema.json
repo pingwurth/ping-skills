@@ -40,6 +40,11 @@
       "additionalProperties": { "type": "string" },
       "description": "init 时快照的 src/main/java 既有变更 {相对路径: 文件内容 SHA-256 哈希}; 旧 state.json 为 list[str], from_dict 兼容"
     },
+    "git_main_source_files": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "init 时已存在的 src/main/java 相对路径清单(规则 d 删除检测的'init 时存在'依据); 旧 state.json 缺失时删除检测回退为仅基线内路径"
+    },
     "iteration": { "type": "integer", "minimum": 0, "description": "当前方法迭代轮次(切换方法时清零)" },
     "global_iteration": { "type": "integer", "minimum": 0, "description": "全局迭代轮次(永不重置), 支撑全局预算" },
     "current_method": {
@@ -167,7 +172,12 @@
         },
         "skip_reason": {
           "type": ["string", "null"],
-          "description": "跳过原因(预算耗尽/连续失败/无提升/规范违规等自动跳过时写入); 组外方法/手动跳过或旧版本 state.json 为 null"
+          "description": "跳过原因(预算耗尽/连续失败/无提升/规范违规等自动跳过、或 --skip-current 手动跳过时写入); 组外方法过滤跳过与旧版本 state.json 为 null"
+        },
+        "skip_source": {
+          "type": ["string", "null"],
+          "enum": ["auto", "manual", null],
+          "description": "跳过来源: auto=脚本自动跳过(预算耗尽/连续失败/无提升/规范违规), manual=用户 --skip-current 手动跳过; 非跳过与组外过滤跳过为 null。不变式: 带 skip_reason 的终态跳过必带来源, 使下游(如批量报告\"总自动跳过方法数\")不把手动跳过误计"
         }
       }
     }

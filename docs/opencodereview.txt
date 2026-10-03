@@ -1,0 +1,287 @@
+─── batch-unit-test-generator/scripts/jaut/proc.py:40-41 ───
+[bug · medium] `ctypes` defaults the `restype` of every foreign function to `c_int` (32-bit).
+`OpenProcess` returns a `HANDLE`, which is pointer-sized, so on 64-bit Windows the returned handle
+is truncated to its low 32 bits (and may be interpreted as signed). A corrupted handle then flows
+into `WaitForSingleObject`/`CloseHandle`, which can spuriously report the process as dead or leak
+the handle. Declare the signatures explicitly (`OpenProcess`/`WaitForSingleObject`/`CloseHandle`) so
+the `HANDLE` round-trips correctly.
+
+      kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
++     kernel32.OpenProcess.restype = ctypes.c_void_p
++     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
++     kernel32.WaitForSingleObject.restype = ctypes.c_uint32
++     kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
++     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+      handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+
+
+─── java-unit-test-generator/scripts/jaut/proc.py:40-41 ───
+[bug · medium] `ctypes` defaults the `restype` of every foreign function to `c_int` (32-bit).
+`OpenProcess` returns a `HANDLE`, which is pointer-sized, so on 64-bit Windows the returned handle
+is truncated to its low 32 bits (and may be interpreted as signed). A corrupted handle then flows
+into `WaitForSingleObject`/`CloseHandle`, which can spuriously report the process as dead or leak
+the handle. Declare the signatures explicitly (`OpenProcess`/`WaitForSingleObject`/`CloseHandle`) so
+the `HANDLE` round-trips correctly.
+
+      kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
++     kernel32.OpenProcess.restype = ctypes.c_void_p
++     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
++     kernel32.WaitForSingleObject.restype = ctypes.c_uint32
++     kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
++     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+      handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+
+
+─── batch-unit-test-generator/scripts/jaut/rules.py:177-177 ───
+[bug · high] Deletion detection is now gated on `p in baseline_paths`, but `ctx.git_baseline` only
+holds the pre-existing *changed* files in `src/main/java` (see `record_git_baseline` →
+`git_changed_paths`, and the `RuleContext` docstring: "src/main/java 既有变更"). Pristine (committed,
+unmodified) main-source files are never in the baseline, so with this filter deleting such a file no
+longer raises a violation. In the default clean worktree produced by `git worktree add`,
+`git_baseline` is empty, so the deletion guard added by the P0-3 fix becomes effectively inert —
+this also contradicts the violation text "禁止删除用户已有文件". If the intent is only to exempt files already
+deleted before init, the check needs a snapshot of the main-source files that existed at init (e.g.
+record `git ls-files` at init), not the change-baseline. Suggest confirming this is intended, or
+narrowing the exemption to paths known to be absent at init.
+
+
+
+─── java-unit-test-generator/scripts/jaut/rules.py:177-177 ───
+[bug · high] Deletion detection is now gated on `p in baseline_paths`, but `ctx.git_baseline` only
+holds the pre-existing *changed* files in `src/main/java` (see `record_git_baseline` →
+`git_changed_paths`, and the `RuleContext` docstring: "src/main/java 既有变更"). Pristine (committed,
+unmodified) main-source files are never in the baseline, so with this filter deleting such a file no
+longer raises a violation. In the default clean worktree produced by `git worktree add`,
+`git_baseline` is empty, so the deletion guard added by the P0-3 fix becomes effectively inert —
+this also contradicts the violation text "禁止删除用户已有文件". If the intent is only to exempt files already
+deleted before init, the check needs a snapshot of the main-source files that existed at init (e.g.
+record `git ls-files` at init), not the change-baseline. Suggest confirming this is intended, or
+narrowing the exemption to paths known to be absent at init.
+
+
+
+─── batch-unit-test-generator/scripts/jaut/report.py:218-218 ───
+[style · low] This renderer prepends a category label to `entry.skip_reason`, but `batch_finish.py`
+stores `skip_reason` already carrying the same label (`f"未达标终态: {reason}; {cause}"` for `unmet`,
+`f"待环境复核: {reason}"` for `unverified`). The rendered line therefore duplicates the label, e.g.
+`(未达标: 未达标终态: ...)` and `(待环境复核: 待环境复核: ...; 环境修复后重跑 batch_finish.py)`. Note the `skipped`/`failed`
+branches assume a raw reason (`batch_update.py` writes `args.reason or "用户跳过"`), so the convention
+is that `skip_reason` is unprefixed. Recommend reconciling: either store the raw reason in
+`batch_finish.py`, or drop the inline prefix here so the two don't stack.
+
+
+
+─── batch-unit-test-generator/scripts/jaut/decisions.py:39-39 ───
+[maintainability · low] The newly added `State` import is never referenced anywhere in this module —
+the only occurrence of the identifier is this import line itself (`VerifyContext`, `InitContext` and
+`PlanContext` are the context types used). This is a dead import; please remove it.
+
+
+
+─── batch-unit-test-generator/scripts/jaut/decisions.py:109-109 ───
+[maintainability · low] `ctx` is accepted but never used inside `_auto_skip` (the body only reads
+`metrics`, `artifacts`, `reason`, `summary`, `skip_all`). This is a dead parameter that suggests the
+verification context influences the skip decision when it does not. Consider dropping it and
+updating the four call sites.
+
+
+
+─── java-unit-test-generator/scripts/jaut/decisions.py:108-108 ───
+[maintainability · low] `ctx` is accepted but never used inside `_auto_skip` (the body only reads
+`metrics`, `artifacts`, `reason`, `summary`, `skip_all`). This is a dead parameter that suggests the
+verification context influences the skip decision when it does not. Consider dropping it and
+updating the four call sites.
+
+
+
+─── batch-unit-test-generator/scripts/init_coverage.py:138-138 ───
+[documentation · low] The batch and java variants are maintained as a mirrored pair. This PR updated
+the `Returns:` line here (removing `ask_user`), but the `Raises:` line immediately below still reads
+only `(exit 2)`, even though the handler now also raises `StepError.state_error` for a
+missing/corrupt `state.json` under `--final-check` (exit 3). The java variant updated its `Raises:`
+line for this exact case (and left its `Returns:` line stale). Please sync both docstrings so the
+mirrored files stay consistent.
+
+
+
+─── java-unit-test-generator/scripts/init_coverage.py:142-143 ───
+[documentation · low] Mirror inconsistency with the batch variant: this PR changed the handler
+docstring here by adding the exit-3 `Raises:` entry, but the `Returns:` line just above (line 139)
+still documents `ask_user` as a possible decision. `handler` returns `decisions.decide_after_init`,
+whose paths now never produce `Route.ASK_USER` — they resolve to finish / make_plan (/ write_code).
+The mirrored batch file removed `ask_user` from this same line; this file should drop it too for the
+pair to stay in sync.
+
+
+
+─── batch-unit-test-generator/scripts/jaut/state.py:149-150 ───
+[maintainability · low] Since the lock file is now intentionally kept resident (never unlinked) and
+its mtime is only refreshed on acquisition, this stale-lock check will now fire during normal
+operation: any repo not run for >24h (e.g. a weekend) leaves the resident lock file with an old
+mtime, triggering this warning even though nothing is wrong. The message then advises the user to
+delete the lock file, which directly contradicts the new "不 unlink" design and can reintroduce the
+open-new-inode race this change is meant to eliminate. Consider dropping the "可手动删除该文件" guidance (or
+gating the warning on a non-blocking try-lock attempt) so a merely idle project does not look like
+an abnormal residue.
+
+
+
+─── java-unit-test-generator/scripts/jaut/state.py:114-115 ───
+[maintainability · low] Same as the batch tree: the lock file is now kept resident and mtime is only
+refreshed on acquisition, so this 24h check warns on any repo left idle for more than a day (a false
+positive now that the file is normal by design). The accompanying advice to delete the lock file
+also conflicts with the "不 unlink" intent and can reintroduce the inode race. Consider softening the
+message (no manual-delete advice) or only warning when the lock is actually held.
+
+
+
+─── batch-unit-test-generator/scripts/jacoco/fast-single-cov.sh:137-137 ───
+[test · low] The batch fork now carries the same inner-class `includes` fix (and the removed dead
+`JSON_FILE`) as the java fork, but only the java repo added regression coverage for it
+(`java-unit-test-generator/tests/test_maven.py::test_fast_single_cov_script_includes_inner_classes`
+and `::test_fast_single_cov_script_has_no_dead_code`, which read the script content).
+`batch-unit-test-generator/tests/test_maven.py` contains no equivalent script-content assertion, so
+this High-severity fix could silently regress on the batch side. Consider mirroring that assertion.
+
+
+
+─── batch-unit-test-generator/scripts/jaut/decisions.py:122-122 ───
+[maintainability · low] `_auto_skip` is the shared helper for both budget-exhaustion and
+non-convergence skips (连续测试失败 / 连续无提升), but the `reason` string here is hard-coded to "预算耗尽, 自动跳过".
+Since `Decision.reason` is emitted verbatim as the `reason` field of the next step (see
+`transitions.build_next_step`), a test-failure-streak or no-improvement skip will be surfaced as
+"预算耗尽" even though the budget was not exhausted. Consider deriving the label from the cause (or
+passing it in) so the reason matches the actual skip trigger.
+
+
+
+─── java-unit-test-generator/scripts/jaut/decisions.py:121-121 ───
+[maintainability · low] `_auto_skip` is the shared helper for both budget-exhaustion and
+non-convergence skips (连续测试失败 / 连续无提升), but the `reason` string here is hard-coded to "预算耗尽, 自动跳过".
+Since `Decision.reason` is emitted verbatim as the `reason` field of the next step (see
+`transitions.build_next_step`), a test-failure-streak or no-improvement skip will be surfaced as
+"预算耗尽" even though the budget was not exhausted. Consider deriving the label from the cause (or
+passing it in) so the reason matches the actual skip trigger.
+
+─── batch-unit-test-generator/scripts/validate_rules.py:173-174 ───
+[maintainability · low] `state.validate_fail_streak = 0` is redundant on this path:
+`_bump_fail_streak` already resets the counter to 0 when it reaches `VALIDATE_FAIL_STREAK_LIMIT`
+(the only way `_auto_skip_validate` is reached), and `make_plan._advance_cursor` resets it again on
+method switch. The duplicate invites drift if the counter semantics change later; the
+`store.save(state)` below is still required to persist the skip fields. (Note: the `state is not
+None` half of the entry-lookup guard above is likewise unreachable here, since `_bump_fail_streak`
+returns 0 when state is None.)
+
+
+
+─── java-unit-test-generator/scripts/validate_rules.py:173-174 ───
+[maintainability · low] `state.validate_fail_streak = 0` is redundant on this path:
+`_bump_fail_streak` already resets the counter to 0 when it reaches `VALIDATE_FAIL_STREAK_LIMIT`
+(the only way `_auto_skip_validate` is reached), and `make_plan._advance_cursor` resets it again on
+method switch. The duplicate invites drift if the counter semantics change later; the
+`store.save(state)` below is still required to persist the skip fields. (Note: the `state is not
+None` half of the entry-lookup guard above is likewise unreachable here, since `_bump_fail_streak`
+returns 0 when state is None.)
+
+
+─── batch-unit-test-generator/scripts/make_plan.py:131-132 ───
+[bug · low] `_unskip`'s empty-list guard (`raise StepError.state_error("--unskip 需要方法名列表...")`) is
+unreachable for an explicit empty value: both the dispatch here and the mutual-exclusion check
+(`any(exclusive) and (args.unskip or ...)`) test `args.unskip` by truthiness, so `--unskip ""` is
+treated as "not supplied" and silently no-ops instead of reporting the promised validation error.
+(The tests only exercise `" , "`, which is truthy, so this path is uncovered.) Use an identity check
+so the empty string reaches `_unskip`.
+
+-         if args.unskip:
++         if args.unskip is not None:
+              _unskip(state, args.unskip, logger)
+
+
+─── java-unit-test-generator/scripts/make_plan.py:121-122 ───
+[bug · low] Same truthiness gap as the batch copy: the dispatch here and the mutual-exclusion check
+(`any(exclusive) and (args.unskip or ...)`) use `args.unskip` truthiness, so `--unskip ""` is
+treated as "not supplied" and silently no-ops instead of raising the `_unskip` empty-list
+`StepError` the CLI contract implies. Use an identity check so an empty value reaches `_unskip`'s
+validation.
+
+-         if args.unskip:
++         if args.unskip is not None:
+              _unskip(state, args.unskip, logger)
+
+
+─── batch-unit-test-generator/scripts/jaut/lockutil.py:23-28 ───
+[bug · medium] The retry loop treats every `OSError` as transient lock contention and retries
+forever, but `msvcrt.locking` also raises `OSError` for unrecoverable conditions (invalid/closed
+descriptor, permission error, etc.). On those, the loop spins indefinitely (each `LK_LOCK` attempt
+itself blocks ~10s), hanging the whole batch run / CI with no error surfaced. Since `batch_lock`
+call sites (batch_next/update/finish) are unbounded, this is a real hang risk. Only retry on the
+lock-contention errno and re-raise anything else.
+
+          while True:
+              try:
+                  msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+                  return
+-             except OSError:
++             except OSError as exc:
++                 # 仅锁被占用时重试(EDEADLK/EACCES); 其余 OSError(无效句柄/
++                 # 权限等)不可恢复, 直接抛出以免无限重试挂起整个批量流程
++                 if exc.errno not in (errno.EDEADLK, errno.EACCES):
++                     raise
+                  continue
+
+↓↓↓↓ TODO ↓↓↓↓
+
+─── batch-unit-test-generator/scripts/batch_update.py:206-206 ───
+[bug · medium] The new `option` value `skip_class` is not part of the `resume[].option` enum in
+`protocol/next-step.schema.json` (allowed values:
+continue/custom/choice/clear_history/skip_method/adjust_threshold/retry/terminate), and it is also
+absent from the documented set in `jaut/models.py`. Since the schema item sets
+`additionalProperties: false` with that `enum`, any consumer that validates the NEXT_STEP payload
+against the schema will reject this ask_user entry. Either add `skip_class` to the schema enum (and
+the models doc) or reuse an already-allowed value.
+
+
+
+─── batch-unit-test-generator/scripts/batch_diff.py:265-265 ───
+[maintainability · low] This `if mb_ok` is unreachable-true here. The enclosing `else` is only
+entered when `diff_mode == "auto"` and `mb_ok` is already False: the `three` branch is handled above
+(and would have raised), the `two` branch is handled by the preceding `elif`, and `--diff-mode` only
+accepts auto/three/two. So in this branch `mb_ok` is always False and the body (`base = ...` /
+three-dot `diff_ref`) is dead code. The `else` can be reduced to `diff_ref = f"{target}..HEAD"`.
+
+
+
+─── batch-unit-test-generator/scripts/batch_update.py:248-248 ───
+[maintainability · low] `BatchClassEntry` is referenced as a (quoted) annotation but is never
+imported in this module — the import only pulls in `BatchState, Decision, MethodStatus,
+ResumeOption, Route`. `from __future__ import annotations` keeps it from raising at runtime, but the
+forward reference is unresolvable (breaks `typing.get_type_hints` and static type checking). Import
+`BatchClassEntry` (as `batch_next.py` does) or drop the annotation.
+
+
+
+─── batch-unit-test-generator/scripts/make_plan.py:146-146 ───
+[bug · medium] 手动 `--skip-current` 现在也写入 `skip_reason`，但本 PR 同时新增的状态契约把它定义为「仅自动跳过写入，手动跳过/组外方法为
+null」（见 `jaut/models.py` 的 `MethodCoverage.skip_reason` 注释与 `protocol/state.schema.json` 的
+`skip_reason` 字段描述）。这造成 `skip_reason` 语义二义：凡以「`skip_reason` 非空」判定自动跳过的下游都会把手动跳过误计，例如
+`batch_update._auto_skipped_count` 汇总写入 `escalations` 的「总自动跳过方法数」会把手动 `--skip-current`
+一并计入（`render_batch_finish_report` 行标签即「总自动跳过方法数」）。若手动跳过确实需要可被 `--unskip` 恢复（`_unskip` 要求
+`skip_reason` 非空），请同步修正 schema/models 契约并让自动/手动跳过可区分；否则此处不应写 `skip_reason`。
+
+
+
+─── java-unit-test-generator/scripts/make_plan.py:136-136 ───
+[bug · low] 与 batch 侧同一问题：手动 `--skip-current` 写入 `skip_reason`，而本 PR 新增的 `jaut/models.py` 注释与
+`protocol/state.schema.json` 的 `skip_reason` 描述均声明「手动跳过为 null」。二者口径冲突，且以 `skip_reason`
+判断「自动跳过/被跳过」的下游会把手动跳过按「有原因」处理（如 `report._method_lines` 输出 `(跳过: 手动跳过)`、`_unskip` 的恢复判定）。请统一：要么此处不写
+`skip_reason`，要么同步修正 schema/models 的契约说明。
+
+
+[ocr] WARNING [review_round_failed] batch-unit-test-generator/scripts/batch_diff.py,batch-unit-test-generator/scripts/batch_finish.py,batch-unit-test-generator/scripts/batch_init.py,batch-unit-test-generator/scripts/batch_next.py,batch-unit-test-generator/scripts/batch_update.py: round 2: LLM completion error: context deadline exceeded
+
+LLM retry report summary: 1 of 561 requests affected -- 1 request failed
+
+Core review (1 request):
+- batch-unit-test-generator/scripts/batch_diff.py,batch-unit-test-generator/scripts/batch_finish.py,batch-unit-test-generator/scripts/batch_init.py,batch-unit-test-generator/scripts/batch_next.py,batch-unit-test-generator/scripts/batch_update.py: timed out -> failed
+
+Per-attempt detail: --format json (retry_report).

@@ -60,6 +60,7 @@ def test_handler_baseline_mode_success(tmp_path):
     with patch("scripts.init_coverage.javasrc.resolve_target") as mock_resolve, \
          patch("scripts.init_coverage.maven.find_module_for_source", return_value="."), \
          patch("scripts.init_coverage.gitops.record_git_baseline", return_value={}), \
+         patch("scripts.init_coverage.gitops.record_git_main_source_files", return_value=[]), \
          patch("scripts.init_coverage.maven.clean_jacoco_dirs"), \
          patch("scripts.init_coverage.maven.clean_surefire_dirs", return_value=[]), \
          patch("scripts.init_coverage._ensure_test_file_exists", return_value=(False, Path("stub.java"))), \
@@ -100,6 +101,7 @@ def test_handler_final_check_mode_uses_prev_threshold(tmp_path):
     prev_state = MagicMock(spec=State)
     prev_state.threshold = 80.0
     prev_state.git_baseline = {}
+    prev_state.git_main_source_files = []
     prev_state.final_check_fail_streak = 0
     prev_state.pending_methods.return_value = []
     prev_state.test_class_simple = "MyServiceTest"
@@ -206,6 +208,7 @@ def test_handler_persists_coverage_excludes(tmp_path):
     with patch("scripts.init_coverage.javasrc.resolve_target") as mock_resolve, \
          patch("scripts.init_coverage.maven.find_module_for_source", return_value="."), \
          patch("scripts.init_coverage.gitops.record_git_baseline", return_value={}), \
+         patch("scripts.init_coverage.gitops.record_git_main_source_files", return_value=[]), \
          patch("scripts.init_coverage.maven.clean_jacoco_dirs"), \
          patch("scripts.init_coverage.maven.clean_surefire_dirs", return_value=[]), \
          patch("scripts.init_coverage._ensure_test_file_exists", return_value=(False, Path("stub.java"))), \
@@ -294,6 +297,7 @@ def test_handler_raises_when_both_coverage_methods_fail(tmp_path):
     with patch("scripts.init_coverage.javasrc.resolve_target", return_value=("com.example.MyService", Path("src"))), \
          patch("scripts.init_coverage.maven.find_module_for_source", return_value="."), \
          patch("scripts.init_coverage.gitops.record_git_baseline", return_value={}), \
+         patch("scripts.init_coverage.gitops.record_git_main_source_files", return_value=[]), \
          patch("scripts.init_coverage.maven.clean_jacoco_dirs"), \
          patch("scripts.init_coverage.maven.clean_surefire_dirs", return_value=[]), \
          patch("scripts.init_coverage._ensure_test_file_exists", return_value=(False, Path("stub.java"))), \
@@ -319,6 +323,7 @@ def test_handler_raises_when_mvn_fails(tmp_path):
     with patch("scripts.init_coverage.javasrc.resolve_target", return_value=("com.example.MyService", Path("src"))), \
          patch("scripts.init_coverage.maven.find_module_for_source", return_value="."), \
          patch("scripts.init_coverage.gitops.record_git_baseline", return_value={}), \
+         patch("scripts.init_coverage.gitops.record_git_main_source_files", return_value=[]), \
          patch("scripts.init_coverage.maven.clean_jacoco_dirs"), \
          patch("scripts.init_coverage.maven.clean_surefire_dirs", return_value=[]), \
          patch("scripts.init_coverage._ensure_test_file_exists", return_value=(False, Path("stub.java"))), \
@@ -392,6 +397,7 @@ def _handler_patch_context(tmp_path, parsed_methods, class_rate: float = 100.0,
             "com.example.MyService", Path("src/main/java/MyService.java")),
         "scripts.init_coverage.maven.find_module_for_source": ".",
         "scripts.init_coverage.gitops.record_git_baseline": {},
+        "scripts.init_coverage.gitops.record_git_main_source_files": [],
         "scripts.init_coverage.maven.clean_jacoco_dirs": None,
         "scripts.init_coverage.maven.clean_surefire_dirs": [],
         "scripts.init_coverage._ensure_test_file_exists": (False, Path("stub.java")),
@@ -679,3 +685,10 @@ def test_handler_source_not_found_includes_diagnosis(tmp_path):
     assert "诊断" in question
     assert "同名文件" in question
     assert "包名是否正确" in question
+
+
+def test_handler_docstring_matches_decision_contract():
+    """handler docstring 契约: 不再声明 ask_user 决策, 并记录终验 state 错误(exit 3)。"""
+    doc = handler.__doc__ or ""
+    assert "ask_user" not in doc
+    assert "state.json 缺失/损坏(exit 3" in doc

@@ -59,11 +59,14 @@ class RuleContext:
     project_root    : 项目根(规则 d 需要); 为 None 时跳过 git 类规则
     git_baseline    : init 阶段快照的 src/main/java 既有变更及内容哈希(规则 d 豁免依据)
                       格式: {相对路径: 文件内容 SHA-256 哈希}; 空哈希字符串表示无哈希信息(旧格式兼容)
+    git_main_source_files : init 阶段快照的 src/main/java 已存在文件清单(删除检测依据);
+                      旧 state.json 无此字段, 为空时删除检测回退为"仅基线内文件"
     """
 
     stripped_source: str = ""
     project_root: Optional[str] = None
     git_baseline: dict[str, str] = field(default_factory=dict)
+    git_main_source_files: set[str] = field(default_factory=set)
 
 
 @runtime_checkable
@@ -135,7 +138,8 @@ class NoMainSourceEditRule:
     2. 路径在基线中但哈希为空 -> 豁免(旧格式兼容, 无哈希信息)
     3. 路径在基线中且哈希匹配 -> 豁免(文件未被修改)
     4. 路径在基线中但哈希不匹配 -> 违规(文件已被用户修改, LLM 不应再修改)
-    5. 删除检测: 仅基线中的文件被删除才违规(init 前已删除的文件不在基线, 豁免)
+    5. 删除检测: 仅 init 时已存在(git_main_source_files 快照)或在基线中的文件
+       被删除才违规; init 前已删除的文件不在快照/基线, 豁免
     """
 
     id = "d"
@@ -167,14 +171,17 @@ class NoMainSourceEditRule:
                     message=f"src/main/java 下文件已被用户修改: {p}(违反规则 d, 文件内容与基线不一致, "
                             f"请还原)"))
         # 检测删除的主源码文件(P0-3 修复: 删除同样属于违规)
-        # 以基线为准: 仅基线中存在(init 时已被快照)的文件被删除才构成违规,
-        # init 前已删除的文件不在基线中, 不应归咎于本次测试生成流程
+        # 以 init 快照为准: init 时已存在的文件(git_main_source_files, 含干净
+        # worktree 中的未修改文件)或在基线中的文件被删除才构成违规; init 前已
+        # 删除的文件不在快照中, 不应归咎于本次测试生成流程。旧 state.json 无
+        # 快照字段, 回退为仅基线内路径
         deleted = git_deleted_main_source_paths(ctx.project_root)
         if deleted:
             violations.extend(
                 Violation(rule_id=self.id, line=0, path=p,
                           message=f"src/main/java 下文件被删除: {p}(违反规则 d, 禁止删除用户已有文件)")
-                for p in sorted(p for p in deleted if p in baseline_paths)
+                for p in sorted(p for p in deleted
+                                if p in baseline_paths or p in ctx.git_main_source_files)
             )
         return violations
 

@@ -9,8 +9,8 @@ import pytest
 
 from jaut import config
 from jaut.models import (
-    BatchClassEntry, BatchState, ClassCoverage, MethodCoverage,
-    MethodKey, MethodStatus, Route, State,
+    MANUAL_SKIP_REASON, BatchClassEntry, BatchState, ClassCoverage, MethodCoverage,
+    MethodKey, MethodStatus, Route, SKIP_SOURCE_AUTO, SKIP_SOURCE_MANUAL, State,
 )
 from jaut.report import render_class_complete_report, render_batch_finish_report
 
@@ -170,15 +170,27 @@ def test_render_batch_finish_report_recheck():
     assert "需重验" in report_text
 
 
+def test_render_batch_finish_report_unmet_no_label_stacking():
+    """unmet 行渲染: skip_reason 存裸原因, 标签"未达标:"由报告层唯一添加不叠加。"""
+    bs = _make_batch_state()
+    bs.classes[0].status = "unmet"
+    bs.classes[0].skip_reason = "覆盖率 33.3% < 80.0%; 类级预算已耗尽"
+    report_text = render_batch_finish_report(bs)
+    assert "(未达标: 覆盖率 33.3% < 80.0%; 类级预算已耗尽)" in report_text
+    assert "未达标: 未达标终态" not in report_text
+
+
 def test_render_batch_finish_report_unverified():
     """unverified(环境不可信待复核)类单列一节, 提示重跑 batch_finish 复核。"""
     bs = _make_batch_state()
     bs.classes[0].status = "unverified"
-    bs.classes[0].skip_reason = "待环境复核: 测试结果不可信(surefire 报告缺失)"
+    bs.classes[0].skip_reason = "测试结果不可信(surefire 报告缺失)"
     report_text = render_batch_finish_report(bs)
     assert "待环境复核(1 类)" in report_text
     assert "com.foo.A" in report_text
     assert "重跑 batch_finish.py" in report_text
+    assert "(待环境复核: 测试结果不可信(surefire 报告缺失)" in report_text
+    assert "待环境复核: 待环境复核" not in report_text   # 存储裸原因, 标签不叠加
 
 
 # --------------------------------------------------------------------------- #
@@ -539,10 +551,12 @@ def test_batch_update_advances_group_when_work_remains(tmp_path):
 # batch_update 落账统计自动跳过方法数(escalations 字段)
 # --------------------------------------------------------------------------- #
 def test_batch_update_counts_auto_skipped_methods(tmp_path):
-    """落账时把类内自动跳过(带 skip_reason)的方法数写入 entry.escalations。
+    """落账时把类内自动跳过的方法数写入 entry.escalations。
 
     根因: 升级穿透移除后 escalations 只有三处置 0, 无任何递增路径, 最终报告
          "总自动跳过方法数"(原"总升级次数")恒为 0, 与实际发生的自动跳过无关。
+    口径: 只计 skip_source=auto(脚本自动跳过); 用户 --skip-current 手动跳过同样
+         带 skip_reason(可被 --unskip 恢复、同样列入报告), 但不得计成"自动跳过"。
     """
     import argparse
     from unittest.mock import MagicMock, patch
@@ -563,13 +577,18 @@ def test_batch_update_counts_auto_skipped_methods(tmp_path):
                           status=MethodStatus.DONE)
     auto_skipped = MethodCoverage(key=MethodKey("m2", "()V"), covered=0, missed=10,
                                   status=MethodStatus.SKIPPED,
-                                  skip_reason="连续 3 轮测试失败不收敛, 自动跳过")
+                                  skip_reason="连续 3 轮测试失败不收敛, 自动跳过",
+                                  skip_source=SKIP_SOURCE_AUTO)
+    manual_skipped = MethodCoverage(key=MethodKey("m4", "()V"), covered=0, missed=10,
+                                    status=MethodStatus.SKIPPED,
+                                    skip_reason=MANUAL_SKIP_REASON,
+                                    skip_source=SKIP_SOURCE_MANUAL)  # 手动跳过, 不计
     group_filtered = MethodCoverage(key=MethodKey("m3", "()V"), covered=0, missed=10,
                                     status=MethodStatus.SKIPPED)  # 组过滤跳过, 不计
     class_state = State(project_root=str(tmp_path), target_class="com.example.A",
                         module=".", threshold=80.0, batch_mode=True,
                         class_coverage=ClassCoverage.of(40, 60),
-                        methods=[done, auto_skipped, group_filtered])
+                        methods=[done, auto_skipped, group_filtered, manual_skipped])
 
     locked = MagicMock()
     locked.__enter__ = MagicMock(return_value=None)
@@ -584,7 +603,7 @@ def test_batch_update_counts_auto_skipped_methods(tmp_path):
 
     data = json.loads((workdir / config.BATCH_STATE_FILENAME).read_text(
         encoding="utf-8"))
-    assert data["classes"][0]["escalations"] == 1   # 只计带 skip_reason 的自动跳过
+    assert data["classes"][0]["escalations"] == 1   # 只计自动跳过(skip_source=auto)
     assert decision.report is not None or decision.summary  # 落账完成
 
 
@@ -730,6 +749,56 @@ def test_get_diff_files_three_merge_base_failure_suggests_two(tmp_path):
         with pytest.raises(StepError) as ei:
             _get_diff_files(tmp_path, "master", "three")
     assert "--diff-mode two" in (ei.value.decision.question or "")
+
+
+def test_get_diff_files_auto_merge_base_failure_falls_back_to_two_dot(tmp_path):
+    """auto 模式 merge-base 失败: 回退 target..HEAD 两点对比(该分支不再有
+    三点可用路径, 避免把空白 base 拼进 diff ref)。"""
+    from batch_diff import _get_diff_files
+    from unittest.mock import patch
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        if cmd[1] == "merge-base":
+            return _git_result(False, stderr="fatal: not a valid ref")
+        if cmd[1] == "diff" and "--name-only" in cmd:
+            return _git_result(True, stdout="src/main/java/com/foo/Foo.java\n")
+        if cmd[1] == "diff" and "--numstat" in cmd:
+            return _git_result(True, stdout="10\t2\tsrc/main/java/com/foo/Foo.java\n")
+        return _git_result(True, stdout="")
+
+    with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
+         patch("jaut.proc.run_command", side_effect=fake_run):
+        files = _get_diff_files(tmp_path, "master", "auto")
+
+    assert files == [("src/main/java/com/foo/Foo.java", 10, 2)]
+    name_cmd = next(c for c in calls if "diff" in c and "--name-only" in c)
+    assert name_cmd[-1] == "master..HEAD"
+
+
+def test_get_diff_files_auto_uses_three_dot_when_merge_base_ok(tmp_path):
+    """auto 模式 merge-base 可用: 仍走三点(base...HEAD), 回退逻辑不越权。"""
+    from batch_diff import _get_diff_files
+    from unittest.mock import patch
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        if cmd[1] == "merge-base":
+            return _git_result(True, stdout="abc123\n")
+        if cmd[1] == "diff" and "--name-only" in cmd:
+            return _git_result(True, stdout="src/main/java/com/foo/Foo.java\n")
+        return _git_result(True, stdout="")
+
+    with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
+         patch("jaut.proc.run_command", side_effect=fake_run):
+        _get_diff_files(tmp_path, "master", "auto")
+
+    name_cmd = next(c for c in calls if "diff" in c and "--name-only" in c)
+    assert name_cmd[-1] == "abc123...HEAD"
 
 
 def test_get_diff_files_empty_stdout_returns_empty_list(tmp_path):
@@ -881,6 +950,7 @@ def test_batch_init_no_report_raises_and_rolls_back_stub(tmp_path):
     locked.__exit__ = MagicMock(return_value=False)
     with patch("batch_init.setup_logger"), \
          patch("batch_init.gitops.record_git_baseline", return_value={}), \
+         patch("batch_init.gitops.record_git_main_source_files", return_value=[]), \
          patch("batch_init.gitops.current_branch", return_value="feat"), \
          patch("batch_init.maven.is_multi_module", return_value=False), \
          patch("batch_init.maven.clean_jacoco_dirs"), \
@@ -928,6 +998,7 @@ def test_batch_init_mvn_failure_rolls_back_stub(tmp_path):
     locked.__exit__ = MagicMock(return_value=False)
     with patch("batch_init.setup_logger"), \
          patch("batch_init.gitops.record_git_baseline", return_value={}), \
+         patch("batch_init.gitops.record_git_main_source_files", return_value=[]), \
          patch("batch_init.gitops.current_branch", return_value="feat"), \
          patch("batch_init.maven.is_multi_module", return_value=False), \
          patch("batch_init.maven.clean_jacoco_dirs"), \

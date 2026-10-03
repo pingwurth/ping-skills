@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -727,6 +728,38 @@ def test_run_fast_single_cov_uses_config_timeout(tmp_path, _ensure_jacoco_script
             str(tmp_path / "mvn.log"))
     _, kwargs = mock_run.call_args
     assert kwargs["timeout"] == 888
+
+
+# --------------------------------------------------------------------------- #
+# fast-single-cov.sh 脚本内容(H1 / L3 回归)
+# --------------------------------------------------------------------------- #
+def _fast_single_cov_script_path() -> Path:
+    return Path(maven.__file__).resolve().parent.parent / "jacoco" / "fast-single-cov.sh"
+
+
+def test_fast_single_cov_script_passes_bash_syntax_check():
+    """脚本应通过 bash -n 语法检查(L3: trap 清理与 set 改造后无语法错误)。"""
+    result = subprocess.run(
+        ["bash", "-n", str(_fast_single_cov_script_path())], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+def test_fast_single_cov_script_includes_inner_classes():
+    """agent includes 应带内部类通配(H1): 精确类名不插桩 Foo$Inner, 覆盖率会被低估。"""
+    content = _fast_single_cov_script_path().read_text(encoding="utf-8")
+    # agent 对点号/斜杠格式归一化, 精确类名 Foo 不插桩 Foo$Bar/Foo$1 等内部类,
+    # 必须附加 ${TARGET_CLASS}\$* 通配才能采集内部类探针数据
+    assert "includes=$TARGET_CLASS:${TARGET_CLASS}\\$*" in content
+
+
+def test_fast_single_cov_script_has_no_dead_code():
+    """死变量 JSON_FILE 已删, trap 清理与 set -euo pipefail 已就位(L3)。"""
+    content = _fast_single_cov_script_path().read_text(encoding="utf-8")
+    assert "JSON_FILE" not in content
+    assert "trap cleanup EXIT" in content
+    assert 'MVN_LOG=""' in content
+    # batch 侧保留 set -e 的"失败即退出"语义(与 java 侧 set -uo pipefail 有意不同)
+    assert "set -euo pipefail" in content
 
 
 # --------------------------------------------------------------------------- #

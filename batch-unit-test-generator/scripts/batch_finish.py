@@ -277,10 +277,12 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                     # 无补测空间 → 终态化; 但环境不可信时改置 unverified 非终态:
                     # unmet 不可复活, 会把"环境修好后即可确认"的类永久记成未达标;
                     # unverified 不在 _TERMINAL_STATUSES, 重跑本脚本会重新终验
+                    # skip_reason 存裸原因(与 batch_update 的 skipped/failed 一致);
+                    # 展示标签("未达标:"/"待环境复核:")由 report 渲染层统一添加
                     entry.final_rate = final_rate
                     if env_uncertain:
                         entry.status = "unverified"
-                        entry.skip_reason = f"待环境复核: {reason}"
+                        entry.skip_reason = reason
                         logger.warning(
                             f"类 {entry.fqcn} 终验环境不可信, 待复核"
                             f"(环境修复后重跑 batch_finish): {reason}")
@@ -290,7 +292,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                         else:
                             cause = "无可补测方法(方法均已跳过或完成)"
                         entry.status = "unmet"
-                        entry.skip_reason = f"未达标终态: {reason}; {cause}"
+                        entry.skip_reason = f"{reason}; {cause}"
                         logger.warning(
                             f"类 {entry.fqcn} 终验未通过且{cause}, 未达标收尾: {reason}")
 

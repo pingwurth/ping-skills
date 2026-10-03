@@ -10,7 +10,9 @@ import pytest
 
 from jaut import config
 from jaut.cli import StepError
-from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, Route, State
+from jaut.models import (Decision, MethodCoverage, MethodKey, MethodStatus, Route,
+                         SKIP_SOURCE_AUTO, State)
+from jaut.state import StateStore
 from scripts.validate_rules import handler
 
 
@@ -74,6 +76,41 @@ def test_handler_returns_write_code_on_violations(tmp_path):
 
     assert decision.route == Route.WRITE_CODE
     assert "违规" in decision.summary
+
+
+def test_handler_wires_main_source_snapshot_into_deletion_check(tmp_path):
+    """接线回归: state.git_main_source_files 须传入规则引擎供删除检测使用。
+
+    不 mock run_hard_rules(仅 mock git 查询), 验证 state -> RuleContext 的端到端
+    传递: 基线为空(干净 worktree)时删除 init 快照内文件仍须报违规, 否则 P0-3
+    删除检测会因基线与快照脱钩而静默失效。
+    """
+    test_file = tmp_path / "MyServiceTest.java"
+    test_file.write_text("class MyServiceTest {}")
+
+    deleted = "src/main/java/com/example/Pristine.java"
+    state = State(
+        project_root=str(tmp_path),
+        target_class="com.example.MyService",
+        test_class_file=str(test_file),
+        git_baseline={},
+        git_main_source_files=[deleted],
+    )
+    args = _make_args(str(tmp_path))
+
+    with patch("scripts.validate_rules.StateStore") as MockStore, \
+         patch("scripts.validate_rules.setup_logger"), \
+         patch("scripts.validate_rules.javasrc.strip_comments_and_strings", return_value="stripped"), \
+         patch("scripts.validate_rules.rules.git_changed_paths", return_value=set()), \
+         patch("scripts.validate_rules.rules.git_deleted_main_source_paths",
+               return_value={deleted}), \
+         patch("scripts.validate_rules.prompt.default_rules_file", return_value=Path("rules.md")):
+        MockStore.return_value.load.return_value = state
+
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.WRITE_CODE
+    assert "被删除" in decision.instructions
 
 
 def test_handler_uses_test_file_from_args_over_state(tmp_path):
@@ -235,8 +272,41 @@ def test_streak_at_limit_auto_skips_current_method(tmp_path):
     entry = state.find_method(method)
     assert entry.status == MethodStatus.SKIPPED
     assert str(config.VALIDATE_FAIL_STREAK_LIMIT) in entry.skip_reason
+    assert entry.skip_source == SKIP_SOURCE_AUTO   # 自动跳过来源标注(区别于手动跳过)
     # 跳过后全新窗口: 计数已复位
     assert state.validate_fail_streak == 0
+
+
+def test_auto_skip_persists_skip_fields_with_real_store(tmp_path):
+    """达上限自动跳过: skip 字段与复位后的计数须真实落盘(用实存而非 mock 校验)。
+
+    回归: _auto_skip_validate 中重复清零已移除(复位由 _bump_fail_streak 负责);
+    若最终 store.save(state) 被误删, 磁盘将停留在标记 skipped 之前的首次落盘,
+    skip 字段丢失, make_plan 会再次拿到同一方法。
+    """
+    method = MethodKey(name="foo", desc="(int)")
+    state = State(project_root=str(tmp_path), target_class="c",
+                  test_class_file=str(_violating_file(tmp_path)), git_baseline={},
+                  current_method=method,
+                  methods=[MethodCoverage(key=method, covered=5, missed=5)])
+    state.validate_fail_streak = config.VALIDATE_FAIL_STREAK_LIMIT - 1
+    StateStore(tmp_path).save(state)
+
+    args = _make_args(str(tmp_path))
+    with patch("scripts.validate_rules.setup_logger"), \
+         patch("scripts.validate_rules.javasrc.strip_comments_and_strings", return_value="s"), \
+         patch("scripts.validate_rules.rules.run_hard_rules", return_value=[MagicMock()]), \
+         patch("scripts.validate_rules.prompt.default_rules_file", return_value=Path("rules.md")):
+        decision, ectx = handler(args)
+
+    assert decision.route == Route.MAKE_PLAN
+    persisted = StateStore(tmp_path).load()
+    entry = persisted.find_method(method)
+    assert entry.status == MethodStatus.SKIPPED
+    assert entry.skip_reason == (f"连续 {config.VALIDATE_FAIL_STREAK_LIMIT} 轮规范校验未通过"
+                                 "(测试类文件存在违规), 自动跳过")
+    assert entry.skip_source == SKIP_SOURCE_AUTO   # 来源同原因一并落盘
+    assert persisted.validate_fail_streak == 0
 
 
 def test_auto_skip_without_current_method_raises_state_error(tmp_path):

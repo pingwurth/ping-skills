@@ -106,7 +106,7 @@
               "option": {
                 "type": "string",
                 "description": "选项标识",
-                "enum": ["continue", "custom", "choice", "clear_history", "skip_method", "adjust_threshold", "retry", "terminate"]
+                "enum": ["continue", "custom", "choice", "clear_history", "skip_method", "skip_class", "adjust_threshold", "retry", "terminate"]
               },
               "label": {
                 "type": "string",

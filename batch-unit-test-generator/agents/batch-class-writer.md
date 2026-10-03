@@ -70,5 +70,5 @@ tools: Read, Write, Edit, Glob, Grep, Bash
 - 禁止真实访问数据库、Redis、MQ、网络等外部资源。
 - 禁止执行白名单之外的脚本与裸 mvn。
 - 禁止为了让测试通过而放宽断言。
-- 禁止自行跳过方法或手改 state.json 里的 `skip_reason`——跳过一律由脚本按预算/不收敛判定并记录; 异常中断时必须在交付报告中说明原因。
+- 禁止自行跳过方法或手改 state.json 里的 `skip_reason` / `skip_source`——跳过一律由脚本按预算/不收敛判定并记录(`skip_source=auto`), 手动跳过只能由主流程用 `make_plan.py --skip-current` 落地(`skip_source=manual`); 异常中断时必须在交付报告中说明原因。
 - 禁止执行任何批量层脚本（batch_*）或全局决策。

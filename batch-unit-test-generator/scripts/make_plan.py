@@ -45,7 +45,8 @@ from jaut import config, decisions, report  # noqa: E402
 from jaut.cli import EmitContext, add_common_args, require_workdir, run_cli  # noqa: E402
 from jaut.cli import StepError  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, State  # noqa: E402
+from jaut.models import (Decision, MANUAL_SKIP_REASON, MethodCoverage, MethodKey,  # noqa: E402
+                         MethodStatus, SKIP_SOURCE_MANUAL, State)
 from jaut.state import StateStore  # noqa: E402
 
 SCRIPT_NAME = "make_plan"
@@ -119,7 +120,10 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 def _apply_user_decision(args: argparse.Namespace, state: State, logger) -> None:
     """落地用户的恢复决策(SKILL.md §6: 跳过/调门槛/恢复被跳过的方法/追加预算)。"""
     exclusive = [bool(args.skip_current), args.set_threshold is not None]
-    if sum(exclusive) > 1 or (any(exclusive) and (args.unskip or args.grant_rounds is not None)):
+    # --unskip 按"是否显式提供"判定(is not None): 显式空串需进入 _unskip 报
+    # "需要方法名列表", 按真值判定会把它当作未提供而静默忽略
+    if sum(exclusive) > 1 or (
+            any(exclusive) and (args.unskip is not None or args.grant_rounds is not None)):
         raise StepError.state_error(
             "--skip-current / --set-threshold 与其他恢复参数互斥, 一次只落地一个; "
             "--unskip 可与 --grant-rounds 组合")
@@ -128,14 +132,19 @@ def _apply_user_decision(args: argparse.Namespace, state: State, logger) -> None
     elif args.set_threshold is not None:
         _set_threshold(state, args.set_threshold, logger)
     else:
-        if args.unskip:
+        if args.unskip is not None:
             _unskip(state, args.unskip, logger)
         if args.grant_rounds is not None:
             _grant_rounds(state, args.grant_rounds, logger)
 
 
-def _skip_current(state: State, logger, reason: str = "手动跳过") -> None:
-    """跳过当前方法: 状态改 skipped 并记录原因(SKILL.md §6 "跳过必须写入 state.json")。"""
+def _skip_current(state: State, logger, reason: str = MANUAL_SKIP_REASON) -> None:
+    """跳过当前方法: 状态改 skipped 并记录原因与来源(SKILL.md §6 "跳过必须写入 state.json")。
+
+    skip_source=manual 标明这是用户手动跳过: 与自动跳过一样写入 skip_reason(因此同样
+    可被 --unskip 恢复、同样列入报告), 但不会被"按原因非空判定自动跳过"的下游误计
+    (如批量报告汇总的\"总自动跳过方法数\")。
+    """
     if state.current_method is None:
         raise StepError.state_error("无可跳过的当前方法(current_method 为空)")
     entry = state.find_method(state.current_method)
@@ -144,12 +153,13 @@ def _skip_current(state: State, logger, reason: str = "手动跳过") -> None:
             f"state 中找不到当前方法: {state.current_method.label()}")
     entry.status = MethodStatus.SKIPPED
     entry.skip_reason = reason
+    entry.skip_source = SKIP_SOURCE_MANUAL
     state.validate_fail_streak = 0
-    logger.info(f"跳过方法 {entry.key.label()}: {reason}")
+    logger.info(f"跳过方法 {entry.key.label()}: {reason}(手动跳过)")
 
 
 def _unskip(state: State, names: str, logger) -> None:
-    """恢复被跳过的方法: 状态改回 pending, 清跳过原因并重开预算窗口(SKILL.md §6)。
+    """恢复被跳过的方法: 状态改回 pending, 清跳过原因/来源并重开预算窗口(SKILL.md §6)。
 
     跳过原因多为预算/轨迹耗尽, 因此恢复必须同时追加全局预算窗口, 批量模式下还要
     追加类级预算窗口(verify_coverage 的类级预检查会立刻再次跳过所有 pending),
@@ -194,6 +204,7 @@ def _unskip(state: State, names: str, logger) -> None:
     for entry in revived:
         entry.status = MethodStatus.PENDING
         entry.skip_reason = None
+        entry.skip_source = None
         entry.reset_trajectory()
     # 当前方法即被恢复方法时游标不切换, _advance_cursor 不会清零, 需就地重开单方法窗口
     if state.current_method is not None \

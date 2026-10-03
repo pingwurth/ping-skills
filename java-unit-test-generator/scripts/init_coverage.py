@@ -136,7 +136,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         args: 已解析的命令行参数。
 
     Returns:
-        (Decision, EmitContext): 决策(finish / make_plan / ask_user)与路由上下文。
+        (Decision, EmitContext): 决策(finish / make_plan)与路由上下文。
 
     Raises:
         StepError: 项目根缺失、目标类无法解析、mvn/报告/环境失败(exit 2);
@@ -193,6 +193,10 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if coverage_excludes:
             logger.info(f"覆盖率排除模式: {coverage_excludes}")
         baseline = prev_state.git_baseline if prev_state else gitops.record_git_baseline(project_root)
+        # init 时已存在文件快照(删除检测依据): 终验沿用 init 轮取值, 不可重录,
+        # 否则迭代期已被删除的文件会重新进入快照而漏报删除违规
+        main_source_files = (list(prev_state.git_main_source_files) if prev_state
+                             else gitops.record_git_main_source_files(project_root))
         # 分支名是运行时事实(git rev-parse), 不可由目录名推导; 终验时优先取实时查询,
         # 查询失败(detached/无 git)回退 init 轮记录, 兼容旧 state.json
         branch = gitops.current_branch(project_root)
@@ -298,8 +302,8 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 )
 
         state = _assemble_state(args, project_root, workdir, fqcn, source, module,
-                                mvn_log, baseline, threshold, class_cov, method_entries,
-                                prev_state, branch, coverage_excludes)
+                                mvn_log, baseline, main_source_files, threshold, class_cov,
+                                method_entries, prev_state, branch, coverage_excludes)
 
         # Surefire 结果解析 + fail-closed 绿灯判定
         test = surefire.parse_surefire_reports(project_root, module)
@@ -437,10 +441,11 @@ def _build_method_entries(parsed: list[MethodCoverage], method_arg: str | None,
             if not in_scope and entry.status != MethodStatus.DONE:
                 entry.status = MethodStatus.SKIPPED
             elif entry.status != MethodStatus.DONE and (m.is_abstract or rate >= threshold):
-                # 达标晋升: 清空历史跳过原因, 维持 "done => skip_reason 为空" 不变式
+                # 达标晋升: 清空历史跳过原因与来源, 维持 "done => skip_reason/skip_source 为空" 不变式
                 # (报告/方法组复活/--unskip 都按该不变式判定方法是否被跳过)
                 entry.status = MethodStatus.DONE
                 entry.skip_reason = None
+                entry.skip_source = None
             elif entry.status == MethodStatus.DONE and rate < threshold and not m.is_abstract:
                 # 打回 pending: 清除陈旧轨迹, 升级判定只基于本次入队后的轮次
                 entry.status = MethodStatus.PENDING
@@ -468,12 +473,13 @@ def _carry_prev(prev: MethodCoverage | None, m: MethodCoverage) -> MethodCoverag
                            status=prev.status, round_rates=list(prev.round_rates),
                            round_test_results=list(prev.round_test_results),
                            initial_rate=prev.initial_rate,
-                           skip_reason=prev.skip_reason)
+                           skip_reason=prev.skip_reason,
+                           skip_source=prev.skip_source)
     return entry
 
 
 def _assemble_state(args, project_root, workdir, fqcn, source, module, mvn_log,
-                    baseline, threshold, class_cov: ClassCoverage,
+                    baseline, main_source_files, threshold, class_cov: ClassCoverage,
                     method_entries: list[MethodCoverage], prev_state: State | None,
                     branch: str | None, coverage_excludes: list[str]) -> State:
     """组装本轮 state(终验时延续既有进度与轨迹计数, 并记录分支名)。"""
@@ -492,6 +498,7 @@ def _assemble_state(args, project_root, workdir, fqcn, source, module, mvn_log,
         coverage_excludes=coverage_excludes,
         mvn_log=mvn_log,
         git_baseline=baseline,
+        git_main_source_files=main_source_files,
         iteration=0,
         global_iteration=(prev_state.global_iteration if (args.final_check and prev_state) else 0),
         # 单方法窗口随新方法周期归零; 全局窗口与规范校验计数跨终验延续

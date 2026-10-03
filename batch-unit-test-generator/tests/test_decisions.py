@@ -230,6 +230,39 @@ def test_verify_test_failure_streak_auto_skips_before_build_prompt():
     assert d.reset_trajectory is True
 
 
+def test_auto_skip_reason_matches_actual_trigger():
+    """回归: 自动跳过的 reason 须反映真实触发原因, 不得一律标注“预算耗尽”。
+
+    _auto_skip 曾把 Decision.reason 硬编码为 "预算耗尽, 自动跳过", 该字段逐字
+    进入 next_step, 使测试失败/无提升的跳过被误报为预算耗尽。
+    """
+    # 单方法预算耗尽
+    d_budget = decisions.decide_after_verify(_verify_ctx(
+        method=_method(covered=5, missed=5), iteration=config.METHOD_ROUND_BUDGET))
+    assert "预算耗尽" in d_budget.reason
+
+    # 全局预算耗尽 -> 跳过全部未达标方法
+    d_global = decisions.decide_after_verify(_verify_ctx(
+        method=_method(covered=5, missed=5), iteration=2,
+        global_iteration=config.GLOBAL_ROUND_BUDGET))
+    assert "全局预算耗尽" in d_global.reason
+
+    # 连续测试失败不收敛 -> 不得误标为预算耗尽
+    d_fail = decisions.decide_after_verify(_verify_ctx(
+        method=_method(covered=5, missed=5,
+                       results=[TestOutcome(1, 0)] * config.TEST_FAIL_STREAK_ROUNDS),
+        test=TestResult(tests=1, failures=1, errors=0, report_found=True),
+        tests_green=False, iteration=3))
+    assert "测试失败" in d_fail.reason
+    assert "预算耗尽" not in d_fail.reason
+
+    # 连续无提升 -> 不得误标为预算耗尽
+    d_flat = decisions.decide_after_verify(_verify_ctx(
+        method=_method(covered=5, missed=5, rates=[30.0, 30.0, 30.0]), iteration=3))
+    assert "无提升" in d_flat.reason
+    assert "预算耗尽" not in d_flat.reason
+
+
 def test_verify_not_green_single_round_routes_build_prompt_with_instructions():
     test = TestResult(tests=1, failures=1, errors=0, report_found=True,
                       failed_cases=[])

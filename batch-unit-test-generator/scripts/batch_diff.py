@@ -261,12 +261,9 @@ def _get_diff_files(project_root: Path, target: str | None,
     elif diff_mode == "two":
         diff_ref = f"{target}..HEAD"
     else:
-        # auto: 三点可用则用三点, 否则两点
-        if mb_ok:
-            base = mb_result.stdout.strip()
-            diff_ref = f"{base}...HEAD"
-        else:
-            diff_ref = f"{target}..HEAD"
+        # auto: 三点可用(见上方 if)已被处理, 走到这里必然是 merge-base
+        # 失败(auto 且 mb_ok 为 False), 回退两点对比
+        diff_ref = f"{target}..HEAD"
 
     # 获取变更文件名
     name_cmd = [git, "diff", "--name-only", "--diff-filter=ACMR", diff_ref]

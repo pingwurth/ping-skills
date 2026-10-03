@@ -38,6 +38,13 @@ def _windows_process_alive(pid: int) -> bool:
     SYNCHRONIZE = 0x00100000
     WAIT_TIMEOUT = 0x102
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    # 必须显式声明签名: ctypes 默认 restype 为 c_int(32 位), 而 HANDLE 是指针宽度,
+    # 64 位 Windows 上句柄会被截断/按有符号解释, 导致存活探测误判或句柄泄漏。
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
     if not handle:
         return False

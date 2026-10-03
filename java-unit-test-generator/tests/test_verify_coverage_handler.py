@@ -10,7 +10,8 @@ import pytest
 
 from jaut import config
 from jaut.cli import StepError
-from jaut.models import Decision, MethodCoverage, MethodKey, MethodStatus, Route, State, TestResult
+from jaut.models import (Decision, MethodCoverage, MethodKey, MethodStatus, Route,
+                         SKIP_SOURCE_AUTO, State, TestResult)
 from scripts.verify_coverage import handler
 
 
@@ -491,6 +492,7 @@ def test_handler_auto_skip_marks_method_skipped_with_reason(tmp_path):
     assert result.route == Route.MAKE_PLAN
     assert state.methods[0].status == MethodStatus.SKIPPED
     assert state.methods[0].skip_reason == "单方法迭代已达上限 8 轮仍未达标(当前 50.0%)"
+    assert state.methods[0].skip_source == SKIP_SOURCE_AUTO   # 自动跳过来源标注
     assert state.validate_fail_streak == 0
     # 其余方法不受影响
     assert state.methods[1].status == MethodStatus.PENDING
@@ -512,3 +514,4 @@ def test_handler_skip_all_pending_marks_every_pending_method(tmp_path):
     for m in state.methods:
         assert m.status == MethodStatus.SKIPPED
         assert m.skip_reason == "全局迭代已达上限 30 轮, 未达标方法不再迭代"
+        assert m.skip_source == SKIP_SOURCE_AUTO   # 自动跳过须标注来源

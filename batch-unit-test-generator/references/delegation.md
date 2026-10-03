@@ -29,7 +29,9 @@ python <scripts_dir>/make_plan.py --workdir <类workdir>
 `decide_after_verify` 中四处触发点（单方法预算耗尽 / 全局预算耗尽 / 连续测试失败 / 连续无提升）
 和 `validate_rules` 的连续违规触发点，一律：
 
-- 方法状态写 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`；
+- 方法状态写 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`、来源写
+  `methods[].skip_source = "auto"`（用户 `--skip-current` 手动跳过为 `"manual"`，两者都带原因、
+  都可被 `--unskip` 恢复，但只有 `auto` 计入最终报告的「总自动跳过方法数」）；
 - 全局预算耗尽时同时跳过全部剩余 pending 方法（`skip_all_pending`）；
 - 返回 `MAKE_PLAN`，由子代理继续驱动队列（下一方法，或队列空时输出类内完成报告）。
 

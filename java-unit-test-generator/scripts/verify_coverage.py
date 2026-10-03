@@ -44,7 +44,8 @@ import _path_setup  # noqa: F401  — 初始化 sys.path 以导入 jaut 包
 from jaut import config, decisions, jacoco, maven, surefire  # noqa: E402
 from jaut.cli import EmitContext, StepError, add_common_args, require_workdir, run_cli  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import Decision, MethodCoverage, MethodStatus, Route, State, TestOutcome  # noqa: E402
+from jaut.models import (Decision, MethodCoverage, MethodStatus, Route,  # noqa: E402
+                         SKIP_SOURCE_AUTO, State, TestOutcome)
 from jaut.state import StateStore  # noqa: E402
 
 SCRIPT_NAME = "verify_coverage"
@@ -193,9 +194,10 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if decision.mark_done:
             entry.status = MethodStatus.DONE
         elif decision.auto_skip_method:
-            # 预算耗尽/不收敛: 自动跳过并记录原因(不再 ask_user)
+            # 预算耗尽/不收敛: 自动跳过并记录原因与来源(不再 ask_user)
             entry.status = MethodStatus.SKIPPED
             entry.skip_reason = decision.auto_skip_reason
+            entry.skip_source = SKIP_SOURCE_AUTO
             state.validate_fail_streak = 0
             logger.info(f"自动跳过方法 {entry.key.label()}: {decision.auto_skip_reason}")
         if decision.reset_trajectory:
@@ -205,6 +207,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 if m.status == MethodStatus.PENDING:
                     m.status = MethodStatus.SKIPPED
                     m.skip_reason = decision.auto_skip_reason
+                    m.skip_source = SKIP_SOURCE_AUTO
             logger.info(f"跳过全部未达标方法: {decision.auto_skip_reason}")
         store.save(state)
         logger.info(f"方法 {entry.key.label()}: {before_rate:.1f}% -> {entry.rate:.1f}% "

@@ -100,8 +100,9 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
     modules = sorted({c["module"] for c in selected})
     logger.info(f"涉及模块: {modules}")
 
-    # 记录 git 基线(共享给各类 state)
+    # 记录 git 基线与 init 时已存在的主源码文件快照(共享给各类 state)
     baseline = gitops.record_git_baseline(project_root)
+    main_source_files = gitops.record_git_main_source_files(project_root)
     branch = gitops.current_branch(project_root)
 
     # 覆盖率排除模式(显式 + Lombok 启发式)
@@ -245,6 +246,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             coverage_excludes=coverage_excludes,
             mvn_log=class_mvn_log,
             git_baseline=baseline,
+            git_main_source_files=main_source_files,
             class_coverage=class_cov,
             methods=method_entries,
             coverage_history=[{"phase": "init", "class_rate": round(class_cov.rate, 2)}],

@@ -134,3 +134,57 @@ def test_optional_jsonschema_payload_validation():
     with_report = dict(missing_report)
     with_report["next_step"] = {"type": "finish", "reason": "done", "report": "…"}
     jsonschema.validate(with_report, schema)
+
+
+# --------------------------------------------------------------------------- #
+# resume.option 枚举与脚本实际产出一致(防新增选项漏改 schema)
+# --------------------------------------------------------------------------- #
+def test_emitted_resume_options_are_all_in_schema_enum():
+    """scripts/ 中实际构造的 ResumeOption.option 必须都在 schema 枚举内。
+
+    回归: batch_update 新增 skip_class 后未同步 schema(additionalProperties:
+    false + enum 会直接拒绝该 ask_user 负载)。
+    """
+    import re
+    schema = _load()
+    enum = schema["properties"]["next_step"]["properties"]["resume"]["items"][
+        "properties"]["option"]["enum"]
+    scripts_dir = _SCHEMA_PATH.parent.parent / "scripts"
+    pattern = re.compile(r'ResumeOption\(\s*option\s*=\s*"([^"]+)"')
+    emitted = set()
+    for path in sorted(scripts_dir.glob("*.py")):
+        emitted.update(pattern.findall(path.read_text(encoding="utf-8")))
+    assert emitted, "未从 scripts/ 扫描到任何 resume option, 检查目录与正则"
+    missing = sorted(emitted - set(enum))
+    assert not missing, f"schema resume.option 枚举缺少脚本实际产出的值: {missing}"
+
+
+def test_skip_class_ask_user_payload_validates():
+    """skip_class 升级负载(非 terminate, 需 script+params)通过 schema 校验。"""
+    import pytest
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = _load()
+    payload = {
+        "protocol_version": "1.0",
+        "script": "batch_update.py",
+        "status": "needs_input",
+        "exit_code": 1,
+        "summary": "类 com.example.A 未完成, 需用户决策",
+        "artifacts": [],
+        "next_step": {
+            "type": "ask_user",
+            "reason": "子代理未完成, 需用户决策",
+            "question": "请选择: 继续委派 / 跳过该类 / 终止批量。",
+            "resume": [
+                {"option": "continue", "label": "继续委派该类",
+                 "script": "batch_next.py", "params": ["--project-root", "/p"]},
+                {"option": "skip_class", "label": "跳过该类",
+                 "script": "batch_update.py",
+                 "params": ["--project-root", "/p", "--skip-class",
+                            "com.example.A", "--reason", "<原因>"],
+                 "note": "需把 <原因> 替换为跳过原因"},
+                {"option": "terminate", "label": "终止批量"},
+            ],
+        },
+    }
+    jsonschema.validate(payload, schema)

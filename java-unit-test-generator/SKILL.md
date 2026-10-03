@@ -110,11 +110,11 @@ select_worktree → init_coverage → make_plan → build_prompt → LLM write_c
 
 同一方法出现 `连续 3 轮无有效覆盖率提升` 或 `连续 3 轮测试失败` 时，**自动跳过该方法**。默认预算：单方法最多 8 轮，全局最多 30 轮（可通过环境变量 `JAVA_UT_METHOD_ROUND_BUDGET`、`JAVA_UT_GLOBAL_ROUND_BUDGET` 覆盖）。超预算或轨迹不收敛时不再询问用户，一律自动跳过：
 
-- 单方法预算耗尽、连续失败、连续无提升、`validate_rules` 连续 5 轮违规 → 当前方法标记 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`，回 `make_plan.py` 推进下一方法；
+- 单方法预算耗尽、连续失败、连续无提升、`validate_rules` 连续 5 轮违规 → 当前方法标记 `skipped`，原因写入 `state.json` 的 `methods[].skip_reason`、来源写 `methods[].skip_source = "auto"`（用户 `--skip-current` 手动跳过为 `"manual"`，两者都带原因、都可由 `--unskip` 恢复，但只有 `auto` 属「自动跳过」口径），回 `make_plan.py` 推进下一方法；
 - 全局预算耗尽 → 跳过全部未达标方法；
 - 跳过后已无待补测方法 → 队列空仍会跑一次全量终验实测：达标则正常 finish（PASS），未达标才以未达标收尾（finish 报告显示 `最终状态: 未达标` 与逐方法跳过原因）；终验环境不可信（surefire 报告缺失/无法解析/目录清理失败且无失败用例）时按未复核收尾（`最终状态: 未复核(测试结果不可信)`，环境修复后可重跑终验复核）。`--method` 模式下以目标方法自身是否达标为准，方法被跳过时不会判 PASS。
 
-被自动跳过的方法为终态，恢复必须走脚本：`make_plan.py --unskip <方法名[,方法名]>`（状态改回 pending 并重开预算窗口，可配 `--grant-rounds N`；同名重载会一并恢复）；`--grant-rounds` / `--set-threshold` 都不能复活 skipped 方法。
+被跳过的终态方法（`status=skipped` 且带 `skip_reason`，自动跳过与手动跳过同）恢复必须走脚本：`make_plan.py --unskip <方法名[,方法名]>`（状态改回 pending 并清空原因/来源、重开预算窗口，可配 `--grant-rounds N`；同名重载会一并恢复）；`--grant-rounds` / `--set-threshold` 都不能复活 skipped 方法。用户 `--skip-current` 的手动跳过同样带 `skip_reason`（固定为 `手动跳过`）与 `skip_source=manual`，因此也能被 `--unskip` 恢复；`skip_source` 只用于区分「自动/手动」口径（如批量报告的总自动跳过方法数），不影响恢复与报告列出。
 
 LLM 只逐字执行 `next_step`，**禁止手改 `state.json`**。详细策略见 `references/upgrade-strategy.md`。
 

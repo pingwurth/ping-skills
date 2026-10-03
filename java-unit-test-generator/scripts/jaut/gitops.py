@@ -1,8 +1,9 @@
 """git 操作: 变更路径采集、基线记录与主源码路径判定。
 
 基线用于规则 d(禁止修改 src/main/java): init 阶段快照既有变更, validate 阶段
-对比当前变更, 基线之外的 src/main/java 改动即违规。git 不可用/非仓库时降级
-(返回 None / 空基线), 由调用方决定跳过检查。
+对比当前变更, 基线之外的 src/main/java 改动即违规。同时快照 init 时已存在的
+主源码文件清单, 供删除检测判定 "init 时存在"(init 前既有删除可豁免)。
+git 不可用/非仓库时降级(返回 None / 空基线/空快照), 由调用方决定跳过检查。
 """
 
 from __future__ import annotations
@@ -154,6 +155,34 @@ def record_git_baseline(project_root: str | Path) -> dict[str, str]:
             if h is not None:
                 result[p] = h
     return result
+
+
+def record_git_main_source_files(project_root: str | Path) -> list[str]:
+    """记录 init 时已存在的 **/src/main/java/** 文件清单(规则 d 删除检测依据)。
+
+    以 git 索引(git ls-files)为基准, 剔除磁盘上已不存在的路径:
+    - init 前就被删除的文件不在快照中 -> 既有删除可豁免, 不归咎于测试生成流程;
+    - init 时仍存在的文件(含干净 worktree 中的未修改文件)被删除则构成违规。
+    git 不可用/非仓库返回空列表(降级: 删除检测回退为仅基线内路径)。
+
+    Returns:
+        list[str]: 排序后的相对路径清单(统一正斜杠)
+    """
+    git = resolve_tool("git")
+    if git is None:
+        return []
+    result = run_command(
+        [git, "-c", "core.quotepath=false", "ls-files", "-z"],
+        cwd=str(project_root), capture=True, timeout=config.GIT_COMMAND_TIMEOUT_SECONDS,
+    )
+    if not result.ok or result.stdout is None:
+        return []
+    root = Path(project_root)
+    return sorted({
+        p.replace("\\", "/")
+        for p in result.stdout.split("\0")
+        if p and is_main_source_path(p) and (root / p).is_file()
+    })
 
 
 def current_branch(project_root: str | Path) -> Optional[str]:

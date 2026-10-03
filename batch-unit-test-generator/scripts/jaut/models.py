@@ -127,6 +127,30 @@ class TestOutcome:
         return cls(failures=int(data.get("failures", 0)), errors=int(data.get("errors", 0)))
 
 
+# --------------------------------------------------------------------------- #
+# 跳过来源(MethodCoverage.skip_source)
+# --------------------------------------------------------------------------- #
+SKIP_SOURCE_AUTO = "auto"       # 脚本自动跳过: 预算耗尽/连续失败/无提升/规范违规
+SKIP_SOURCE_MANUAL = "manual"   # 用户 --skip-current 手动跳过
+MANUAL_SKIP_REASON = "手动跳过"  # 手动跳过的默认原因(旧 state.json 迁移判定用)
+
+
+def skip_source_from(skip_reason: Optional[str],
+                     source: Optional[str] = None) -> Optional[str]:
+    """归一化跳过来源: 显式 skip_source 优先, 旧 state.json 无该字段时按原因迁移。
+
+    旧版本只写 skip_reason, 无法区分手动/自动跳过(手动跳过的原因固定为
+    MANUAL_SKIP_REASON, 其余带原因的跳过均为自动跳过)。归一化后满足不变式:
+    带 skip_reason 的终态跳过必带 skip_source, 使下游能按来源区分二者
+    (如批量报告的"总自动跳过方法数"不把手动跳过误计)。
+    """
+    if source:
+        return source
+    if not skip_reason:
+        return None
+    return SKIP_SOURCE_MANUAL if skip_reason == MANUAL_SKIP_REASON else SKIP_SOURCE_AUTO
+
+
 @dataclass
 class MethodCoverage:
     """单个方法的覆盖率与迭代轨迹。"""
@@ -139,12 +163,24 @@ class MethodCoverage:
     round_test_results: list[TestOutcome] = field(default_factory=list)
     # init 基线快照(finish 报告的 before 值); 旧 state.json 无此字段, 报告降级显示"未记录"
     initial_rate: Optional[float] = None
-    # 跳过原因(预算耗尽/规范违规不收敛等自动跳过时写入); 手动跳过或旧 state.json 为 None
+    # 跳过原因(预算耗尽/规范违规不收敛等自动跳过、或 --skip-current 手动跳过时写入);
+    # 组外方法过滤跳过与旧 state.json 为 None
     skip_reason: Optional[str] = None
+    # 跳过来源(SKIP_SOURCE_AUTO / SKIP_SOURCE_MANUAL); 与 skip_reason 互为不变式:
+    # 终态跳过(自动/手动)必带原因与来源, 组外过滤跳过(无原因)为 None。
+    # 单独记录是为了让"按原因非空判定自动跳过"的下游(如批量报告的
+    # "总自动跳过方法数")不把手动跳过误计
+    skip_source: Optional[str] = None
 
     @property
     def rate(self) -> float:
         return coverage_rate(self.covered, self.missed)
+
+    @property
+    def is_auto_skipped(self) -> bool:
+        """是否因预算耗尽/不收敛等被脚本自动跳过(排除手动跳过与组外过滤跳过)。"""
+        return (self.status == MethodStatus.SKIPPED
+                and self.skip_source == SKIP_SOURCE_AUTO)
 
     @property
     def is_abstract(self) -> bool:
@@ -172,6 +208,8 @@ class MethodCoverage:
             data["initial_rate"] = round(self.initial_rate, 2)
         if self.skip_reason is not None:
             data["skip_reason"] = self.skip_reason
+        if self.skip_source is not None:
+            data["skip_source"] = self.skip_source
         if self.round_test_results:
             data["round_test_results"] = [r.to_dict() for r in self.round_test_results]
         return data
@@ -188,6 +226,8 @@ class MethodCoverage:
             round_test_results=[TestOutcome.from_dict(r) for r in data.get("round_test_results", []) or []],
             initial_rate=float(initial) if initial is not None else None,
             skip_reason=data.get("skip_reason"),
+            skip_source=skip_source_from(data.get("skip_reason"),
+                                        data.get("skip_source")),
         )
 
 
@@ -313,7 +353,7 @@ class ResumeOption:
     (transitions 统一前缀); 需用户提供值时以占位符(如 "N")标注并写 note 说明。
     """
 
-    option: str      # 选项标识: continue/custom/choice/clear_history/skip_method/adjust_threshold/retry/terminate
+    option: str      # 选项标识: continue/custom/choice/clear_history/skip_method/skip_class/adjust_threshold/retry/terminate
     label: str       # 人读选项名(与 question 中的选项一致)
     script: str = ""                       # 恢复脚本文件名; 空 = 无命令(终止)
     params: list[str] = field(default_factory=list)
@@ -400,6 +440,10 @@ class State:
     mvn_log: str = ""
     # git 基线: {相对路径: 文件内容 SHA-256 哈希}; 旧 state.json 为 list[str], from_dict 兼容
     git_baseline: dict[str, str] = field(default_factory=dict)
+    # init 时已存在的 src/main/java 文件清单(规则 d 删除检测依据: 快照内文件被
+    # 删除即违规, init 前既有删除不在快照); 旧 state.json 无此字段, 为空时
+    # 删除检测回退为仅基线内路径
+    git_main_source_files: list[str] = field(default_factory=list)
 
     # 当前方法的迭代轮次(切换方法时清零)
     iteration: int = 0
@@ -478,15 +522,17 @@ class State:
                 "未达标方法不再迭代")
 
     def skip_pending_methods(self, reason: str) -> list[MethodCoverage]:
-        """把全部 pending 方法置为 skipped 并写入原因, 返回被跳过的方法列表。
+        """把全部 pending 方法置为 skipped 并写入原因与来源, 返回被跳过的方法列表。
 
         批量模式"类级预算耗尽"两条落地路径(verify_coverage 预检查、batch_finish
-        终态化)共用, 保证状态与原因串一致。
+        终态化)共用, 保证状态与原因串一致; 来源恒为 SKIP_SOURCE_AUTO(预算耗尽
+        属脚本自动跳过, 与用户 --skip-current 手动跳过区分)。
         """
         skipped = [m for m in self.methods if m.status == MethodStatus.PENDING]
         for m in skipped:
             m.status = MethodStatus.SKIPPED
             m.skip_reason = reason
+            m.skip_source = SKIP_SOURCE_AUTO
         return skipped
 
     def to_dict(self) -> dict[str, Any]:
@@ -522,6 +568,8 @@ class State:
             data["final_test_summary"] = dict(self.final_test_summary)
         if self.coverage_excludes:
             data["coverage_excludes"] = list(self.coverage_excludes)
+        if self.git_main_source_files:
+            data["git_main_source_files"] = list(self.git_main_source_files)
         if self.test_class_file:
             data["test_class_file"] = self.test_class_file
         if self.test_class_simple:
@@ -561,6 +609,7 @@ class State:
             coverage_excludes=list(data.get("coverage_excludes", []) or []),
             mvn_log=data.get("mvn_log", ""),
             git_baseline=git_baseline,
+            git_main_source_files=list(data.get("git_main_source_files", []) or []),
             iteration=int(data.get("iteration", 0)),
             global_iteration=int(data.get("global_iteration", 0)),
             method_round_bonus=int(data.get("method_round_bonus", 0)),

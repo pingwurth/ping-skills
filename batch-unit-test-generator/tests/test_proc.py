@@ -142,6 +142,69 @@ class TestWindowsProcessTreeKill:
 
 
 # --------------------------------------------------------------------------- #
+# Windows 进程存活探测测试
+# --------------------------------------------------------------------------- #
+class TestWindowsProcessAliveProbe:
+    """_windows_process_alive 的 ctypes 签名与句柄往返测试。
+
+    POSIX 无 ctypes.windll, 以 create=True 注入 mock, 保证用例双向可跑。
+    """
+
+    PID = 4242
+    SYNCHRONIZE = 0x00100000
+    WAIT_TIMEOUT = 0x102
+    WAIT_OBJECT_0 = 0x00000000
+
+    @staticmethod
+    def _run_probe(kernel32, pid: int = 4242) -> bool:
+        import ctypes
+
+        with patch.object(ctypes, "windll", MagicMock(kernel32=kernel32), create=True):
+            return proc._windows_process_alive(pid)
+
+    def test_declares_explicit_ctypes_signatures(self):
+        """OpenProcess 返回指针宽度的 HANDLE, 必须显式声明签名防止 64 位截断。"""
+        import ctypes
+
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = 0x7FFFFFFFFFFF1234  # 超出 32 位的句柄
+        kernel32.WaitForSingleObject.return_value = self.WAIT_TIMEOUT
+        assert self._run_probe(kernel32) is True
+        assert kernel32.OpenProcess.restype is ctypes.c_void_p
+        assert kernel32.OpenProcess.argtypes == [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        assert kernel32.WaitForSingleObject.restype is ctypes.c_uint32
+        assert kernel32.WaitForSingleObject.argtypes == [ctypes.c_void_p, ctypes.c_uint32]
+        assert kernel32.CloseHandle.argtypes == [ctypes.c_void_p]
+
+    def test_full_width_handle_round_trips(self):
+        """全宽句柄应原样传入 WaitForSingleObject/CloseHandle, 不被截断。"""
+        handle = 0x7FFFFFFFFFFF1234
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = handle
+        kernel32.WaitForSingleObject.return_value = self.WAIT_TIMEOUT
+        assert self._run_probe(kernel32, pid=self.PID) is True
+        kernel32.OpenProcess.assert_called_once_with(self.SYNCHRONIZE, False, self.PID)
+        kernel32.WaitForSingleObject.assert_called_once_with(handle, 0)
+        kernel32.CloseHandle.assert_called_once_with(handle)
+
+    def test_null_handle_means_dead_without_close(self):
+        """OpenProcess 返回 NULL(restype=c_void_p 时为 None)视为不存在, 不关闭句柄。"""
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = None
+        assert self._run_probe(kernel32) is False
+        kernel32.WaitForSingleObject.assert_not_called()
+        kernel32.CloseHandle.assert_not_called()
+
+    def test_wait_object_zero_means_dead_and_handle_closed(self):
+        """WaitForSingleObject 返回 WAIT_OBJECT_0 视为已退出, 且句柄仍被关闭。"""
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = 0x1234
+        kernel32.WaitForSingleObject.return_value = self.WAIT_OBJECT_0
+        assert self._run_probe(kernel32) is False
+        kernel32.CloseHandle.assert_called_once_with(0x1234)
+
+
+# --------------------------------------------------------------------------- #
 # POSIX 进程组终止测试
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX only")

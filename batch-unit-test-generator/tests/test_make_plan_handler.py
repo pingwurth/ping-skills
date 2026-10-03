@@ -11,8 +11,9 @@ import pytest
 
 from jaut import config, decisions
 from jaut.cli import StepError
-from jaut.models import (ClassCoverage, Decision, MethodCoverage, MethodKey,
-                         MethodStatus, Route, State, TestOutcome)
+from jaut.models import (MANUAL_SKIP_REASON, ClassCoverage, Decision, MethodCoverage,
+                         MethodKey, MethodStatus, Route, SKIP_SOURCE_MANUAL, State,
+                         TestOutcome)
 from scripts.make_plan import handler
 
 
@@ -293,6 +294,11 @@ def test_handler_skip_current_marks_skipped_and_advances(tmp_path):
         handler(_make_args(str(tmp_path), skip_current=True))
 
     assert low.status == MethodStatus.SKIPPED
+    # 手动跳过写 skip_reason + skip_source=manual: 与自动跳过一样可被 --unskip 恢复、
+    # 一样列入报告, 但不得被"按原因非空判定自动跳过"的下游误计
+    assert low.skip_reason == MANUAL_SKIP_REASON
+    assert low.skip_source == SKIP_SOURCE_MANUAL
+    assert low.is_auto_skipped is False
     assert state.current_method == high.key   # 推进到下一个未达标方法
     assert state.iteration == 0               # 切换方法时轮次清零
     assert state.method_round_bonus == 0     # 单方法窗口复位
@@ -433,6 +439,25 @@ def test_handler_user_decision_flags_are_mutually_exclusive(tmp_path):
     assert "互斥" in exc_info.value.decision.summary
 
 
+def test_handler_explicit_empty_unskip_is_treated_as_given(tmp_path):
+    """--unskip "" 显式给出即视为已提供: 与 --skip-current 互斥报错, 不得静默忽略。
+
+    反例(修复前): args.unskip 按真值判定, 空串被当作未提供, --skip-current
+    照常落地而 --unskip 被静默吞掉。
+    """
+    low = _make_method("low", covered=5, missed=5)
+    state = State(project_root=str(tmp_path), target_class="com.example.MyService",
+                  methods=[low], current_method=low.key,
+                  plan={"target_class": "com.example.MyService", "methods": []})
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        with pytest.raises(StepError) as exc_info:
+            handler(_make_args(str(tmp_path), skip_current=True, unskip=""))
+
+    assert "互斥" in exc_info.value.decision.summary
+    assert low.status == MethodStatus.PENDING  # 未落地任何决策
+
+
 def test_handler_method_group_keeps_auto_skipped_methods_terminal(tmp_path):
     """方法组过滤: 带 skip_reason 的自动跳过方法不被 --method-group 复活。"""
     auto = _make_method("autoSkipped")
@@ -457,6 +482,42 @@ def test_handler_method_group_keeps_auto_skipped_methods_terminal(tmp_path):
     assert in_group.status == MethodStatus.PENDING    # 组内无原因跳过 -> 复活
     assert outside.status == MethodStatus.SKIPPED     # 组外 pending -> 本轮跳过
     assert outside.skip_reason is None
+
+
+def test_handler_manual_skip_carries_reason_and_source(tmp_path):
+    """--skip-current: 手动跳过写 skip_reason + skip_source=manual, 与自动跳过可区分。
+
+    契约(state.schema/models): 两类终态跳过都带原因(都可被 --unskip 恢复、都进报告),
+    但手动跳过不属于"自动跳过"口径——下游按原因非空判定自动跳过会把手动跳过误计
+    (批量报告"总自动跳过方法数"), 故须单独标注来源。
+    """
+    low = _make_method("low", covered=5, missed=5)
+    state = State(project_root=str(tmp_path), target_class="com.example.MyService",
+                  methods=[low], current_method=low.key,
+                  plan={"target_class": "com.example.MyService", "threshold": 80.0,
+                        "methods": []})
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        handler(_make_args(str(tmp_path), skip_current=True))
+
+    assert low.status == MethodStatus.SKIPPED
+    assert low.skip_reason == MANUAL_SKIP_REASON
+    assert low.skip_source == SKIP_SOURCE_MANUAL
+    assert low.is_auto_skipped is False
+
+
+def test_handler_unskip_clears_manual_skip_source(tmp_path):
+    """--unskip 恢复手动跳过的方法: 状态/原因/来源一并清空, 不残留 manual 标记。"""
+    method = _skipped_method("doStuff", reason=MANUAL_SKIP_REASON)
+    method.skip_source = SKIP_SOURCE_MANUAL
+    state = _batch_state([method])
+
+    with patch("scripts.make_plan.setup_logger"), _patched_store(state):
+        handler(_make_args(str(tmp_path), unskip="doStuff"))
+
+    assert method.status == MethodStatus.PENDING
+    assert method.skip_reason is None
+    assert method.skip_source is None
 
 
 # --------------------------------------------------------------------------- #
@@ -554,6 +615,7 @@ def test_handler_unskip_switches_cursor_to_revived_method(tmp_path):
     ("doneMethod", "只有被跳过的方法才能恢复"),
     ("outOfScope", "无跳过原因"),
     (" , ", "需要方法名列表"),
+    ("", "需要方法名列表"),  # 显式空串(falsy)也必须进入 _unskip 的列表校验
 ])
 def test_handler_unskip_rejects_invalid_targets(tmp_path, names, match):
     """--unskip 非法目标(不存在/非 skipped/无跳过原因/空列表): 状态错误。"""

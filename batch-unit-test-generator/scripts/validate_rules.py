@@ -18,7 +18,8 @@
 
 输入:
     --workdir 或 --project-root 定位 workdir; --test-file 可显式指定测试文件(优先于 state)。
-    读取 <workdir>/state.json 取 test_class_file / project_root / git_baseline。
+    读取 <workdir>/state.json 取 test_class_file / project_root / git_baseline /
+    git_main_source_files(init 时已存在文件快照, 删除检测依据)。
 
 输出(NEXT_STEP):
     全部通过 -> run_script verify_coverage.py(success, exit 0);
@@ -42,7 +43,8 @@ import _path_setup  # noqa: F401  — 初始化 sys.path 以导入 jaut 包
 from jaut import config, javasrc, prompt, rules  # noqa: E402
 from jaut.cli import EmitContext, StepError, add_common_args, require_workdir, run_cli  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import Decision, MethodStatus, Route, State  # noqa: E402
+from jaut.models import (Decision, MethodStatus, Route, SKIP_SOURCE_AUTO,  # noqa: E402
+                         State)
 from jaut.state import StateStore  # noqa: E402
 
 SCRIPT_NAME = "validate_rules"
@@ -104,7 +106,8 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         ctx = rules.RuleContext(
             stripped_source=javasrc.strip_comments_and_strings(content),
             project_root=project_root,
-            git_baseline=state.git_baseline if state else {})
+            git_baseline=state.git_baseline if state else {},
+            git_main_source_files=set(state.git_main_source_files) if state else set())
         violations = rules.run_hard_rules(ctx)
         logger.info(f"校验 {test_file}: 违规 {len(violations)} 处")
 
@@ -145,13 +148,15 @@ def _bump_fail_streak(state: State | None, store: StateStore) -> int:
 
 
 def _auto_skip_validate(streak: int, rules_file: str,
-                        workdir: Path, state: State | None,
+                        workdir: Path, state: State,
                         store: StateStore,
                         violations: list | None = None) -> tuple[Decision, EmitContext]:
     """连续违规达上限: 自动跳过当前方法(SKILL.md §6, 规范修复循环同样有预算)。
 
     直接把当前方法标记为 skipped 并写入 skip_reason, 回 make_plan 推进下一方法;
     无剩余 pending 方法时由 decide_after_plan 输出类内完成报告收尾。
+    仅由 _bump_fail_streak 达上限的路径调用, 因此 state 必非 None 且连续违规
+    计数已由其复位为 0(跳过后全新窗口); 本函数只落地跳过并落盘, 不重复清零。
     state 中无法定位 current_method 对应条目时抛 state_error(exit 3): 假报"已跳过"
     会让 make_plan 再次拿到同一方法, 规范修复循环失去上界。
     """
@@ -161,7 +166,7 @@ def _auto_skip_validate(streak: int, rules_file: str,
     reason = (f"连续 {streak} 轮规范校验未通过(测试类文件"
               f"{'未创建' if violations is None else '存在违规'}), 自动跳过")
     entry = (state.find_method(state.current_method)
-             if state is not None and state.current_method is not None else None)
+             if state.current_method is not None else None)
     if entry is None:
         raise StepError.state_error(
             f"规范校验连续 {streak} 轮未通过, 需自动跳过当前方法, 但 state 中"
@@ -170,7 +175,7 @@ def _auto_skip_validate(streak: int, rules_file: str,
                      "请检查状态与协议后重试")
     entry.status = MethodStatus.SKIPPED
     entry.skip_reason = reason
-    state.validate_fail_streak = 0
+    entry.skip_source = SKIP_SOURCE_AUTO
     store.save(state)
     decision = Decision(
         status="success", exit_code=config.EXIT_CONTINUE,

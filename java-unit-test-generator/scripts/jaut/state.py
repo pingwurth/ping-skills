@@ -25,6 +25,9 @@ if sys.platform == "win32":
 
     def _unlock_file(fp) -> None:
         msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+
+    def _try_lock_file(fp) -> None:
+        msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
 else:
     import fcntl
 
@@ -33,6 +36,26 @@ else:
 
     def _unlock_file(fp) -> None:
         fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+
+    def _try_lock_file(fp) -> None:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _lock_held(lock_path: Path) -> bool:
+    """非阻塞探测锁文件当前是否被进程持有(仅供陈旧锁诊断, 探测后立即释放)。"""
+    try:
+        fp = open(lock_path, "a", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        try:
+            _try_lock_file(fp)
+        except OSError:
+            return True  # 未能立即获锁, 说明锁已被其他进程持有
+        _unlock_file(fp)
+        return False
+    finally:
+        fp.close()
 
 
 def default_workdir(project_root: str | Path) -> Path:
@@ -99,20 +122,23 @@ class StateStore:
 
         锁文件常驻不删: unlock 后 unlink 与后来者 open 新 inode 存在竞态
         (旧 inode 上阻塞的等待方与新 inode 上立即获锁的后来者会同时"持锁"),
-        会破坏互斥; 残留锁由 24 小时未更新检测兜底(获锁时刷新 mtime)。
+        会破坏互斥; 常驻锁空闲属正常设计, 仅当超 24 小时未刷新且仍被进程
+        持有时提示疑似挂起(获锁时刷新 mtime)。
         """
         lock_path = self.path.with_name(config.STATE_FILENAME + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 检测残留锁文件(超过 24 小时未更新; 锁文件常驻属正常设计)
+        # 陈旧锁提示: 常驻锁文件空闲(mtime 变旧)属正常设计, 不告警; 仅当超过
+        # 24 小时未刷新且仍被进程持有时提示疑似挂起(删除锁文件无法释放 flock,
+        # 且会重新引入 inode 竞态, 消息中不再建议手动删除)。
         if lock_path.exists():
             try:
                 import time
                 lock_age = time.time() - lock_path.stat().st_mtime
-                if lock_age > 24 * 3600:  # 24 小时
+                if lock_age > 24 * 3600 and _lock_held(lock_path):  # 24 小时
                     module_logger().warning(
-                        f"检测到 24 小时未更新的锁文件 {lock_path} (可能为异常残留, "
-                        f"如果确认没有其他进程在运行, 可手动删除该文件)"
+                        f"锁文件 {lock_path} 超过 24 小时未刷新且仍被进程持有 "
+                        f"(疑似挂起进程); 锁会在持锁进程退出后自动释放, 本进程将等待获锁"
                     )
             except (OSError, ImportError):
                 pass
@@ -120,7 +146,7 @@ class StateStore:
         fp = open(lock_path, "a", encoding="utf-8")
         try:
             _lock_file(fp)
-            # 获锁后刷新 mtime: 残留检测以"最近一次获锁时间"为准
+            # 获锁后刷新 mtime: 陈旧提示以"最近一次获锁时间"为准
             try:
                 os.utime(lock_path)
             except OSError:

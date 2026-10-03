@@ -11,7 +11,7 @@ import pytest
 from jaut import config
 from jaut.cli import StepError
 from jaut.models import (Decision, ClassCoverage, MethodCoverage, MethodKey,
-                         MethodStatus, Route, State, TestResult)
+                         MethodStatus, Route, SKIP_SOURCE_AUTO, State, TestResult)
 from scripts.verify_coverage import handler
 
 
@@ -407,6 +407,7 @@ def test_handler_class_budget_exhausted_skips_all_pending_without_mvn(tmp_path):
     for m in state.methods:
         assert m.status == MethodStatus.SKIPPED
         assert "类级预算耗尽" in m.skip_reason
+        assert m.skip_source == SKIP_SOURCE_AUTO   # 自动跳过须标注来源, 不误计为手动
 
 
 def test_handler_exploration_mode_doubles_class_budget(tmp_path):
@@ -481,5 +482,6 @@ def test_handler_auto_skip_marks_method_skipped_with_reason(tmp_path):
     assert decision.route == Route.MAKE_PLAN
     assert state.methods[0].status == MethodStatus.SKIPPED
     assert state.methods[0].skip_reason == "单方法迭代已达上限 8 轮仍未达标(当前 50.0%)"
+    assert state.methods[0].skip_source == SKIP_SOURCE_AUTO   # 自动跳过来源标注
     assert state.methods[1].status == MethodStatus.PENDING
     assert state.validate_fail_streak == 0

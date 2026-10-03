@@ -33,7 +33,8 @@ from jaut import config, decisions  # noqa: E402
 from jaut.cli import EmitContext, StepError, run_cli  # noqa: E402
 from jaut.lockutil import batch_lock  # noqa: E402
 from jaut.logutil import setup_logger  # noqa: E402
-from jaut.models import BatchState, Decision, MethodStatus, ResumeOption, Route  # noqa: E402
+from jaut.models import (BatchClassEntry, BatchState, Decision, MethodStatus,  # noqa: E402
+                         ResumeOption, Route)
 from jaut.state import (StateStore, default_workdir, load_batch_state,  # noqa: E402
                         save_batch_state)
 
@@ -234,18 +235,19 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
 
 
 def _auto_skipped_count(class_state) -> int:
-    """类内被自动跳过(带 skip_reason 的终态跳过)的方法数。
+    """类内被脚本自动跳过(skip_source=auto)的方法数。
 
     统计口径与 make_plan --unskip 的复活口径互补: 组过滤跳过(无 skip_reason)
-    不计入; 自动跳过(预算耗尽/连续失败/无提升/规范违规等)计入。落账时写入
+    不计入; 用户 --skip-current 手动跳过(skip_source=manual)也不计入——手动跳过
+    同样写入 skip_reason(可被 --unskip 恢复、同样列入报告), 但不属于"自动跳过"
+    口径, 误计会让报告把手动跳过算成预算耗尽/不收敛降级。落账时写入
     entry.escalations(历史字段名, 升级穿透移除后语义改为本计数), 供最终报告
     汇总"总自动跳过方法数"。
     """
-    return sum(1 for m in class_state.methods
-               if m.status == MethodStatus.SKIPPED and m.skip_reason)
+    return sum(1 for m in class_state.methods if m.is_auto_skipped)
 
 
-def _remaining_groups_have_work(entry: "BatchClassEntry", class_state) -> bool:
+def _remaining_groups_have_work(entry: BatchClassEntry, class_state) -> bool:
     """剩余方法组是否仍有可调度方法(决定是否推进组/继续委派)。
 
     - 类级预算已耗尽: make_plan --method-group 复活的组内方法会被

@@ -5,13 +5,17 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from jaut import config
 from jaut.models import (
+    MANUAL_SKIP_REASON,
     ClassCoverage,
     MethodCoverage,
     MethodKey,
     MethodStatus,
+    SKIP_SOURCE_AUTO,
+    SKIP_SOURCE_MANUAL,
     State,
     TestOutcome,
 )
@@ -71,6 +75,47 @@ def test_state_round_trip_skip_reason():
     assert restored.methods[1].skip_reason is None
 
 
+def test_state_round_trip_skip_source():
+    """跳过来源序列化往返: 手动/自动可区分, 未跳过的方法不写出该字段。"""
+    s = _sample_state()
+    untouched = MethodCoverage(key=MethodKey("bar", "(int)"), covered=5, missed=5)
+    s.methods = [s.methods[0], untouched]
+    s.methods[0].status = MethodStatus.SKIPPED
+    s.methods[0].skip_reason = MANUAL_SKIP_REASON
+    s.methods[0].skip_source = SKIP_SOURCE_MANUAL
+    data = s.to_dict()
+    assert data["methods"][0]["skip_source"] == "manual"
+    assert "skip_source" not in data["methods"][1]
+
+    restored = State.from_dict(data)
+    assert restored.methods[0].skip_source == SKIP_SOURCE_MANUAL
+    assert restored.methods[0].is_auto_skipped is False   # 手动跳过不计自动跳过
+    assert restored.methods[1].skip_source is None
+
+
+def test_from_dict_migrates_legacy_skip_source():
+    """旧 state.json 只写 skip_reason: 按原因迁移来源, 手动/自动仍可区分。
+
+    旧版本手动跳过(skip_reason=MANUAL_SKIP_REASON)与自动跳过共用 skip_reason 一个字段,
+    迁移后前者标 manual, 后者标 auto, 下游不再把手动跳过当自动跳过处理。
+    """
+    def _legacy(name, status="skipped", **extra):
+        return {"name": name, "desc": "()V", "covered": 0, "missed": 10,
+                "status": status, **extra}
+
+    manual = MethodCoverage.from_dict(_legacy("m1", skip_reason=MANUAL_SKIP_REASON))
+    auto = MethodCoverage.from_dict(
+        _legacy("m2", skip_reason="单方法迭代已达上限 8 轮仍未达标(当前 50.0%)"))
+    out_of_scope = MethodCoverage.from_dict(_legacy("m3"))
+    assert manual.skip_source == SKIP_SOURCE_MANUAL and manual.is_auto_skipped is False
+    assert auto.skip_source == SKIP_SOURCE_AUTO and auto.is_auto_skipped is True
+    assert out_of_scope.skip_source is None    # 范围外过滤跳过: 无原因也无来源
+    # 显式 skip_source 优先于按原因推断
+    explicit = MethodCoverage.from_dict(
+        _legacy("m4", skip_reason=MANUAL_SKIP_REASON, skip_source=SKIP_SOURCE_AUTO))
+    assert explicit.skip_source == SKIP_SOURCE_AUTO
+
+
 def test_from_dict_budget_window_fields_default_zero():
     """旧版本 state.json 无这些字段时默认 0(兼容断点续跑)。"""
     s = State.from_dict({"project_root": "/r", "target_class": "com.x.Foo"})
@@ -103,6 +148,18 @@ def test_coverage_excludes_round_trip():
     d = s.to_dict()
     assert d["coverage_excludes"] == ["com.foo.dto.*", "*$Builder"]
     assert State.from_dict(d).coverage_excludes == ["com.foo.dto.*", "*$Builder"]
+
+
+def test_state_round_trip_git_main_source_files():
+    """删除检测快照序列化往返; 为空时不写出该字段, 旧 state.json 读取为空列表。"""
+    s = _sample_state()
+    s.git_main_source_files = ["src/main/java/com/x/A.java", "src/main/java/com/x/B.java"]
+    d = s.to_dict()
+    assert d["git_main_source_files"] == s.git_main_source_files
+    assert State.from_dict(d).git_main_source_files == s.git_main_source_files
+    empty = State(project_root="/r", target_class="c").to_dict()
+    assert "git_main_source_files" not in empty
+    assert State.from_dict({"project_root": "/r", "target_class": "c"}).git_main_source_files == []
 
 
 def test_state_round_trip_finish_report_fields():
@@ -186,3 +243,54 @@ def test_locked_refreshes_stale_lock_mtime(tmp_path: Path):
     os.utime(lock_file, (stale, stale))
     with store.locked():
         assert lock_file.stat().st_mtime > stale
+
+
+@patch("jaut.state.module_logger")
+def test_locked_stale_idle_lock_no_warning(mock_logger, tmp_path: Path):
+    """空闲留存的锁文件(>24 小时未刷新但无人持有)属正常设计, 不产生告警。"""
+    store = StateStore(tmp_path)
+    lock_file = tmp_path / (config.STATE_FILENAME + ".lock")
+    lock_file.write_text("", encoding="utf-8")
+    stale = time.time() - 2 * 86400
+    os.utime(lock_file, (stale, stale))
+
+    with store.locked():
+        pass
+
+    mock_logger().warning.assert_not_called()
+
+
+@patch("jaut.state.module_logger")
+@patch("jaut.state._lock_held", return_value=True)
+def test_locked_stale_held_lock_warns_without_delete_hint(mock_held, mock_logger, tmp_path: Path):
+    """锁 >24 小时未刷新且仍被持有 => 提示疑似挂起, 不再建议手动删除锁文件。"""
+    store = StateStore(tmp_path)
+    lock_file = tmp_path / (config.STATE_FILENAME + ".lock")
+    lock_file.write_text("", encoding="utf-8")
+    stale = time.time() - 2 * 86400
+    os.utime(lock_file, (stale, stale))
+
+    with store.locked():
+        pass
+
+    mock_held.assert_called_once()
+    msg = mock_logger().warning.call_args[0][0]
+    assert "24 小时" in msg and "删除" not in msg
+
+
+def test_lock_held_probe_tracks_real_lock(tmp_path: Path):
+    """_lock_held 非阻塞探测真实持锁状态, 且探测后立即释放不残留持锁。"""
+    from jaut.state import _lock_file, _lock_held, _unlock_file
+
+    lock_file = tmp_path / (config.STATE_FILENAME + ".lock")
+    lock_file.write_text("", encoding="utf-8")
+    assert _lock_held(lock_file) is False
+
+    holder = open(lock_file, "a", encoding="utf-8")
+    try:
+        _lock_file(holder)
+        assert _lock_held(lock_file) is True
+    finally:
+        _unlock_file(holder)
+        holder.close()
+    assert _lock_held(lock_file) is False
