@@ -7,16 +7,19 @@ description: 审查代码库里已有的埋点（analytics tracking / 数据上�
 
 本 skill 把一个代码库的埋点实现从「整体摸清」推进到「逐条确认真上报了什么」。核心思路：先用 LLM 做静态分析摸清埋点开发范式与调用链路并产出结构化 `sensors.json`，再用确定性的 Python 脚本做"提取入口 → 定位调用点 → 校验"这种机器擅长的活，把"逐条追踪字段取值"这种需要语义理解的活交还给 LLM。这样把人和模型各自擅长的环节分开，每一步都有可复核的中间产物，避免 LLM 一次性分析整个仓库时遗漏或臆造。
 
-## 产物文件（统一放在一个工作目录，默认代码库根或指定目录）
+## 产物文件（统一放在 `<工作目录>/.agent/sensors-analyze/` 下）
+
+工作目录默认是目标代码库根（即运行脚本的目录）。全部中间产物、报告、日志（`<out>.log`）与归档都收在该目录里，不散落在仓库根。各脚本 `--sensors / --entry / --out / --csv / --sites` 的默认值均已指向该目录，在 `<工作目录>` 下运行即可；下文命令写全路径仅为直观。
 
 | 文件 | 由谁产生 | 作用 |
 |---|---|---|
-| `sensors.json` | 第 1 步 LLM | 埋点范式 / 调用链路 / SDK API 总览（必须符合 `sensors.schema.json`） |
-| `entry.txt` | 第 2 步脚本生成候选 → 人工复核定稿 | 每行一个正则，供第 3 步定位调用点 |
-| `call_sites.json` | 第 3 步脚本 | 所有埋点调用点 `{file:start-end}` + 片段 |
-| `sensors.csv` | 第 4 步 LLM 逐条追加 | 最终上报字段记录 |
-| `check_report.txt` | 第 5 步脚本 | 一致性与非空校验报告 |
-| `review_report.txt` | 第 5.5 步脚本 | 预审报告（结构校验 + 字面量比对） |
+| `.agent/sensors-analyze/sensors.json` | 第 1 步 LLM | 埋点范式 / 调用链路 / SDK API 总览（必须符合 `sensors.schema.json`） |
+| `.agent/sensors-analyze/entry.txt` | 第 2 步脚本生成候选 → 人工复核定稿 | 每行一个正则，供第 3 步定位调用点 |
+| `.agent/sensors-analyze/call_sites.json` | 第 3 步脚本 | 所有埋点调用点 `{file:start-end}` + 片段 |
+| `.agent/sensors-analyze/sensors.csv` | 第 4 步 LLM 逐条追加 | 最终上报字段记录 |
+| `.agent/sensors-analyze/check_report.txt` | 第 5 步脚本 | 一致性与非空校验报告 |
+| `.agent/sensors-analyze/resolution_report.csv` | 第 5 步脚本 | 空字段追踪清单（WARN 时人工复核用） |
+| `.agent/sensors-analyze/review_report.txt` | 第 5.5 步脚本 | 预审报告（结构校验 + 字面量比对） |
 | `.agent/sensors-analyze/reports/sensors_*.csv` | 第 6 步脚本归档 | 带时间戳的 CSV 归档版本 |
 | `.agent/sensors-analyze/reports/diff_report.txt` | 第 6 步脚本生成 | 版本差异报告（增删改） |
 
@@ -43,7 +46,7 @@ page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,i
 
 ## 第 1 步：LLM 静态分析 → 生成 sensors.json
 
-目标：摸清代码库里**每一种埋点开发范式**。同一种 SDK 可能被多种范式使用（比如既有 `v-track` 指令又有直接 `sensors.track` 调用），要分别列为不同 paradigm。
+目标：摸清代码库里**每一种埋点开发范式**。同一种 SDK 可能被多种范式使用（比如既有 `v-track` 指令又有直接 `sensors.track` 调用），要分别列为不同 paradigm。产出写入 `.agent/sensors-analyze/sensors.json`（目录不存在则先创建）。
 
 ### 必须覆盖的内容（schema 要求）
 - `meta`：`project_path`、`language`、`analyzed_at`（ISO 8601）、`sdk_summary`、`global_sdk_apis`（全库去重的 SDK API 汇总）。
@@ -67,7 +70,7 @@ page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,i
 
 ### 校验
 ```bash
-python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('sensors.json')),json.load(open('sensors.schema.json'))); print('schema OK')"
+python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('.agent/sensors-analyze/sensors.json')),json.load(open('sensors.schema.json'))); print('schema OK')"
 ```
 `extract_entries.py` 在加载 `sensors.json` 时也会自动用 `sensors.schema.json` 校验，schema 不符会直接报错中止。建议先单独跑上面这行确认 schema 通过，再进入第 2 步。进入第 2 步前，确认范式枚举完整（同库通常 1~4 种）。
 
@@ -88,7 +91,7 @@ Step 1 容易漏掉名字带 "init"/"config"/"setup" 的函数（如 `sensorsdat
 ## 第 2 步：提取入口函数候选 → 人工复核 → entry.txt
 
 ```bash
-python3 scripts/extract_entries.py --sensors sensors.json --out entry.txt
+python3 scripts/extract_entries.py --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/entry.txt
 ```
 
 脚本会从 `paradigms[].entry_functions` 提取每个 `grep_pattern`，连同范式名 / kind / 出处位置写成带注释的 `entry.txt`。**这一步必须人工复核**——LLM 写的正则可能漏配或误配（比如把 `trackEvent` 写成了会命中 `trackEventHandler` 的形式，或漏掉了某个范式）。复核规则：
@@ -110,7 +113,7 @@ python3 scripts/extract_entries.py --sensors sensors.json --out entry.txt
 ## 第 3 步：定位所有埋点调用点 → call_sites.json
 
 ```bash
-python3 scripts/locate_call_sites.py --entry entry.txt --root <代码库根> --sensors sensors.json --out call_sites.json
+python3 scripts/locate_call_sites.py --entry .agent/sensors-analyze/entry.txt --root <代码库根> --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/call_sites.json
 ```
 
 脚本优先用 `ripgrep`（无则回退纯 Python）按 `entry.txt` 的正则搜索代码库，对每个命中点：
@@ -135,7 +138,7 @@ python3 scripts/locate_call_sites.py --entry entry.txt --root <代码库根> --s
    - 配置常量 / 路由 meta / 全局注册属性 → 读取常量定义或配置文件，填入具体值。
    - 父组件 prop / 函数参数 / 运行时上下文变量 → **必须反向追踪所有调用者**，确定每个调用者传入的具体值。参见下方「动态引用追踪规则」。
    - 链路中 `drop`（字段未上报）→ CSV 对应格留空，但要在分析说明里写清。
-4. 向 `sensors.csv` **追加**一行（或当同一调用点有多组取值时追加多行）。首次写要先写表头。
+4. 向 `.agent/sensors-analyze/sensors.csv` **追加**一行（或当同一调用点有多组取值时追加多行）。首次写要先写表头。
 
 ### 动态引用追踪规则（核心要求）
 
@@ -178,7 +181,7 @@ page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file
 ## 第 5 步：一致性校验 → check_report.txt
 
 ```bash
-python3 scripts/check_report.py --sites call_sites.json --csv sensors.csv --out check_report.txt
+python3 scripts/check_report.py --sites .agent/sensors-analyze/call_sites.json --csv .agent/sensors-analyze/sensors.csv --out .agent/sensors-analyze/check_report.txt
 ```
 
 校验分两级：
@@ -187,7 +190,7 @@ python3 scripts/check_report.py --sites call_sites.json --csv sensors.csv --out 
   2. CSV 每行的 `file`（格式 `文件名:start,end`）能在 `call_sites.json` 中找到对应。
   3. **禁止动态占位符**：所有字段值不得包含 `<动态`、`<变量`、`<unknown`、`<dynamic` 等占位标记。发现则判 FAIL。
 - **WARNING（追踪未完成 → WARN）**：
-  4. `page_name / first_biz_id / second_biz_id / first_biz_name / second_biz_name` 五字段为空。第 5 步会自动输出 `resolution_report.csv` 列出所有空字段及其位置，供人工复核。
+  4. `page_name / first_biz_id / second_biz_id / first_biz_name / second_biz_name` 五字段为空。第 5 步会自动输出 `.agent/sensors-analyze/resolution_report.csv` 列出所有空字段及其位置，供人工复核。
 
 报告末尾输出 `PASS`、`WARN` 或 `FAIL`。FAIL 时按提示修正（补写漏掉的 CSV 行、追踪动态引用为具体值、回退第 1/2 步修正范式与正则）后重跑第 5 步。WARN 时查看 `resolution_report.csv`，对未解析字段进行人工补全或确认后重跑。
 
@@ -196,7 +199,7 @@ python3 scripts/check_report.py --sites call_sites.json --csv sensors.csv --out 
 ## 第 5.5 步：脚本预审 → 追加 illegal_reason 列
 
 ```bash
-python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --root <代码库根> --out review_report.txt
+python3 scripts/review_report.py --csv .agent/sensors-analyze/sensors.csv --sites .agent/sensors-analyze/call_sites.json --root <代码库根> --out .agent/sensors-analyze/review_report.txt
 ```
 
 脚本读取 `sensors.csv`，在每行末尾追加 `illegal_reason` 列，并执行以下预审检查：
@@ -212,8 +215,8 @@ python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --roo
 6. **可从字面量推断**：必填字段为空但代码中有明确字面量 → 记录 `"{field}可从代码字面量'{literal}'推断"`
 
 ### 输出
-- 覆写 `sensors.csv`（每行追加 `illegal_reason` 列，多个原因用 `; ` 分隔）
-- 输出 `review_report.txt`（预审摘要：逐行列出问题，附统计）
+- 覆写 `.agent/sensors-analyze/sensors.csv`（每行追加 `illegal_reason` 列，多个原因用 `; ` 分隔）
+- 输出 `.agent/sensors-analyze/review_report.txt`（预审摘要：逐行列出问题，附统计）
 
 退出码：
 - 0 = 无问题（所有 `illegal_reason` 为空）
@@ -236,7 +239,7 @@ python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --roo
    - 若脚本标记"可从代码字面量推断"，读取代码确认具体值后填入。
    - 若确实无法解析（运行时 API、数据库查询、用户输入），保留空值，在 `illegal_reason` 中写明最终原因（如 `"page_name来自路由meta，运行时动态获取"`）。
 4. **清空已解决的原因**：字段经复核确认正确后，清除 `illegal_reason` 中对应的原因项。若所有原因均已解决，清空 `illegal_reason` 为空字符串。
-5. **覆写 `sensors.csv`**。
+5. **覆写 `.agent/sensors-analyze/sensors.csv`**。
 
 **注意**：第 5.6 步是 LLM 操作，不需要运行额外脚本。LLM 直接读取 CSV 和代码，修正后覆写 CSV。
 
@@ -245,7 +248,7 @@ python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --roo
 ## 第 6 步：报告归档与版本比对
 
 ```bash
-python3 scripts/report_manager.py --csv sensors.csv
+python3 scripts/report_manager.py --csv .agent/sensors-analyze/sensors.csv
 ```
 
 脚本执行以下操作：

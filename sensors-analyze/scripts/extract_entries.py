@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from utils import check_rg_available, next_step, setup_logging
+from utils import ARTIFACT_DIR, check_rg_available, next_step, setup_logging
 
 LOG = None
 
@@ -188,8 +188,10 @@ def load_sensors(path: Path) -> dict:
 def main() -> int:
     global LOG
     ap = argparse.ArgumentParser(description="从 sensors.json 提取埋点入口函数候选 -> entry.txt")
-    ap.add_argument("--sensors", default="sensors.json", help="sensors.json 路径（默认当前目录）")
-    ap.add_argument("--out", default="entry.txt", help="输出 entry.txt 路径（默认当前目录）")
+    ap.add_argument("--sensors", default=str(ARTIFACT_DIR / "sensors.json"),
+                    help="sensors.json 路径（默认: .agent/sensors-analyze/sensors.json）")
+    ap.add_argument("--out", default=str(ARTIFACT_DIR / "entry.txt"),
+                    help="输出 entry.txt 路径（默认: .agent/sensors-analyze/entry.txt）")
     ap.add_argument("--log", default=None, help="日志文件路径（默认: <out>.log）")
     ap.add_argument("--audit", action="store_true", help="启用独立审计：扫描代码库查找可能遗漏的入口函数")
     ap.add_argument("--root", default=None, help="审计模式下目标代码库根目录（--audit 时必需）")
@@ -285,6 +287,7 @@ def main() -> int:
                 n += 1
         lines.append("# ---- 复核完成后在此文件任意位置添加 '# CONFIRMED'，然后运行 locate_call_sites.py")
 
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         LOG.info("提取 %d 个候选入口正则，写入 %s", n, out)
 

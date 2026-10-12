@@ -372,8 +372,8 @@ def test_mcp_launch_failed_no_retry(monkeypatch):
     mock_sleep.assert_not_called()
 
 
-def test_mcp_timed_out_no_retry(monkeypatch):
-    """timed_out 立即判定未连接(挂起重试无益), 不重试不 sleep。"""
+def test_mcp_timed_out_treated_as_passed(monkeypatch):
+    """timed_out(mcp list 执行超时)忽略并按检查通过处理: 判已连接, 不重试不 sleep。"""
     monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
     monkeypatch.setattr(sw, "_mcp_cli_name", lambda: "opencode")
     fake = CommandResult(ok=False, returncode=None, timed_out=True)
@@ -381,8 +381,8 @@ def test_mcp_timed_out_no_retry(monkeypatch):
          patch("scripts.select_worktree.time.sleep") as mock_sleep:
         connected, detail = sw._codegraph_mcp_connected()
 
-    assert connected is False
-    assert "超时" in detail
+    assert connected is True
+    assert detail == ""
     mock_run.assert_called_once()
     mock_sleep.assert_not_called()
 

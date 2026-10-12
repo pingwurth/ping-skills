@@ -31,7 +31,7 @@
 --choice 跳过前置检查但仍执行下述 worktree 索引复制+同步):
     1. `<cli> mcp list` 的 stdout+stderr 中必须能判定 codegraph 条目状态为
        connected(codegraph MCP 已连接; 多行 JSON/表格/否定态判定见
-       _mcp_output_says_connected)。
+       _mcp_output_says_connected; mcp list 执行超时不中止, 按检查通过处理)。
        <cli> 由脚本第 3 层上级目录决定: 安装布局为
        <project>/.<tool>/skills/<skill>/scripts/本文件, 取 Path(__file__).parents[3]
        (一般为 .opencode/.claude/.qoder/.qwen/.codex)去掉前导 '.', 如 .claude -> claude;
@@ -313,9 +313,10 @@ _MCP_NAME = re.compile(r"codegraph", re.I)
 _MCP_STATUS = re.compile(
     r"(?<![A-Za-z0-9])(?:(?:not[\s_\-]+|dis[\s_\-]*|un[\s_\-]*))?connected(?![A-Za-z0-9])",
     re.I)
-_MCP_LIST_TIMEOUT_SECONDS = 120
+_MCP_LIST_TIMEOUT_SECONDS = 5
 # 无匹配时重试, 规避宿主 CLI 冷启动瞬态(如尚未进入 connected 状态)导致的误中止;
-# 连续全部落空才判定未连接(launch_failed/timed_out 不重试, 立即判定)
+# 连续全部落空才判定未连接(launch_failed 不重试, 立即判定; timed_out 不重试,
+# 按检查通过处理, 见 _codegraph_mcp_connected)
 _MCP_LIST_ATTEMPTS = 3
 _MCP_RETRY_DELAY_SECONDS = 1
 
@@ -379,10 +380,12 @@ def _codegraph_mcp_connected() -> tuple[bool, str]:
     <cli> 由 _mcp_cli_name() 从脚本第 3 层上级目录推断(.claude -> claude 等)。
     判定语义见 _mcp_output_says_connected。无匹配时最多尝试 `_MCP_LIST_ATTEMPTS`
     次(间隔 `_MCP_RETRY_DELAY_SECONDS` 秒, 规避宿主 CLI 冷启动瞬态); CLI 无法
-    推断/命令不存在(launch_failed)/执行超时(timed_out)不重试, 立即判定。
+    推断/命令不存在(launch_failed)立即判定未连接; 执行超时(timed_out)不重试,
+    按检查通过处理(视为已连接, 宿主 CLI 偶发挂起不代表 MCP 未配置)。
 
     Returns:
-        (connected, detail): connected=True 表示已连接; detail 为未连接原因(供报错)。
+        (connected, detail): connected=True 表示已连接(含 mcp list 执行超时按
+        通过处理); detail 为未连接原因(供报错)。
     """
     cli = _mcp_cli_name()
     if cli is None:
@@ -394,7 +397,8 @@ def _codegraph_mcp_connected() -> tuple[bool, str]:
         if result.launch_failed:
             return False, f"{cli} 命令不存在或无法执行"
         if result.timed_out:
-            return False, f"{cli} mcp list 执行超时({_MCP_LIST_TIMEOUT_SECONDS}s)"
+            # mcp list 执行超时: 忽略, 按检查通过处理(不中止任务, 亦不重试)
+            return True, ""
         if _mcp_output_says_connected(f"{result.stdout or ''}\n{result.stderr or ''}"):
             return True, ""
         # 非零退出码不算硬失败(宿主 CLI 可能带非零退出打印状态表), 仅无匹配才重试

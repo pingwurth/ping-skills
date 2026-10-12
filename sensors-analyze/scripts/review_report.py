@@ -15,9 +15,9 @@
      - 覆写 sensors.csv（带 illegal_reason 列）
      - 输出 review_report.txt（预审摘要）
 
-用法：
-  python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --root <target-codebase>
-  python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --root <target-codebase> --out review_report.txt
+用法（所有产物默认在 .agent/sensors-analyze/ 下）：
+  python3 scripts/review_report.py --root <target-codebase>
+  python3 scripts/review_report.py --csv .agent/sensors-analyze/sensors.csv --sites .agent/sensors-analyze/call_sites.json --root <target-codebase> --out .agent/sensors-analyze/review_report.txt
 
 退出码：
   0 = 无问题（所有 illegal_reason 为空）
@@ -33,7 +33,7 @@ import re
 import sys
 from pathlib import Path
 
-from utils import next_step, setup_logging
+from utils import ARTIFACT_DIR, next_step, setup_logging
 
 LOG = None
 
@@ -70,24 +70,6 @@ _STRING_LITERAL_RE = re.compile(
 
 # 匹配模板字符串中的静态部分（不含 ${} 表达式）
 _TEMPLATE_LITERAL_RE = re.compile(r"`([^`${]*)`")
-
-
-def setup_logging(log_path: Path) -> logging.Logger:
-    """配置日志：所有输出写入 log 文件，stdout 仅保留给 next_step。"""
-    logger = logging.getLogger("review_report")
-    logger.setLevel(logging.DEBUG)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = logging.FileHandler(str(log_path), encoding="utf-8", mode="w")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(fh)
-    sys.stderr = open(str(log_path), "a", encoding="utf-8")
-    return logger
-
-
-def next_step(msg: str) -> None:
-    """脚本结束时调用，唯一向 stdout 输出的内容。"""
-    print(f"next_step: {msg}", flush=True)
 
 
 def parse_file_field(raw: str) -> tuple[str | None, int, int]:
@@ -241,10 +223,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="预审 sensors.csv，添加 illegal_reason 列 -> review_report.txt"
     )
-    ap.add_argument("--csv", default="sensors.csv", help="第 4 步产物（默认: sensors.csv）")
-    ap.add_argument("--sites", default="call_sites.json", help="第 3 步产物（默认: call_sites.json）")
+    ap.add_argument("--csv", default=str(ARTIFACT_DIR / "sensors.csv"),
+                    help="第 4 步产物（默认: .agent/sensors-analyze/sensors.csv）")
+    ap.add_argument("--sites", default=str(ARTIFACT_DIR / "call_sites.json"),
+                    help="第 3 步产物（默认: .agent/sensors-analyze/call_sites.json）")
     ap.add_argument("--root", required=True, help="目标代码库根目录")
-    ap.add_argument("--out", default="review_report.txt", help="预审报告输出（默认: review_report.txt）")
+    ap.add_argument("--out", default=str(ARTIFACT_DIR / "review_report.txt"),
+                    help="预审报告输出（默认: .agent/sensors-analyze/review_report.txt）")
     ap.add_argument("--log", default=None, help="日志文件路径（默认: <out>.log）")
     args = ap.parse_args()
 
@@ -324,6 +309,7 @@ def main() -> int:
         report_lines.append("")
 
         # 写报告
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
         for line in report_lines:
             LOG.info(line)

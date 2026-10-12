@@ -10,7 +10,7 @@ The skill targets six business fields: `page_name`, `first_biz_id`, `second_biz_
 
 ## 5-Step Workflow
 
-The skill follows a deterministic pipeline where LLM and Python each handle what they do best:
+The skill follows a deterministic pipeline where LLM and Python each handle what they do best. All working artifacts live under `<workdir>/.agent/sensors-analyze/` (workdir defaults to the target codebase root; script flag defaults already point there):
 
 1. **LLM** reads the target codebase, identifies tracking paradigms, produces `sensors.json` (must validate against `sensors.schema.json`)
 2. **Script** (`scripts/extract_entries.py`) extracts entry-function regex candidates → `entry.txt` for human review
@@ -24,29 +24,29 @@ The skill follows a deterministic pipeline where LLM and Python each handle what
 
 ```bash
 # Validate sensors.json against schema (do this before step 2)
-python3 -c "import json; d=json.load(open('sensors.json')); json.load(open('sensors.schema.json'))" && echo "OK"
+python3 -c "import json; d=json.load(open('.agent/sensors-analyze/sensors.json')); json.load(open('sensors.schema.json'))" && echo "OK"
 # Or with jsonschema if installed:
-python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('sensors.json')),json.load(open('sensors.schema.json'))); print('schema OK')"
+python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('.agent/sensors-analyze/sensors.json')),json.load(open('sensors.schema.json'))); print('schema OK')"
 
 # Step 2: extract entry candidates (with optional audit)
-python3 scripts/extract_entries.py --sensors sensors.json --out entry.txt
-python3 scripts/extract_entries.py --sensors sensors.json --out entry.txt --audit --root <target-codebase>  # + cross-validation
+python3 scripts/extract_entries.py --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/entry.txt
+python3 scripts/extract_entries.py --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/entry.txt --audit --root <target-codebase>  # + cross-validation
 
 # Step 3: locate all call sites (requires '# CONFIRMED' in entry.txt)
-python3 scripts/locate_call_sites.py --entry entry.txt --root <target-codebase> --sensors sensors.json --out call_sites.json
+python3 scripts/locate_call_sites.py --entry .agent/sensors-analyze/entry.txt --root <target-codebase> --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/call_sites.json
 
 # Step 5: validate results (outputs check_report.txt + resolution_report.csv)
-python3 scripts/check_report.py --sites call_sites.json --csv sensors.csv --out check_report.txt
+python3 scripts/check_report.py --sites .agent/sensors-analyze/call_sites.json --csv .agent/sensors-analyze/sensors.csv --out .agent/sensors-analyze/check_report.txt
 
 # Step 5.5: pre-review CSV, add illegal_reason column
-python3 scripts/review_report.py --csv sensors.csv --sites call_sites.json --root <target-codebase> --out review_report.txt
+python3 scripts/review_report.py --csv .agent/sensors-analyze/sensors.csv --sites .agent/sensors-analyze/call_sites.json --root <target-codebase> --out .agent/sensors-analyze/review_report.txt
 
 # Step 6: archive CSV with timestamp and diff against previous version
-python3 scripts/report_manager.py --csv sensors.csv
-python3 scripts/report_manager.py --csv sensors.csv --diff-only  # compare only, no archive
+python3 scripts/report_manager.py --csv .agent/sensors-analyze/sensors.csv
+python3 scripts/report_manager.py --csv .agent/sensors-analyze/sensors.csv --diff-only  # compare only, no archive
 ```
 
-**Script output**: all scripts write verbose logs to `--log` (default: `<out>.log`). Only a single `next_step: <instruction>` line is printed to stdout — follow it to decide what to do next.
+**Script output**: all scripts write verbose logs to `--log` (default: `<out>.log`, placed next to the output file). Only a single `next_step: <instruction>` line is printed to stdout — follow it to decide what to do next. All artifacts (intermediate files, reports, logs, archives) default to `.agent/sensors-analyze/` under the workdir; run commands from the workdir so the relative defaults resolve there.
 
 Scripts use only stdlib (no third-party dependencies). `locate_call_sites.py` prefers `ripgrep` (rg) but falls back to pure Python grep.
 

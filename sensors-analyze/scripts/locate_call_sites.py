@@ -14,7 +14,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from utils import check_rg_available, next_step, setup_logging
+from utils import ARTIFACT_DIR, check_rg_available, next_step, setup_logging
 
 LOG = None
 
@@ -229,13 +229,16 @@ def build_snippet(lines: list[str], start: int, end: int) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="按 entry.txt 正则定位埋点调用点 -> call_sites.json")
-    ap.add_argument("--entry", default="entry.txt", help="人工复核后的 entry.txt")
+    ap.add_argument("--entry", default=str(ARTIFACT_DIR / "entry.txt"),
+                    help="人工复核后的 entry.txt（默认: .agent/sensors-analyze/entry.txt）")
     ap.add_argument("--root", required=True, help="代码库根目录")
-    ap.add_argument("--out", default="call_sites.json", help="输出文件")
+    ap.add_argument("--out", default=str(ARTIFACT_DIR / "call_sites.json"),
+                    help="输出文件（默认: .agent/sensors-analyze/call_sites.json）")
     ap.add_argument("--exts", default=",".join(sorted(DEFAULT_EXTS)),
                     help="纯 Python 回退模式下的后缀白名单（逗号分隔），rg 模式忽略")
-    ap.add_argument("--sensors", default="sensors.json",
-                    help="sensors.json 路径；用于排除 wrapper/hook 入口自身的定义行（可选）")
+    ap.add_argument("--sensors", default=str(ARTIFACT_DIR / "sensors.json"),
+                    help="sensors.json 路径；用于排除 wrapper/hook 入口自身的定义行"
+                         "（默认: .agent/sensors-analyze/sensors.json）")
     ap.add_argument("--log", default=None, help="日志文件路径（默认: <out>.log）")
     args = ap.parse_args()
 
@@ -323,6 +326,7 @@ def main() -> int:
                 "snippet": v["snippet"],
             })
 
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         n_sites = len(result)
         LOG.info("定位到 %d 处调用点，写入 %s", n_sites, out)

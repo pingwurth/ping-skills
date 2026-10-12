@@ -12,6 +12,10 @@ from pathlib import Path
 # 保存原始 stderr，setup_logging 重定向后仍可通过此变量回退输出
 _ORIGINAL_STDERR = sys.stderr
 
+# 工作产物统一存放目录（相对工作目录，即脚本运行时的 CWD）：
+# sensors.json / entry.txt / call_sites.json / sensors.csv / 各报告与日志默认都落在这里
+ARTIFACT_DIR = Path(".agent/sensors-analyze")
+
 
 def setup_logging(name: str, log_path: Path) -> logging.Logger:
     """配置日志：所有输出写入 log 文件，stdout 仅保留给 next_step。

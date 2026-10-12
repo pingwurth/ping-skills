@@ -6,10 +6,10 @@
   2. 自动查找上一次归档的 CSV，比对差异（增删改）
   3. 输出差异报告供人工复核
 
-用法：
-  python3 scripts/report_manager.py --csv sensors.csv
-  python3 scripts/report_manager.py --csv sensors.csv --reports-dir .agent/sensors-analyze/reports
-  python3 scripts/report_manager.py --csv sensors.csv --diff-only  # 仅比对，不归档
+用法（所有产物默认在 .agent/sensors-analyze/ 下）：
+  python3 scripts/report_manager.py
+  python3 scripts/report_manager.py --reports-dir .agent/sensors-analyze/reports
+  python3 scripts/report_manager.py --diff-only  # 仅比对，不归档
 
 退出码：
   0 = 成功（无差异或首次归档）
@@ -25,7 +25,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from utils import next_step, setup_logging
+from utils import ARTIFACT_DIR, next_step, setup_logging
 
 LOG = None
 
@@ -36,24 +36,6 @@ CSV_HEADER = ["page_name", "first_biz_id", "second_biz_id",
 
 # file 列标识调用点，但同一调用点可产生多行（不同 page_name 等），
 # 因此用全列签名做主键，支持重复行计数比对。
-
-
-def setup_logging(log_path: Path) -> logging.Logger:
-    """配置日志：所有输出写入 log 文件，stdout 仅保留给 next_step。"""
-    logger = logging.getLogger("report_manager")
-    logger.setLevel(logging.DEBUG)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = logging.FileHandler(str(log_path), encoding="utf-8", mode="w")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(fh)
-    sys.stderr = open(str(log_path), "a", encoding="utf-8")
-    return logger
-
-
-def next_step(msg: str) -> None:
-    """脚本结束时调用，唯一向 stdout 输出的内容。"""
-    print(f"next_step: {msg}", flush=True)
 
 
 def generate_timestamped_name(base: str = "sensors") -> str:
@@ -243,7 +225,8 @@ def write_diff_report(diff: dict, out_path: Path) -> list[str]:
 def main() -> int:
     global LOG
     ap = argparse.ArgumentParser(description="CSV 报告管理器：归档 + 版本比对")
-    ap.add_argument("--csv", default="sensors.csv", help="当前 CSV 文件路径")
+    ap.add_argument("--csv", default=str(ARTIFACT_DIR / "sensors.csv"),
+                    help="当前 CSV 文件路径（默认: .agent/sensors-analyze/sensors.csv）")
     ap.add_argument("--reports-dir", default=None,
                     help="报告归档目录（默认: .agent/sensors-analyze/reports/）")
     ap.add_argument("--diff-only", action="store_true",
@@ -262,7 +245,7 @@ def main() -> int:
     if args.reports_dir:
         reports_dir = Path(args.reports_dir)
     else:
-        reports_dir = Path(".agent/sensors-analyze/reports")
+        reports_dir = ARTIFACT_DIR / "reports"
 
     log_path = Path(args.log) if args.log else reports_dir / "report_manager.log"
     LOG = setup_logging("report_manager", log_path)

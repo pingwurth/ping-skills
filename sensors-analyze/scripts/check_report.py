@@ -25,7 +25,7 @@ import re
 import sys
 from pathlib import Path
 
-from utils import next_step, setup_logging
+from utils import ARTIFACT_DIR, next_step, setup_logging
 
 LOG = None  # main() 中由 setup_logging 初始化
 
@@ -47,9 +47,12 @@ _DYNAMIC_PLACEHOLDER_RE = re.compile(r'<\s*(?:动态|变量|unknown|dynamic|未�
 def main() -> int:
     global LOG
     ap = argparse.ArgumentParser(description="校验调用点与上报字段一致性 -> check_report.txt")
-    ap.add_argument("--sites", default="call_sites.json", help="第 3 步产物")
-    ap.add_argument("--csv", default="sensors.csv", help="第 4 步产物")
-    ap.add_argument("--out", default="check_report.txt", help="校验报告输出")
+    ap.add_argument("--sites", default=str(ARTIFACT_DIR / "call_sites.json"),
+                    help="第 3 步产物（默认: .agent/sensors-analyze/call_sites.json）")
+    ap.add_argument("--csv", default=str(ARTIFACT_DIR / "sensors.csv"),
+                    help="第 4 步产物（默认: .agent/sensors-analyze/sensors.csv）")
+    ap.add_argument("--out", default=str(ARTIFACT_DIR / "check_report.txt"),
+                    help="校验报告输出（默认: .agent/sensors-analyze/check_report.txt）")
     ap.add_argument("--resolution-report", default=None,
                     help="字段追踪报告输出（默认: 与 --out 同目录的 resolution_report.csv）")
     ap.add_argument("--log", default=None, help="日志文件路径（默认: <out>.log）")
@@ -196,6 +199,7 @@ def main() -> int:
 
         report_lines.append("")
 
+        out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
         for line in report_lines:
             LOG.info(line)
