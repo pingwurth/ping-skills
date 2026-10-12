@@ -313,7 +313,7 @@ _MCP_NAME = re.compile(r"codegraph", re.I)
 _MCP_STATUS = re.compile(
     r"(?<![A-Za-z0-9])(?:(?:not[\s_\-]+|dis[\s_\-]*|un[\s_\-]*))?connected(?![A-Za-z0-9])",
     re.I)
-_MCP_LIST_TIMEOUT_SECONDS = 5
+_MCP_LIST_TIMEOUT_SECONDS = 120
 # 无匹配时重试, 规避宿主 CLI 冷启动瞬态(如尚未进入 connected 状态)导致的误中止;
 # 连续全部落空才判定未连接(launch_failed/timed_out 不重试, 立即判定)
 _MCP_LIST_ATTEMPTS = 3
