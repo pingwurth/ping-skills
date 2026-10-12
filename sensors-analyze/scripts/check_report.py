@@ -4,7 +4,8 @@
 校验规则：
   ERROR（导致 FAIL）：
     1. CSV 数据行数 < len(call_sites)（遗漏调用点）
-    2. CSV 每行的 file（格式 文件名:start,end）必须能在 call_sites.json 中找到对应
+    2. CSV 每行的 file（格式 文件名:start,end）必须能在 call_sites.json 中找到对应；
+       反向亦然——每个调用点必须至少被一行 CSV 覆盖（防止重复行凑数绕过行数检查）
     3. 所有字段值不得包含动态占位符（如 <动态:...>、<变量:...>、<unknown> 等）
   WARNING（不影响 PASS/FAIL，报告中列出）：
     4. page_name / first_biz_id / second_biz_id / first_biz_name / second_biz_name 五字段为空
@@ -40,8 +41,19 @@ CSV_HEADER_WITH_REASON = CSV_HEADER + ["illegal_reason"]
 # 解析 file 字段：格式为 "文件名:start,end"
 _FILE_LOC_RE = re.compile(r'^(.+):(\d+),(\d+)$')
 
-# 动态占位符检测：匹配 <动态:...>、<变量:...>、<unknown>、<dynamic:...> 等
-_DYNAMIC_PLACEHOLDER_RE = re.compile(r'<\s*(?:动态|变量|unknown|dynamic|未确定)\s*[:>]', re.IGNORECASE)
+# 动态占位符检测（三种形式）：
+#  1. 尖括号占位：<动态:xxx>、<变量>、<unknown>、<待定>、<runtime>、<placeholder> 等
+#  2. 模板插值：{{page_name}}、{biz_id}——字段值里不应残留插值表达式
+#  3. 整值占位：字段值整个就是 TODO / TBD / N/A / 待定 之类（见 _EXACT_PLACEHOLDER_VALUES）
+_DYNAMIC_PLACEHOLDER_RE = re.compile(
+    r'<\s*(?:动态|变量|待定|暂定|占位|未知|unknown|dynamic|runtime|placeholder|未确定|undefined)\s*[:>]',
+    re.IGNORECASE,
+)
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r'\{+\s*\w+\s*\}+')
+_EXACT_PLACEHOLDER_VALUES = {
+    "todo", "tbd", "fixme", "n/a", "null", "none", "nil",
+    "unknown", "undefined", "?", "-", "待定", "暂定", "占位", "未知",
+}
 
 
 def main() -> int:
@@ -85,19 +97,26 @@ def main() -> int:
         site_keys = {(s["file"], s["start_line"], s["end_line"]) for s in sites}
 
         rows: list[dict] = []
+        header_fields: list[str] = []
+        missing_cols: set[str] = set()
         with csv_path.open(encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
+            header_fields = list(reader.fieldnames or [])
             # 检查必需列是否存在（顺序无关，允许多余列）
-            actual_cols = set(reader.fieldnames or [])
-            required_cols = set(CSV_HEADER)
-            missing = required_cols - actual_cols
-            if missing:
-                LOG.warning("CSV 表头缺少必需列: %s（实际表头: %s）", missing, reader.fieldnames)
+            missing_cols = set(CSV_HEADER) - set(header_fields)
             rows = list(reader)
 
         errors: list[str] = []
         warnings: list[str] = []
         resolution_rows: list[dict] = []  # 用于 resolution_report.csv
+
+        # 表头缺列是结构性错误（第 4 步生成的 CSV 表头有误）：直接报 ERROR
+        # 指向根因，而不是让下面逐行循环对缺失列刷 N 条"字段为空"的噪音
+        if missing_cols:
+            errors.append(
+                f"CSV 表头缺少必需列 {sorted(missing_cols)}（实际表头: {header_fields}），"
+                f"第 4 步生成的 CSV 表头有误，请修正后重跑"
+            )
 
         # 规则 1（ERROR）：记录数充足（CSV 行数 >= 调用点数）
         if len(rows) < len(sites):
@@ -109,9 +128,12 @@ def main() -> int:
         # 规则 2/3/4：逐行校验
         orphan_rows: list[str] = []
         placeholder_fields: list[str] = []
+        covered_sites: set[tuple[str, int, int]] = set()
         for idx, row in enumerate(rows, 1):
-            # 规则 4（WARNING）：required 字段为空
+            # 规则 4（WARNING）：required 字段为空（缺列的跳过——根因已在表头 ERROR 报出）
             for col in REQUIRED_NONEMPTY:
+                if col in missing_cols:
+                    continue
                 val = (row.get(col) or "").strip()
                 if not val:
                     warnings.append(f"第{idx}行 {col} 为空")
@@ -127,8 +149,14 @@ def main() -> int:
                     resolution_rows.append(resolution_row)
             # 规则 3（ERROR）：检测所有字段（含 event）中的动态占位符
             for col in ALL_CHECK_FIELDS:
+                if col in missing_cols:
+                    continue
                 val = (row.get(col) or "").strip()
-                if val and _DYNAMIC_PLACEHOLDER_RE.search(val):
+                if not val:
+                    continue
+                if (_DYNAMIC_PLACEHOLDER_RE.search(val)
+                        or _TEMPLATE_PLACEHOLDER_RE.search(val)
+                        or val.lower() in _EXACT_PLACEHOLDER_VALUES):
                     placeholder_fields.append(
                         f"第{idx}行 {col} 包含动态占位符: {val!r}"
                     )
@@ -140,8 +168,19 @@ def main() -> int:
                 continue
             fpath, sl, el = m.group(1), int(m.group(2)), int(m.group(3))
             key = (fpath, sl, el)
-            if key not in site_keys:
+            if key in site_keys:
+                covered_sites.add(key)
+            else:
                 orphan_rows.append(f"第{idx}行 {raw_file} 在 call_sites.json 中无对应调用点")
+
+        # 规则 2 反向（ERROR）：每个调用点必须至少被一行 CSV 覆盖
+        uncovered = sorted(site_keys - covered_sites)
+        if uncovered:
+            errors.append(
+                f"{len(uncovered)} 个调用点在 CSV 中无对应行（第 4 步漏写）: "
+                + "; ".join(f"{f}:{s}-{e}" for f, s, e in uncovered[:10])
+                + (" ..." if len(uncovered) > 10 else "")
+            )
 
         errors.extend(orphan_rows)
         errors.extend(placeholder_fields)
@@ -178,6 +217,7 @@ def main() -> int:
             report_lines.append("  - 记录数充足（CSV 行数 >= 调用点数）")
             report_lines.append("  - 必填字段均非空")
             report_lines.append("  - CSV 行均能在调用点中找到对应")
+            report_lines.append("  - 每个调用点均被 CSV 覆盖")
             report_lines.append("  - 无动态占位符")
 
         if warnings:

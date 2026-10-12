@@ -12,7 +12,8 @@
      - 提取字符串字面量，与 CSV 字段值比对
      - 标记"字段值在代码中无字面量匹配"或"可从代码字面量推断"
   4. 输出：
-     - 覆写 sensors.csv（带 illegal_reason 列）
+     - 覆写 sensors.csv（带 illegal_reason 列；该列由脚本每次重算覆写，
+       5.6 步的人工复核结论请写入 manual_note 等额外列，会被原样保留）
      - 输出 review_report.txt（预审摘要）
 
 用法（所有产物默认在 .agent/sensors-analyze/ 下）：
@@ -103,7 +104,11 @@ def read_code_lines(path: Path, start: int, end: int) -> list[str]:
 
 
 def extract_string_literals(lines: list[str]) -> set[str]:
-    """从代码行中提取所有字符串字面量的值。"""
+    """从代码行中提取所有字符串字面量的值。
+
+    单/双引号字符串按行提取（JS 里合法的此类字符串不跨行）；
+    模板字符串可跨行，在拼接后的整段上匹配（[^`] 天然匹配换行）。
+    """
     literals: set[str] = set()
     for line in lines:
         # 单引号、双引号字符串
@@ -111,11 +116,11 @@ def extract_string_literals(lines: list[str]) -> set[str]:
             val = m.group(1) if m.group(1) is not None else m.group(2)
             if val is not None and val.strip():
                 literals.add(val.strip())
-        # 模板字符串静态部分
-        for m in _TEMPLATE_LITERAL_RE.finditer(line):
-            val = m.group(1).strip()
-            if val:
-                literals.add(val)
+    # 模板字符串静态部分（跨行）：在拼接后的整段上匹配
+    for m in _TEMPLATE_LITERAL_RE.finditer("\n".join(lines)):
+        val = m.group(1).strip()
+        if val:
+            literals.add(val)
     return literals
 
 
@@ -146,14 +151,15 @@ def check_empty_field_can_infer(
 ) -> str | None:
     """检查空字段是否可从代码字面量推断。
 
-    返回 None 表示无推断线索，返回原因字符串表示可推断。
+    返回 None 表示无推断线索，返回原因字符串表示有线索。
+    线索是提示性的——字面量未必与该字段相关，最终以 5.6 步
+    LLM/人工复核为准；过长的字面量不作线索（可读性差、多为无关内容）。
     """
-    if not literals:
+    hints = [l for l in sorted(literals) if len(l) <= 40]
+    if not hints:
         return None
-    # 如果有字面量，提示可推断
-    sample = list(literals)[:3]
-    sample_str = "', '".join(sample)
-    return f"{field}可从代码字面量'{sample_str}'推断"
+    sample_str = "', '".join(hints[:3])
+    return f"{field}为空，代码片段含字面量'{sample_str}'（提示性线索，未必与该字段相关）"
 
 
 def review_row(
@@ -267,15 +273,21 @@ def main() -> int:
             site_keys.add((s["file"], s["start_line"], s["end_line"]))
         LOG.info("加载 %d 个调用点", len(site_keys))
 
-        # 读取 CSV（兼容有/无 illegal_reason 列）
+        # 读取 CSV（兼容有/无 illegal_reason 列；多余字段收进 __extra__ 而非
+        # 默认的 None 键——后者会让 DictReader 产出 list 值并在写出时崩溃）
         rows: list[dict] = []
+        malformed_rows: set[int] = set()
         with csv_path.open(encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
+            reader = csv.DictReader(f, restkey="__extra__", restval="")
             existing_header = list(reader.fieldnames or [])
-            for row in reader:
+            for i, row in enumerate(reader, 1):
+                if row.pop("__extra__", None):
+                    malformed_rows.add(i)
                 rows.append(row)
 
         LOG.info("加载 CSV: %d 行，表头: %s", len(rows), existing_header)
+        if malformed_rows:
+            LOG.warning("第 %s 行字段数多于表头（file 列逗号未加引号），已标记待复核", sorted(malformed_rows))
 
         # 逐行预审
         report_lines: list[str] = []
@@ -289,6 +301,8 @@ def main() -> int:
 
         for idx, row in enumerate(rows, 1):
             reasons = review_row(row, root, site_keys)
+            if idx in malformed_rows:
+                reasons.insert(0, "CSV行字段数多于表头（file列形如 a.js:1,1 含逗号，必须整体加双引号）")
             row["illegal_reason"] = "; ".join(reasons) if reasons else ""
             if reasons:
                 n_flagged += 1

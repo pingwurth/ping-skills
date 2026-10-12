@@ -72,15 +72,19 @@ def _write_fixture(root: Path) -> None:
         },
         "paradigms": [{
             "id": "direct-call", "name": "直调", "category": "code",
-            "reference_location": "src/home.js:2",
-            "call_chain": [],
+            "reference_location": {"file": "src/home.js", "start_line": 2},
+            "call_chain": [{
+                "order": 1, "layer": "page", "symbol": "onPageEnter",
+                "location": {"file": "src/home.js", "start_line": 1, "end_line": 3},
+                "description": "页面入口调用 trackEvent", "data_flow": [],
+            }],
             "entry_functions": [{
                 "name": "trackEvent", "kind": "wrapper",
                 "grep_pattern": r"\btrackEvent\s*\(",
                 "signature": "trackEvent: name, props",
                 "location": {"file": "src/home.js", "start_line": 1, "end_line": 1},
             }],
-            "sdk_apis": [],
+            "sdk_apis": [{"name": "trackEvent", "purpose": "send event"}],
         }],
     }
     (root / "sensors.json").write_text(

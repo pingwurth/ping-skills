@@ -5,6 +5,11 @@ entry.txt 格式约定（locate_call_sites.py 据此读取）：
   - 以 # 开头的行是注释，空行忽略
   - 其余每行是一个正则表达式，用于在第 3 步 grep 定位调用点
   - 人工可直接删行（误报）、增行（漏报）或改正则
+
+退出码：
+  0 = 成功（entry.txt 已生成，等待人工复核）
+  1 = 执行异常 / 输入缺失 / sensors.json 不符合 schema
+  3 = --audit 发现疑似遗漏（entry.txt 仍会生成供预览，但需回第 1 步补充后重跑）
 """
 from __future__ import annotations
 
@@ -17,8 +22,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from utils import ARTIFACT_DIR, check_rg_available, next_step, setup_logging
+from schema_lite import load_schema, validate as schema_validate
 
 LOG = None
+
+# 随 skill 发布的 schema（脚本位于 <skill>/scripts/，schema 位于 <skill>/ 根）
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "sensors.schema.json"
 
 
 def _rg(pattern: str, root: Path) -> list[str]:
@@ -72,8 +81,10 @@ SENSOR_KEYWORDS = re.compile(
 )
 
 
-def audit_uncovered(root: Path, sensors_data: dict, have_rg: bool) -> list[str]:
+def audit_uncovered(root: Path, sensors_data: dict) -> list[str]:
     """扫描代码库里含 sensors/track 关键词的函数定义，返回未被 sensors.json 覆盖的候选。
+
+    （纯 Python 扫描，不依赖 rg——此处逐行正则已够快。）
 
     Returns list of "name @ file:line" strings.
     """
@@ -174,7 +185,14 @@ def audit_sdk_coverage(root: Path, sensors_data: dict, have_rg: bool) -> dict[st
 
 
 def load_sensors(path: Path) -> dict:
-    """加载 sensors.json 并做基本结构校验（纯 stdlib，无第三方依赖）。"""
+    """加载 sensors.json 并做 schema 校验（纯 stdlib，无第三方依赖）。
+
+    基本结构自检（根对象 / paradigms 数组）+ 依据随 skill 发布的
+    sensors.schema.json 走 schema_lite.validate 轻量校验（覆盖 required /
+    type / enum / minItems / minimum / additionalProperties / $ref——即本
+    schema 用到的全部关键字）。校验失败抛 ValueError，逐条列出违规项。
+    schema 文件缺失时降级为仅结构自检并 warning（不应发生：schema 随 skill 打包）。
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"sensors.json 根必须是对象，实际为 {type(data).__name__}")
@@ -182,6 +200,19 @@ def load_sensors(path: Path) -> dict:
         raise ValueError("sensors.json 缺少必需字段 'paradigms'")
     if not isinstance(data["paradigms"], list):
         raise ValueError(f"'paradigms' 必须是数组，实际为 {type(data['paradigms']).__name__}")
+
+    if not SCHEMA_PATH.exists():
+        if LOG:
+            LOG.warning("未找到 schema 文件 %s，跳过 schema 校验（仅结构自检）", SCHEMA_PATH)
+        return data
+
+    errors = schema_validate(data, load_schema(SCHEMA_PATH))
+    if errors:
+        shown = "\n  - ".join(errors[:20])
+        more = f"\n  ...（共 {len(errors)} 项）" if len(errors) > 20 else ""
+        raise ValueError(f"sensors.json 不符合 sensors.schema.json（{len(errors)} 处）:\n  - {shown}{more}")
+    if LOG:
+        LOG.info("schema 校验通过（%s）", SCHEMA_PATH.name)
     return data
 
 
@@ -203,6 +234,7 @@ def main() -> int:
 
     exit_code = 0
     audit_issues = False
+    schema_fail = False
     n = 0
 
     try:
@@ -212,7 +244,13 @@ def main() -> int:
             exit_code = 1
             return exit_code
 
-        data = load_sensors(sensors_path)
+        try:
+            data = load_sensors(sensors_path)
+        except ValueError as exc:
+            schema_fail = True
+            LOG.error("%s", exc)
+            exit_code = 1
+            return exit_code
         paradigms = data.get("paradigms", [])
         if not paradigms:
             LOG.error("sensors.json 中没有 paradigms")
@@ -231,7 +269,7 @@ def main() -> int:
             have_rg = check_rg_available()
 
             # 1) 未覆盖的传感器相关函数
-            candidates = audit_uncovered(root, data, have_rg)
+            candidates = audit_uncovered(root, data)
             if candidates:
                 audit_issues = True
                 LOG.warning("发现 %d 个疑似埋点函数未被 sensors.json 覆盖：", len(candidates))
@@ -254,6 +292,9 @@ def main() -> int:
 
             if audit_issues:
                 LOG.info("=== 审计完成：发现问题，请查看上方日志 ===")
+                # 专用退出码 3：审计发现问题不算执行失败，但编排方看退出码
+                # 需要能区分"成功待复核"与"发现疑似遗漏需回第 1 步"
+                exit_code = 3
             else:
                 LOG.info("=== 审计完成：全部通过 ===")
 
@@ -296,10 +337,12 @@ def main() -> int:
         exit_code = 1
 
     finally:
-        if exit_code != 0:
-            next_step(f"执行失败，请查看日志: {log_path}")
-        elif audit_issues:
+        if schema_fail:
+            next_step(f"sensors.json 不符合 schema，请回第 1 步修正后重新运行（全部违规项见日志: {log_path}）")
+        elif exit_code == 3:
             next_step(f"审计发现疑似遗漏函数，请查看日志 {log_path}，修正 sensors.json 后重新运行")
+        elif exit_code != 0:
+            next_step(f"执行失败，请查看日志: {log_path}")
         else:
             next_step(f"请人工复核 {out}，确认无误后添加 '# CONFIRMED' 标记，然后运行 locate_call_sites.py")
 

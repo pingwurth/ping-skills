@@ -32,7 +32,7 @@ page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,i
 ## 前置调研（每次分析前简要做一次）
 
 在分析一个陌生代码库前，先快速判断埋点技术栈，这决定了 `sensors.json` 里范式枚举的颗粒度。常见线索：
-- `package.json` / `go.mod` / `build.gradle` / `Podfile` / `pubspec.yaml` 里是否出现 `sa-sdk-javascript`、`sensorsdata`、`gio`、` GrowingIO`、`@sentry`、自研 `@/sensors` 包名等。
+- `package.json` / `go.mod` / `build.gradle` / `Podfile` / `pubspec.yaml` 里是否出现 `sa-sdk-javascript`、`sensorsdata`、`gio`、`GrowingIO`、`@sentry`、自研 `@/sensors` 包名等。
 - 是否存在全局注入的 `sensors`、`track`、`report`、`v-track` 指令、`@Track` 注解、`useTrack` hook。
 - 六个目标字段 `page_name / first_biz_id / second_biz_id / first_biz_name / second_biz_name / event` 是**业务自定义事件属性**，不是任何公开 SDK 的内置字段——它们一定是在调用 `track()` 时作为 properties 传入的，所以只能靠追踪调用链路才能确认取值。这点要在分析时牢记。（`event` 字段允许为空。）
 
@@ -69,10 +69,16 @@ page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,i
 写完后用 schema 校验再输出。
 
 ### 校验
+第 2 步的 `extract_entries.py` 加载 `sensors.json` 时会**自动做 schema 校验**（纯 stdlib 轻量校验器 `scripts/schema_lite.py`，覆盖本 schema 用到的全部约束：required / type / enum / minItems / minimum / additionalProperties / $ref）。schema 不符会报错中止，`next_step` 指引回第 1 步，全部违规项写入日志。也可在进入第 2 步前手动校验（在 skill 根目录运行）：
+
 ```bash
+# 纯 stdlib（与脚本内置校验一致）
+python3 -c "import json; from pathlib import Path; from schema_lite import validate, load_schema; errs = validate(json.load(open('.agent/sensors-analyze/sensors.json')), load_schema(Path('sensors.schema.json'))); print('schema OK' if not errs else chr(10).join(errs))"
+# 若装有第三方 jsonschema 亦可（可选，非依赖）
 python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('.agent/sensors-analyze/sensors.json')),json.load(open('sensors.schema.json'))); print('schema OK')"
 ```
-`extract_entries.py` 在加载 `sensors.json` 时也会自动用 `sensors.schema.json` 校验，schema 不符会直接报错中止。建议先单独跑上面这行确认 schema 通过，再进入第 2 步。进入第 2 步前，确认范式枚举完整（同库通常 1~4 种）。
+
+进入第 2 步前，确认范式枚举完整（同库通常 1~4 种）。
 
 ### 完整性自审（必须执行，不可省略）
 
@@ -116,15 +122,17 @@ python3 scripts/extract_entries.py --sensors .agent/sensors-analyze/sensors.json
 python3 scripts/locate_call_sites.py --entry .agent/sensors-analyze/entry.txt --root <代码库根> --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/call_sites.json
 ```
 
-脚本优先用 `ripgrep`（无则回退纯 Python）按 `entry.txt` 的正则搜索代码库，对每个命中点：
+脚本优先用 `ripgrep`（无则回退纯 Python，两种模式结果一致）按 `entry.txt` 的正则搜索代码库，对每个命中点：
 - 用括号平衡扫描确定多行调用的结束行，产出 `file:start_line-end_line`。
 - 按位置去重，同一位置被多个正则命中会合并到 `patterns` 列表。
 - 附带 `snippet` 片段便于第 4 步阅读。
 - **自动排除封装实现**：脚本会读 `sensors.json` 里 `kind` 为 `wrapper` / `hook` 的入口，按花括号平衡算出其函数体范围，落在这些函数体内的命中（如 wrapper 内部转发到 `sensors.track` 的那一行）会被排除——它们是封装 plumbing，不是独立业务埋点。若 `sensors.json` 不在同目录，用 `--sensors` 指明路径。
+- **统一排除目录**：`node_modules / vendor / dist / build / venv / .venv` 与本 skill 产物目录 `.agent/` 不参与扫描（rg 与纯 Python 回退两种模式一致）。
+- **正则方言回退**：`entry.txt` 的正则按 Python 语义编写；若含 rg（Rust regex）不支持的语法（lookahead、反向引用等），脚本会自动对该正则回退纯 Python 搜索并在日志中说明，不会静默丢弃。
 
-输出 `call_sites.json`（数组，每项有 `id / file / start_line / end_line / location / patterns / snippet`）。
+输出 `call_sites.json`（数组，每项有 `id / file / start_line / end_line / location / file_csv / patterns / snippet`）。其中 `file_csv` 与 `sensors.csv` 的 `file` 列完全同格式（`文件名:start,end`），第 4 步可直接取用；注意该值含逗号，写入 CSV 时仍需整体加双引号。
 
-> 若命中数为 0 或异常少：大概率是 `entry.txt` 正则不对，回到第 2 步修正；少数情况是代码用动态调用（`sensors[name]()`），需在 `entry.txt` 补动态调用的正则。
+> 若命中数为 0：脚本会在 `next_step` 中直接引导回到第 2 步复核正则；大概率是 `entry.txt` 正则不对，少数情况是代码用动态调用（`sensors[name]()`），需在 `entry.txt` 补动态调用的正则。
 
 ---
 
@@ -169,10 +177,10 @@ page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file
 ```
 第 4 步写入时不含 `illegal_reason` 列（由第 5.5 步脚本自动追加）。
 
-- `file` 用 `相对路径:start,end` 格式（如 `src/Home.vue:42,58`），start / end 与 `call_sites.json` 一致。
+- `file` 用 `相对路径:start,end` 格式（如 `src/Home.vue:42,58`），start / end 与 `call_sites.json` 一致，直接取每条的 `file_csv` 字段即可（已是逗号格式）。
 - `page_name / first_biz_id / second_biz_id / first_biz_name / second_biz_name` 五项第 5 步会校验非空且不允许包含 `<动态` 等占位符。追踪不到确值时留空，留空会在第 5 步产生 WARN（警告），不会导致 FAIL。但应尽最大努力追踪，留空是最后手段。`event` 字段允许为空。
 - 字段值含逗号时用双引号包裹；写入时用 `csv` 模块或保证转义正确。
-- 注意：因为同一 call_site 可能对应多条 CSV 记录，所以 CSV 行数可能 ≥ call_sites 数量。第 5 步会校验 CSV 行数 ≥ call_sites 数量（而非严格相等）。
+- 注意：因为同一 call_site 可能对应多条 CSV 记录，所以 CSV 行数可能 ≥ call_sites 数量。第 5 步会校验 CSV 行数 ≥ call_sites 数量（而非严格相等），且**每个调用点至少被一行覆盖**。
 
 逐条处理建议用 TodoWrite 跟踪进度，避免漏条。处理完全部调用点后进入第 5 步。
 
@@ -187,8 +195,8 @@ python3 scripts/check_report.py --sites .agent/sensors-analyze/call_sites.json -
 校验分两级：
 - **ERROR（结构性错误 → FAIL）**：
   1. 记录数充足：`CSV 数据行数 >= len(call_sites)`（同一调用点因多组取值可产生多条记录）。CSV 行数 < call_sites 数量说明第 4 步漏写了调用点。
-  2. CSV 每行的 `file`（格式 `文件名:start,end`）能在 `call_sites.json` 中找到对应。
-  3. **禁止动态占位符**：所有字段值不得包含 `<动态`、`<变量`、`<unknown`、`<dynamic` 等占位标记。发现则判 FAIL。
+  2. CSV 每行的 `file`（格式 `文件名:start,end`）能在 `call_sites.json` 中找到对应；**反向亦然——每个调用点必须至少被一行 CSV 覆盖**（用重复行凑足行数骗不过校验，遗漏的调用点会被逐个列出）。
+  3. **禁止动态占位符**：所有字段值不得包含 `<动态`、`<变量`、`<待定`、`<unknown`、`<dynamic`、`<runtime` 等尖括号占位，不得残留 `{{page_name}}` / `{biz_id}` 模板插值，整值是 `TODO` / `TBD` / `N/A` / `待定` 之类也不行。发现则判 FAIL。
 - **WARNING（追踪未完成 → WARN）**：
   4. `page_name / first_biz_id / second_biz_id / first_biz_name / second_biz_name` 五字段为空。第 5 步会自动输出 `.agent/sensors-analyze/resolution_report.csv` 列出所有空字段及其位置，供人工复核。
 
@@ -212,7 +220,7 @@ python3 scripts/review_report.py --csv .agent/sensors-analyze/sensors.csv --site
 
 ### 代码级字面量比对
 5. **字段值无字面量匹配**：读取 `file` 指向的代码片段，提取字符串字面量；若 CSV 已填值在代码中完全找不到匹配 → 记录 `"{field}='{val}'在代码中无字面量匹配"`
-6. **可从字面量推断**：必填字段为空但代码中有明确字面量 → 记录 `"{field}可从代码字面量'{literal}'推断"`
+6. **可从字面量推断**：必填字段为空但代码片段中有字面量 → 记录 `"{field}为空，代码片段含字面量'…'（提示性线索，未必与该字段相关）"`
 
 ### 输出
 - 覆写 `.agent/sensors-analyze/sensors.csv`（每行追加 `illegal_reason` 列，多个原因用 `; ` 分隔）
@@ -239,6 +247,7 @@ python3 scripts/review_report.py --csv .agent/sensors-analyze/sensors.csv --site
    - 若脚本标记"可从代码字面量推断"，读取代码确认具体值后填入。
    - 若确实无法解析（运行时 API、数据库查询、用户输入），保留空值，在 `illegal_reason` 中写明最终原因（如 `"page_name来自路由meta，运行时动态获取"`）。
 4. **清空已解决的原因**：字段经复核确认正确后，清除 `illegal_reason` 中对应的原因项。若所有原因均已解决，清空 `illegal_reason` 为空字符串。
+   **人工备注写 `manual_note` 列**：需要留痕的复核结论（如 `"page_name 来自路由 meta，运行时动态获取"`）写入 `manual_note` 列（表头没有就新增），不要写进 `illegal_reason`——后者每次重跑 5.5 步都会被脚本重算覆写，`manual_note` 等额外列则会原样保留。
 5. **覆写 `.agent/sensors-analyze/sensors.csv`**。
 
 **注意**：第 5.6 步是 LLM 操作，不需要运行额外脚本。LLM 直接读取 CSV 和代码，修正后覆写 CSV。
@@ -256,10 +265,10 @@ python3 scripts/report_manager.py --csv .agent/sensors-analyze/sensors.csv
 2. **比对**：自动查找上一次归档的 CSV，逐行比对差异
 3. **输出差异报告**：写入 `.agent/sensors-analyze/reports/diff_report.txt`
 
-差异类型：
-- **新增**：本次有但上次没有的行
+差异类型（按调用点 `file` 分组比对，三类互斥、不重复计数）：
+- **新增**：本次有但上次没有的行（新调用点，或既有调用点下新增的取值记录）
 - **删除**：上次有但本次没有的行
-- **修改**：两边都有但字段值不同的行
+- **修改**：同一调用点下字段值发生变化的行（旧值 → 新值）
 
 退出码：
 - 0 = 无差异或首次归档
@@ -278,10 +287,24 @@ python3 scripts/report_manager.py --csv .agent/sensors-analyze/sensors.csv
 
 ---
 
+## 脚本退出码总表
+
+编排方可据此路由；`next_step` 始终是驱动流程的第一信号，退出码用于程序化判断。
+
+| 脚本 | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| `extract_entries.py` | 成功，待人工复核 | 执行异常 / 输入缺失 / schema 不符 | — | `--audit` 发现疑似遗漏（entry.txt 仍生成，需回第 1 步补充） |
+| `locate_call_sites.py` | 成功（含 0 命中，next_step 会引导回第 2 步） | 执行异常 | entry.txt 未人工确认（缺 `# CONFIRMED`） | — |
+| `check_report.py` | PASS | 执行异常 | FAIL（结构性错误） | WARN（空字段待人工复核） |
+| `review_report.py` | 预审通过 | 执行异常 | 有待复核行（进入 5.6） | — |
+| `report_manager.py` | 归档完成（首次 / 无差异） | 执行异常 | 存在差异需人工复核 | — |
+
+---
+
 ## 关键注意事项
 
 - **禁止动态占位符，允许合理留空**：CSV 中不得出现 `<动态:来源>`、`<变量:xxx>`、`<unknown>` 等占位标记。当字段值是变量时，必须尽最大努力沿调用链反向追踪到所有调用者，确定每个调用者传入的具体值，一个调用者对应一条记录。若确实无法静态解析（如值来自运行时 API、数据库查询、用户输入），该字段留空，第 5 步会产生 WARN 警告。**绝对不要为了解析字段值而修改目标代码库。** 这是本工具的核心质量要求。
-- **一调用点多记录**：同一个 call_site 被多个上游以不同值调用时，CSV 中会产生多条记录（同一 `file` 列，不同的字段值）。第 5 步校验规则是 CSV 行数 ≥ call_sites 数量，而非严格相等。
+- **一调用点多记录**：同一个 call_site 被多个上游以不同值调用时，CSV 中会产生多条记录（同一 `file` 列，不同的字段值）。第 5 步校验规则是 CSV 行数 ≥ call_sites 数量（而非严格相等），且每个调用点至少被一行覆盖。
 - **范式颗粒度**：同库同一 SDK 若被两种以上方式调用（指令 + 直调），要拆成多个 paradigm，否则第 3 步正则会漏。
 - **全埋点 / 可视化埋点**：调用点不在业务代码里，而在 SDK 初始化与配置处；`entry_functions` 用 `autoTrack_config` kind，`grep_pattern` 匹配初始化配置项即可。
 - **data_flow 要诚实**：写得出就写，写不出就留空数组，不要臆造来源——第 4 步会依赖它，臆造会导致字段追错。

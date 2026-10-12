@@ -8,7 +8,7 @@ This is a **Claude Code skill** (`sensors-analyze`) for auditing analytics track
 
 The skill targets six business fields: `page_name`, `first_biz_id`, `second_biz_id`, `first_biz_name`, `second_biz_name`, `event`.
 
-## 5-Step Workflow
+## Pipeline
 
 The skill follows a deterministic pipeline where LLM and Python each handle what they do best. All working artifacts live under `<workdir>/.agent/sensors-analyze/` (workdir defaults to the target codebase root; script flag defaults already point there):
 
@@ -18,14 +18,19 @@ The skill follows a deterministic pipeline where LLM and Python each handle what
 4. **LLM** traces each call site through the call chain to determine actual field values → appends to `sensors.csv`
 5. **Script** (`scripts/check_report.py`) validates consistency → `check_report.txt` (PASS/FAIL)
 5.5. **Script** (`scripts/review_report.py`) pre-reviews CSV, adds `illegal_reason` column → `review_report.txt`
-5.6. **LLM** reviews rows with non-empty `illegal_reason`, verifies/corrects field values → updates `sensors.csv`
+5.6. **LLM** reviews rows with non-empty `illegal_reason`, verifies/corrects field values (human notes go to a `manual_note` column, which step 5.5 reruns preserve) → updates `sensors.csv`
+6. **Script** (`scripts/report_manager.py`) archives the timestamped CSV and diffs against the previous version → `reports/diff_report.txt` (exit 2 = differences need review)
+
+Unified per-script exit-code table lives in `SKILL.md` (section 脚本退出码总表).
 
 ## Key Commands
 
 ```bash
-# Validate sensors.json against schema (do this before step 2)
-python3 -c "import json; d=json.load(open('.agent/sensors-analyze/sensors.json')); json.load(open('sensors.schema.json'))" && echo "OK"
-# Or with jsonschema if installed:
+# Validate sensors.json against schema (automatic in step 2 — extract_entries.py
+# rejects non-conforming sensors.json via scripts/schema_lite.py, stdlib-only).
+# Standalone check (run from the skill directory):
+python3 -c "import json; from pathlib import Path; from schema_lite import validate, load_schema; errs = validate(json.load(open('.agent/sensors-analyze/sensors.json')), load_schema(Path('sensors.schema.json'))); print('schema OK' if not errs else chr(10).join(errs))"
+# Or with jsonschema if installed (optional, not a dependency):
 python3 -c "import json,jsonschema; jsonschema.validate(json.load(open('.agent/sensors-analyze/sensors.json')),json.load(open('sensors.schema.json'))); print('schema OK')"
 
 # Step 2: extract entry candidates (with optional audit)
@@ -54,7 +59,7 @@ Scripts use only stdlib (no third-party dependencies). `locate_call_sites.py` pr
 
 - `sensors.schema.json` — JSON Schema (draft-07) for `sensors.json`. Defines paradigms, call chains, data flow annotations, entry functions, and SDK APIs.
 - `sensors.csv` header (fixed, exact order): `page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,illegal_reason`（`file` 格式为 `文件名:start,end`；`illegal_reason` 由 Step 5.5 脚本追加，多个原因用 `; ` 分隔）
-- `call_sites.json` entries have: `id, file, start_line, end_line, location, patterns, snippet`
+- `call_sites.json` entries have: `id, file, start_line, end_line, location, file_csv, patterns, snippet` (`file_csv` matches the CSV `file` column format exactly — use it verbatim in step 4, quoted)
 
 ## Critical Constraints (from 问题.txt)
 

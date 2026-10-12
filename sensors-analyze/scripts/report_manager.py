@@ -44,6 +44,20 @@ def generate_timestamped_name(base: str = "sensors") -> str:
     return f"{base}_{ts}.csv"
 
 
+def unique_archive_path(reports_dir: Path, ts_name: str) -> Path:
+    """时间戳归档路径；同名已存在（同秒内多次运行）时追加 _1/_2… 序号。
+
+    不加处理时 shutil.copy2 会静默覆盖上一次归档，diff 历史失真。
+    """
+    archive_path = reports_dir / ts_name
+    stem = ts_name[: -len(".csv")]
+    i = 1
+    while archive_path.exists():
+        archive_path = reports_dir / f"{stem}_{i}.csv"
+        i += 1
+    return archive_path
+
+
 def find_previous_csv(reports_dir: Path, base: str = "sensors") -> Path | None:
     """查找 reports_dir 中最近一次归档的 CSV 文件（按文件名时间戳排序）。"""
     if not reports_dir.exists():
@@ -60,16 +74,25 @@ CSV_HEADER_OLD = ["page_name", "first_biz_id", "second_biz_id",
 
 
 def load_csv_rows(csv_path: Path) -> list[dict]:
-    """加载 CSV 文件，返回行列表。"""
+    """加载 CSV 文件，返回行列表。
+
+    行内字段数多于表头（典型：file 列 `a.js:1,1` 含逗号未加双引号）时
+    视为致命输入错误直接报错——不能把损坏行静默修剪后固化进归档历史。
+    """
     rows = []
     with csv_path.open(encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
+        # restkey 把多余字段收进 __extra__（默认会变成 None 键导致下游 .strip() 崩溃）
+        reader = csv.DictReader(f, restkey="__extra__", restval="")
         header = list(reader.fieldnames or [])
         if header not in (CSV_HEADER, CSV_HEADER_OLD):
             LOG.warning("CSV 表头 %s 与期望 %s 不一致", header, CSV_HEADER)
-        for row in reader:
-            # 清理空白
-            cleaned = {k: (v or "").strip() for k, v in row.items()}
+        for i, row in enumerate(reader, 1):
+            if row.pop("__extra__", None):
+                raise ValueError(
+                    f"CSV 第 {i} 行字段数多于表头（file 列形如 a.js:1,1 含逗号，"
+                    f"必须整体加双引号），请修正 CSV 后重跑"
+                )
+            cleaned = {k: (v or "").strip() if isinstance(v, str) else "" for k, v in row.items()}
             rows.append(cleaned)
     return rows
 
@@ -85,65 +108,52 @@ def build_row_signature(row: dict) -> str:
 def diff_csv(old_rows: list[dict], new_rows: list[dict]) -> dict:
     """比对两个 CSV 的差异，返回 {added, deleted, modified}。
 
-    使用全列签名做主键，通过 multiset 计数正确处理重复行。
-    同一调用点（file 列相同）可产生多行（不同 page_name 等），不再丢失。
+    按 file 列（调用点）分组比对，组内用全列签名做行实例计数：
+      1. 整组 file 只在新版出现 → 组内全部行记「新增」；
+      2. 整组 file 只在旧版出现 → 组内全部行记「删除」；
+      3. 两版都有的 file → 先按计数抵消完全相同的行，剩余旧行与新行
+         按签名排序 zip 配对为「修改」，配不上的分别记「删除」/「新增」。
+    三类互斥：同一行变化只计入一类。旧实现先做全局签名差集（added）再在
+    file 组内配对（modified），同一行会同时出现在两类里导致双重计数。
     """
-    old_map: dict[str, tuple[dict, Counter]] = {}  # signature -> (representative_row, count)
+    def file_of(row: dict) -> str:
+        return (row.get("file") or "").strip()
+
+    old_by_file: dict[str, list[dict]] = {}
     for row in old_rows:
-        sig = build_row_signature(row)
-        if sig not in old_map:
-            old_map[sig] = (row, Counter())
-        old_map[sig][1][sig] += 1
-
-    new_map: dict[str, tuple[dict, Counter]] = {}
+        old_by_file.setdefault(file_of(row), []).append(row)
+    new_by_file: dict[str, list[dict]] = {}
     for row in new_rows:
-        sig = build_row_signature(row)
-        if sig not in new_map:
-            new_map[sig] = (row, Counter())
-        new_map[sig][1][sig] += 1
+        new_by_file.setdefault(file_of(row), []).append(row)
 
-    old_sigs = set(old_map.keys())
-    new_sigs = set(new_map.keys())
+    added: list[dict] = []
+    deleted: list[dict] = []
+    modified: list[dict] = []
 
-    added = []
-    deleted = []
-    modified = []
-
-    # 新增：签名在 new 中但不在 old 中
-    for sig in sorted(new_sigs - old_sigs):
-        count = new_map[sig][1][sig]
-        added.extend([new_map[sig][0]] * count)
-
-    # 删除：签名在 old 中但不在 new 中
-    for sig in sorted(old_sigs - new_sigs):
-        count = old_map[sig][1][sig]
-        deleted.extend([old_map[sig][0]] * count)
-
-    # 修改：签名不同但 file 列相同（同一调用点的字段值变化）
-    # 按 file 列分组，检测同 file 下签名变化
-    old_by_file: dict[str, list[str]] = {}
-    for sig in old_sigs:
-        file_val = old_map[sig][0].get("file", "").strip()
-        old_by_file.setdefault(file_val, []).append(sig)
-    new_by_file: dict[str, list[str]] = {}
-    for sig in new_sigs:
-        file_val = new_map[sig][0].get("file", "").strip()
-        new_by_file.setdefault(file_val, []).append(sig)
+    for file_val in sorted(set(new_by_file) - set(old_by_file)):
+        added.extend(new_by_file[file_val])
+    for file_val in sorted(set(old_by_file) - set(new_by_file)):
+        deleted.extend(old_by_file[file_val])
 
     for file_val in sorted(set(old_by_file) & set(new_by_file)):
-        old_file_sigs = set(old_by_file[file_val])
-        new_file_sigs = set(new_by_file[file_val])
-        changed_sigs = old_file_sigs.symmetric_difference(new_file_sigs)
-        if changed_sigs:
-            # 有签名变化：报告 old→new 的配对
-            for old_sig in sorted(old_file_sigs & changed_sigs):
-                for new_sig in sorted(new_file_sigs & changed_sigs):
-                    modified.append({
-                        "file": file_val,
-                        "old": old_map[old_sig][0],
-                        "new": new_map[new_sig][0],
-                    })
-                    break  # 每个 old 只配对一个 new
+        old_group = old_by_file[file_val]
+        new_group = new_by_file[file_val]
+        old_counter = Counter(build_row_signature(r) for r in old_group)
+        new_counter = Counter(build_row_signature(r) for r in new_group)
+        common = old_counter & new_counter  # 按计数取交集：两边完全相同的行
+        old_rest = sorted((old_counter - common).elements())
+        new_rest = sorted((new_counter - common).elements())
+        old_row_of = {build_row_signature(r): r for r in old_group}
+        new_row_of = {build_row_signature(r): r for r in new_group}
+        n_pair = min(len(old_rest), len(new_rest))
+        for i in range(n_pair):
+            modified.append({
+                "file": file_val,
+                "old": old_row_of[old_rest[i]],
+                "new": new_row_of[new_rest[i]],
+            })
+        deleted.extend(old_row_of[s] for s in old_rest[n_pair:])
+        added.extend(new_row_of[s] for s in new_rest[n_pair:])
 
     return {"added": added, "deleted": deleted, "modified": modified}
 
@@ -237,9 +247,6 @@ def main() -> int:
     args = ap.parse_args()
 
     csv_path = Path(args.csv)
-    if not csv_path.exists():
-        print(f"错误: 找不到 CSV 文件 {csv_path}", file=sys.stderr)
-        return 1
 
     # 确定 reports 目录
     if args.reports_dir:
@@ -254,6 +261,13 @@ def main() -> int:
     LOG.info("报告目录: %s", reports_dir)
 
     try:
+        # CSV 缺失也要走 next_step 通道：本 skill 的脚本契约是 stdout 仅一行
+        # next_step 驱动流程，直接 print 到 stderr 会让编排方失去指引
+        if not csv_path.exists():
+            LOG.error("找不到 CSV 文件 %s", csv_path)
+            next_step(f"找不到 CSV 文件 {csv_path}，第 4/5.6 步是否已产出？请检查后重跑")
+            return 1
+
         # 加载当前 CSV
         new_rows = load_csv_rows(csv_path)
         LOG.info("加载 CSV: %d 行", len(new_rows))
@@ -282,10 +296,10 @@ def main() -> int:
             LOG.info(line)
 
         # 归档（除非 --diff-only）
+        archive_path: Path | None = None
         if not args.diff_only:
-            ts_name = generate_timestamped_name()
-            archive_path = reports_dir / ts_name
             reports_dir.mkdir(parents=True, exist_ok=True)
+            archive_path = unique_archive_path(reports_dir, generate_timestamped_name())
 
             # 复制 CSV 到归档目录
             import shutil
@@ -294,19 +308,26 @@ def main() -> int:
         else:
             LOG.info("--diff-only 模式，跳过归档")
 
-        # 输出结果
+        # 输出结果。归档路径必须引用实际写入的 archive_path——
+        # 二次调用 generate_timestamped_name() 跨秒后文件名对不上，
+        # next_step 会指向不存在的文件；--diff-only 未归档时不得声称已保存
         if not has_previous:
-            next_step(f"首次归档完成。已保存到 {reports_dir / generate_timestamped_name()}")
+            if archive_path:
+                next_step(f"首次归档完成。已保存到 {archive_path}")
+            else:
+                next_step(f"仅比对完成：无上次归档可对比（首次运行建议去掉 --diff-only 执行归档）。差异报告: {diff_report_path}")
             return 0
-        elif n_changes == 0:
-            next_step(f"无差异，内容与上次归档一致。已保存到 {reports_dir / generate_timestamped_name()}")
+        if n_changes == 0:
+            if archive_path:
+                next_step(f"无差异，内容与上次归档一致。已归档到 {archive_path}")
+            else:
+                next_step("仅比对完成：无差异，内容与上次归档一致。未归档（--diff-only）")
             return 0
-        else:
-            next_step(
-                f"发现 {n_changes} 处差异（+{len(diff['added'])} -{len(diff['deleted'])} ~{len(diff['modified'])}）。"
-                f"请查看 {diff_report_path} 进行人工复核"
-            )
-            return 2
+        next_step(
+            f"发现 {n_changes} 处差异（+{len(diff['added'])} -{len(diff['deleted'])} ~{len(diff['modified'])}）。"
+            f"请查看 {diff_report_path} 进行人工复核"
+        )
+        return 2
 
     except Exception as exc:
         LOG.exception("执行失败: %s", exc)
