@@ -411,6 +411,123 @@ def test_section_skeleton_includes_package_and_class():
 
 
 # --------------------------------------------------------------------------- #
+# PromptBuilder._section_class_skeleton
+# --------------------------------------------------------------------------- #
+def test_section_class_skeleton_keeps_fields_and_constructor(tmp_path):
+    """结构摘要应包含 import/类声明/字段/构造器, 并在第一个方法前截断。"""
+    state = _make_state(tmp_path)
+    _write_source(state, """\
+package com.example;
+
+import java.util.Map;
+
+class FooService {
+    private final Dependency dep;
+    private int count;
+
+    public FooService(Dependency dep) {
+        this.dep = dep;
+    }
+
+    public Map<String, Integer> buildMap() {
+        return new java.util.HashMap<>();
+    }
+}
+""")
+    builder = _builder()
+    text = "\n".join(builder._section_class_skeleton(state))
+
+    assert "import java.util.Map;" in text
+    assert "class FooService" in text
+    assert "private final Dependency dep;" in text
+    assert "public FooService(Dependency dep)" in text
+    # 第一个方法起应被截断
+    assert "buildMap" not in text
+    assert "HashMap" not in text
+
+
+def test_section_class_skeleton_spaced_generic_return_type(tmp_path):
+    """返回类型含空白的泛型 Map<String, Integer> 应识别为第一个方法并截断。"""
+    state = _make_state(tmp_path)
+    _write_source(state, """\
+class FooService {
+    private int count;
+
+    public Map<String, Integer> buildMap() {
+        return bodyMarkerA;
+    }
+}
+""")
+    builder = _builder()
+    text = "\n".join(builder._section_class_skeleton(state))
+
+    assert "private int count;" in text
+    assert "buildMap" not in text
+    assert "bodyMarkerA" not in text
+
+
+def test_section_class_skeleton_nested_generic_return_type(tmp_path):
+    """嵌套泛型 Map<String, List<Foo>> 同样应截断。"""
+    state = _make_state(tmp_path)
+    _write_source(state, """\
+class FooService {
+    private int count;
+
+    public Map<String, List<Foo>> groupAll() {
+        return bodyMarkerB;
+    }
+}
+""")
+    builder = _builder()
+    text = "\n".join(builder._section_class_skeleton(state))
+
+    assert "private int count;" in text
+    assert "groupAll" not in text
+    assert "bodyMarkerB" not in text
+
+
+def test_section_class_skeleton_generic_method_declaration(tmp_path):
+    """泛型方法 <T> T convert(...) 应识别为第一个方法并截断。"""
+    state = _make_state(tmp_path)
+    _write_source(state, """\
+class FooService {
+    private int count;
+
+    public <T> T convert(T input) {
+        return bodyMarkerC;
+    }
+}
+""")
+    builder = _builder()
+    text = "\n".join(builder._section_class_skeleton(state))
+
+    assert "private int count;" in text
+    assert "convert" not in text
+    assert "bodyMarkerC" not in text
+
+
+def test_section_class_skeleton_multiline_signature_head(tmp_path):
+    """返回类型与方法名跨行的签名头也应截断。"""
+    state = _make_state(tmp_path)
+    _write_source(state, """\
+class FooService {
+    private int count;
+
+    public Map<String, Integer>
+        buildMap() {
+        return bodyMarkerD;
+    }
+}
+""")
+    builder = _builder()
+    text = "\n".join(builder._section_class_skeleton(state))
+
+    assert "private int count;" in text
+    assert "buildMap" not in text
+    assert "bodyMarkerD" not in text
+
+
+# --------------------------------------------------------------------------- #
 # PromptBuilder._section_code
 # --------------------------------------------------------------------------- #
 def test_section_code_wraps_in_markdown():

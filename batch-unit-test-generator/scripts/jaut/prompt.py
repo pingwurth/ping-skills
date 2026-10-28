@@ -119,14 +119,30 @@ class PromptBuilder:
         if imports:
             lines.extend(imports[:20])  # 最多显示 20 个 import
         # 提取类声明和字段(到第一个方法定义之前)
-        method_pattern = re.compile(
-            r'^\s*(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp|volatile|transient|\s)+[\w<>\[\],\s]+\s+\w+\s*\(',
-            re.MULTILINE
-        )
-        match = method_pattern.search(stripped)
+        # 逐行匹配避免原正则（含 \s 的字符类跨行长文本贪婪回溯）引发灾难性问题
+        _mods = (r'(?:public\s+|protected\s+|private\s+|static\s+|final\s+|abstract\s+'
+                 r'|synchronized\s+|native\s+|default\s+|strictfp\s+|volatile\s+|transient\s+)*')
+        # 修饰词头与 返回类型+方法名( 分两段独立匹配: 类型类含 \s 以兼容
+        # Map<String, Integer>、<T> T 等含空白的泛型签名; 分段后修饰词不会被
+        # 回溯吸收进返回类型(否则构造器 public Foo( 会被误判为方法)
+        _head_re = re.compile(r'\s*' + _mods)
+        _sig_tail_re = re.compile(r'[\w<>$\[\],.?\s]+\s+[\w$]+\s*\(')
+
+        match_pos: int | None = None
+        cursor = 0
+        raw_lines = stripped.split("\n")
+        # split("\n") 保留尾随空串，cursor 逐行累计含换行的偏移
+        for i, line in enumerate(raw_lines):
+            # 拼接下一行以兼容返回类型与方法名跨行的签名头; 回溯仍被限制在两行内
+            probe = line if i + 1 >= len(raw_lines) else line + "\n" + raw_lines[i + 1]
+            head = _head_re.match(probe)
+            if head and _sig_tail_re.match(probe, head.end()):
+                match_pos = cursor
+                break
+            cursor += len(line) + 1    # +1 对应行尾换行
         class_start = re.search(r'\b(?:class|interface|enum)\s+\w+', stripped)
         if class_start:
-            end_pos = match.start() if match else min(class_start.start() + 1000, len(stripped))
+            end_pos = match_pos if match_pos is not None else min(class_start.start() + 1000, len(stripped))
             class_decl = stripped[class_start.start():end_pos].strip()
             # 限制长度
             if len(class_decl) > 1500:
