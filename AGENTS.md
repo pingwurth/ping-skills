@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This repo is a collection of four **agent skills** (for Claude Code, Qwen, Qoder, OpenCode). There is no application — each top-level directory is a self-contained skill installed into *other* projects.
+This repo is a collection of five **agent skills** (for Claude Code, Qwen, Qoder, OpenCode). There is no application — each top-level directory is a self-contained skill installed into *other* projects.
 
 ## Project Structure & Module Organization
 
@@ -10,15 +10,16 @@ This repo is a collection of four **agent skills** (for Claude Code, Qwen, Qoder
 | `batch-unit-test-generator/` | Same engine, batched over classes from a branch diff, via the `agents/batch-class-writer.md` subagent |
 | `sensitive-log-review/` | Audit Java diffs for sensitive data leaking into logs; emits an HTML report and CI gate codes |
 | `sensors-analyze/` | Inventory analytics tracking calls (埋点) into `sensors.csv` |
+| `code-review-p/` | Docs-driven code review (diff/PR/path/whole repo): targeted brief → 12-angle sweep → adversarial verify → ranked findings |
 
-Inside a skill: `SKILL.md` (triggers + workflow), `references/` and `protocol/` (rules, JSON schema), `scripts/` (Python drivers), `tests/` (pytest). Docs and comments are largely Chinese — keep them that way.
+Inside a skill: `SKILL.md` (triggers + workflow), `references/` and `protocol/` (rules, JSON schema), `scripts/` (Python drivers), `tests/` (pytest). `code-review-p` is the docs-driven exception: `SKILL.md` + `references/` + `agents/` + a Workflow-tool script (`workflows/deep-review.js`), no `scripts/`. Docs and comments are largely Chinese — keep them that way.
 
 ## Build, Test, and Development Commands
 
 No root-level runner exists; run tests from inside a skill directory:
 
 ```bash
-cd sensitive-log-review        # or java-unit-test-generator / batch-unit-test-generator
+cd sensitive-log-review        # or java-unit-test-generator / batch-unit-test-generator / code-review-p
 python3 -m pytest tests/                     # full suite
 python3 -m pytest tests/test_cli.py          # one file
 python3 -m pytest tests/test_cli.py::test_x  # one test
@@ -43,6 +44,7 @@ Use pytest, matching existing frameworks and conventions. Add focused tests besi
 - The unit-test skills drive scripts and an LLM through the **NEXT_STEP protocol**; exit codes: 0 = done, 1 = continue, 2 = script error, 3 = state/protocol error. On conflict: Schema > `references/UnitTestRules.md` > `SKILL.md` > judgment.
 - The two unit-test skills each carry a copy of the `jaut` engine that **has diverged** — diff both and run both suites after shared changes.
 - Only `src/test/java/**` may change; never production code, `pom.xml`, or a hand-edited `state.json`. Read `sensors-analyze/CLAUDE.md` before touching that skill.
+- `code-review-p/workflows/deep-review.js` assumes the Workflow tool's script API (agent/parallel/pipeline/phase/log/budget) — check it against the workflow-authoring reference when editing; its suite (`tests/test_workflow_script.py`) needs node and skips without it.
 
 ## Commit & Pull Request Guidelines
 

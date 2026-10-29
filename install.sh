@@ -175,8 +175,13 @@ install_skill() {
     cp -r "$src" "$target"
     echo "  已复制 $skill_name -> $target"
 
-    # 删除测试和缓存等非必要文件
-    find "$target" -name "test.log" -or -name "__pycache__" -or -name "tests" -or -name ".pytest_cache" | xargs rm -rf
+    # 删除测试、缓存与随装无意义的文件（docs/ 是仓库内文档，不装进目标项目）
+    find "$target" -name "test.log" -or -name "__pycache__" -or -name "tests" -or -name ".pytest_cache" -or -name "docs" | xargs rm -rf
+
+    # workflows/ 只有带 Workflow 工具的宿主（claude）用得上
+    if [[ "$tool" != "claude" ]]; then
+        rm -rf "$target/workflows"
+    fi
 
     # 如果不是 qoder/qwen，删除 SKILL.md 中第一个 tools: 行
     if $need_strip_tools; then
@@ -187,16 +192,31 @@ install_skill() {
         fi
     fi
 
-    # 处理 agents 目录（如果存在）
+    # 处理 agents 目录（如果存在）——平铺进共享的 .<tool>/agents/，同名覆盖前先询问
     local agents_src="$src/agents"
     if [[ -d "$agents_src" ]]; then
         local agents_target="$project_dir/.$tool/agents"
         mkdir -p "$agents_target"
-        cp -r "$agents_src"/. "$agents_target/"
+        local md_file agent_file
+        for md_file in "$agents_src"/*.md; do
+            [[ -f "$md_file" ]] || continue
+            agent_file="$agents_target/$(basename "$md_file")"
+            if [[ -f "$agent_file" ]]; then
+                # 无 tty（CI/脚本调用）时 read 失败不致命：默认不覆盖，继续安装
+                overwrite=""
+                read -rp "  agents 已存在 '$(basename "$md_file")'，是否覆盖？(y/N): " overwrite </dev/tty || true
+                if [[ "$overwrite" != "y" && "$overwrite" != "Y" ]]; then
+                    echo "  跳过 $(basename "$md_file")（已存在）"
+                    continue
+                fi
+            fi
+            cp "$md_file" "$agent_file"
+        done
         echo "  已复制 agents -> $agents_target"
 
-        # 非 qoder/qwen 时，删除 agents 中 .md 文件的第一个 tools: 行
-        if $need_strip_tools; then
+        # 仅 opencode 删除 agents 中 .md 文件的第一个 tools: 行
+        # （claude/qwen/qoder 的 agent frontmatter 支持 tools，保留作为硬限制）
+        if [[ "$tool" == "opencode" ]]; then
             find "$agents_target" -name '*.md' -type f | while read -r md_file; do
                 remove_first_tools_line "$md_file"
             done

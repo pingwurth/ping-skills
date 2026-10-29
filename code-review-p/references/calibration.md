@@ -52,7 +52,10 @@ Do not report, in any mode:
 8. Anything you cannot name a failure scenario for.
 9. Pre-existing bugs in untouched code — unless the diff re-exposes them
    (touched function), depends on them, or a finding's fix is blocked by
-   them (then note the dependency, don't file the old bug).
+   them (then note the dependency, don't file the old bug). Whole-file
+   review (explicit single-file target with no diff baseline) and
+   whole-repo review (`repo`) are the exceptions: the whole file/repo is
+   the scope, nothing is "pre-existing".
 10. Theoretical race conditions without a concrete interleaving.
 11. Performance issues with no measurable impact path.
 12. Compliments, restatements of what the code does, or narration of the
