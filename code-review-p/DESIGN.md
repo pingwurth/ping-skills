@@ -233,6 +233,58 @@ end-to-end and filed four defects, all closed here:
    carrier 2 (the acceptance run's degradation was correct behavior,
    but undocumented).
 
+**v2.0 — Protocol-driven engine (`crp`): eliminating drift and amnesia.**
+Two acceptance runs kept surfacing the same class of defects — not review
+defects but *execution* defects: brief shape deviations, missing convergence
+proofs, uncounted `dupDropped`/`rounds`, carrier degradations reverse-
+engineered from tool censuses, and 429 interruptions recovered by improvised
+human forwarding because the candidate ledger lived only in the orchestrating
+context. v2.0 ports the sibling skills' proven `jaut` NEXT_STEP protocol
+(single entry `scripts/crp.py` + `scripts/crp/` package; jaut's
+layering — config/models/decisions/transitions/protocol/state/cli — reused
+with a review-domain L2: scope/ledger/verify/overlay/report/journal):
+
+1. **Determinism boundary** — the engine owns everything mechanical:
+   Phase 0 ladder (real read-only git probes, `-z -uall` porcelain parsing,
+   untracked accumulation, path/repo semantics), overlay discovery + trust,
+   exclusions application, brief shape validation, sweep plans per mode,
+   path normalization/dedup/ID assignment, verdict aggregation (quorum,
+   strict-majority, upgrade re-vote), keep-thresholds, dry/cap state
+   machine, confidence floor/ranking/caps, run-ledger accounting, report
+   rendering. The LLM owns judgment only: brief content, overlay extraction,
+   candidates, refutations, gap sweeps, report prose. Wrong-kind submissions
+   self-heal (router derives work from cursor, not history); submissions are
+   all-or-nothing validated and idempotent by kind+round+sha256.
+2. **Anti-amnesia** — state.json (atomic writes, cross-process lock) lives
+   in XDG state *outside the reviewed repo* (`~/.cache` is purgable by
+   spec; in-repo state would break the read-only gate and pollute the `??`
+   detection Phase 0 itself depends on). The candidate ledger *is* the
+   resume state; gap digests are rendered from it, not from context memory;
+   orphaned results re-submit idempotently; HEAD drift is one ask_user,
+   working-tree drift a warning.
+3. **Carrier unification** — deep-review.js keeps its no-barrier pipeline
+   but its agent returns became self-describing (`{angle, candidates}` /
+   `{file, line, summary, lens, verdict, evidence, severity}`) and the
+   Workflow tool's native `<transcriptDir>/journal.jsonl` is ingested by
+   `submit --kind carrier1`, so the Python engine recomputes the ledger
+   from raw returns (compact-journal fallback for unreachable journals;
+   JS/Python dedup parity locked by shared fixtures asserted in both test
+   suites). Report rendering and accounting come from one engine across
+   all carriers.
+4. **Spec holes closed** — untrusted-overlay **exclusions are suspended**
+   (an attacker's overlay could previously exclude the malicious files from
+   review); gate confirmation hoisted to exactly one batched ask_user after
+   the brief (the Workflow carrier cannot pause mid-pipeline); severity
+   enum and mode parameters enforced by schema validation, not discipline.
+5. **Mode table hardened** — quick = A/B/C(+K with red lines)/cap 4/no
+   verify; standard = 12+T/cap 10/one gap round; deep = 12+T/cap 20/
+   loop-until-2-dry (clamp [1,5]); floor 0.5 everywhere. All figures live
+   once, in `config.py` + `decisions.py`, locked by routing-matrix tests.
+6. **Docs** — SKILL.md restructured around the protocol (419 → ~230 lines,
+   ladder detail → references/scope.md, submission shapes →
+   references/submissions.md); python3-less hosts get an explicit degraded
+   manual flow (drift guards off, stated in the report).
+
 ## What was deliberately left out
 
 - Harness-specific machinery: ReportFindings tool schema, GitHub posting

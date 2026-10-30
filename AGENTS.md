@@ -10,9 +10,9 @@ This repo is a collection of five **agent skills** (for Claude Code, Qwen, Qoder
 | `batch-unit-test-generator/` | Same engine, batched over classes from a branch diff, via the `agents/batch-class-writer.md` subagent |
 | `sensitive-log-review/` | Audit Java diffs for sensitive data leaking into logs; emits an HTML report and CI gate codes |
 | `sensors-analyze/` | Inventory analytics tracking calls (埋点) into `sensors.csv` |
-| `code-review-p/` | Docs-driven code review (diff/PR/path/whole repo): targeted brief → 12-angle sweep → adversarial verify → ranked findings |
+| `code-review-p/` | Protocol-driven code review (diff/PR/path/whole repo): targeted brief → 12-angle sweep → adversarial verify → ranked findings; single-entry engine `scripts/crp.py` (NEXT_STEP protocol) owns scope/ledger/dedup/accounting/report |
 
-Inside a skill: `SKILL.md` (triggers + workflow), `references/` and `protocol/` (rules, JSON schema), `scripts/` (Python drivers), `tests/` (pytest). `code-review-p` is the docs-driven exception: `SKILL.md` + `references/` + `agents/` + a Workflow-tool script (`workflows/deep-review.js`), no `scripts/`. Docs and comments are largely Chinese — keep them that way.
+Inside a skill: `SKILL.md` (triggers + workflow), `references/` and `protocol/` (rules, JSON schema), `scripts/` (Python drivers), `tests/` (pytest). Docs and comments are largely Chinese — keep them that way (`code-review-p`'s `SKILL.md`/`references/` are English; its code comments and test docstrings are Chinese).
 
 ## Build, Test, and Development Commands
 
@@ -44,7 +44,8 @@ Use pytest, matching existing frameworks and conventions. Add focused tests besi
 - The unit-test skills drive scripts and an LLM through the **NEXT_STEP protocol**; exit codes: 0 = done, 1 = continue, 2 = script error, 3 = state/protocol error. On conflict: Schema > `references/UnitTestRules.md` > `SKILL.md` > judgment.
 - The two unit-test skills each carry a copy of the `jaut` engine that **has diverged** — diff both and run both suites after shared changes.
 - Only `src/test/java/**` may change; never production code, `pom.xml`, or a hand-edited `state.json`. Read `sensors-analyze/CLAUDE.md` before touching that skill.
-- `code-review-p/workflows/deep-review.js` assumes the Workflow tool's script API (agent/parallel/pipeline/phase/log/budget) — check it against the workflow-authoring reference when editing; its suite (`tests/test_workflow_script.py`) needs node and skips without it.
+- `code-review-p/workflows/deep-review.js` assumes the Workflow tool's script API (agent/parallel/pipeline/phase/log/budget) — check it against the workflow-authoring reference when editing; its suite (`tests/test_workflow_script.py`) needs node and skips without it. Its dedup/aggregate semantics must stay in lockstep with `code-review-p/scripts/crp/ledger.py`/`verify.py` — parity is asserted over the shared fixtures `tests/fixtures/dedup_cases.json` in both suites; after changing either side, run both.
+- `code-review-p`'s engine writes only to its run dir outside the reviewed repo (XDG state home; `CRP_HOME` overrides) — the reviewed repo stays strictly read-only, and `state.json` is never hand-edited.
 
 ## Commit & Pull Request Guidelines
 

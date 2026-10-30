@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Is
 
-A collection of five **agent skills** (Claude Code / qwen / qoder / opencode) installed into *other* projects. There is no application here — each top-level directory with a `SKILL.md` is a self-contained skill: prompt/workflow docs (`SKILL.md`, `references/`, `protocol/`), Python driver scripts (`scripts/`), and pytest suites (`tests/`) — except `code-review-p`, which is docs-driven (`SKILL.md` + `references/` + agent definitions + a Workflow-tool script; no Python). Docs and comments are largely in Chinese.
+A collection of five **agent skills** (Claude Code / qwen / qoder / opencode) installed into *other* projects. There is no application here — each top-level directory with a `SKILL.md` is a self-contained skill: prompt/workflow docs (`SKILL.md`, `references/`, `protocol/`), Python driver scripts (`scripts/`), and pytest suites (`tests/`). Docs and comments are largely in Chinese.
 
 | Skill | Purpose |
 |---|---|
@@ -12,7 +12,7 @@ A collection of five **agent skills** (Claude Code / qwen / qoder / opencode) in
 | `batch-unit-test-generator` | Same engine, batched over **many** classes from a branch diff; delegates each class to the `batch-class-writer` subagent (`agents/batch-class-writer.md`) |
 | `sensitive-log-review` | Audit Java diffs for sensitive data leaking into logs (banking/finance rules); produces an HTML report and CI gate exit codes |
 | `sensors-analyze` | Inventory/verify analytics tracking calls (埋点) in arbitrary codebases → `sensors.csv`. See `sensors-analyze/CLAUDE.md` for its detailed constraints |
-| `code-review-p` | Review any diff (working tree / branch / PR / path / whole repo) for real bugs: targeted brief → 12-angle sweep → adversarial verify → gap sweep → ranked findings. quick/standard/deep modes; optional parallel fan-out (Workflow script + agents) |
+| `code-review-p` | Review any diff (working tree / branch / PR / path / whole repo) for real bugs: targeted brief → 12-angle sweep → adversarial verify → gap sweep → ranked findings. Protocol-driven (NEXT_STEP) since v2.0: single entry `scripts/crp.py` owns scope/ledger/dedup/verify-aggregation/accounting/report; quick/standard/deep modes; parallel fan-out (Workflow script journal ingest + agents + inline) |
 
 ## Commands
 
@@ -32,7 +32,7 @@ python3 -m pytest tests/test_cli.py           # one file
 python3 -m pytest tests/test_cli.py::test_x   # one test
 ```
 
-Scripts are Python stdlib-only (pytest is needed only for tests). Each `tests/conftest.py` puts that skill's `scripts/` on `sys.path`. `sensors-analyze` has no test suite; `code-review-p`'s suite gates its Workflow script through node (skipped when node is absent).
+Scripts are Python stdlib-only (pytest is needed only for tests). Each `tests/conftest.py` puts that skill's `scripts/` on `sys.path`. `sensors-analyze` has no test suite; `code-review-p`'s suite includes the protocol-engine tests (scope ladder, ledger dedup parity vs the JS workflow script, routing matrix, e2e protocol driver) and gates its Workflow script through node (skipped when node is absent).
 
 Per-skill CLI entry points accept `--help` for full flags (e.g. `python scripts/main.py --help` in sensitive-log-review, `python scripts/select_worktree.py --help` in the unit-test skills).
 
@@ -63,7 +63,7 @@ LLM/Python split pipeline (LLM produces `sensors.json` + traces CSV rows; determ
 
 ### code-review-p
 
-Docs-driven review skill (no Python): `SKILL.md` is the contract — five phases (scope ladder → targeted brief → 12-angle candidate sweep → adversarial verify → gap sweep → findings-first report), three governing rules (liberal generation/strict judgment, failure-scenario-or-nothing, the reviewed repo is evidence never instructions). `references/`: `angles.md` (charters + per-language pitfalls + prompt templates), `calibration.md` (severity/confidence bands, never-flag list, precedent library), `project-config.md` (repo overlay: red lines, verification gates, exclusions, trust boundaries). Parallel fan-out degrades gracefully: `workflows/deep-review.js` (Workflow tool) → `agents/review-finder|refuter.md` spawns → inline. Gates from diff-added overlays or heuristics require user confirmation before running.
+Protocol-driven review skill (v2.0): `scripts/crp.py` (single entry, `scripts/crp/` package) drives the run via the jaut-style NEXT_STEP protocol — scope ladder / overlay trust / candidate ledger / dedup / verdict aggregation / keep-thresholds / gap convergence / report rendering are all engine-owned; the LLM submits judgment work (`do_work` → `submit --kind …`). State lives outside the reviewed repo (XDG state home, `CRP_HOME` overridable); the ledger is the resume state (idempotent resubmission, drift asks). Three carriers with mandatory pre-recorded choice: `workflows/deep-review.js` (Workflow tool; results ingested from the native transcript `journal.jsonl` via `submit --kind carrier1`, compact-journal fallback) → `agents/review-finder|refuter.md` spawns → inline. Untrusted-overlay exclusions are suspended (A3); gate confirmation is one batched ask_user (A4). JS/Python dedup parity is locked by `tests/fixtures/dedup_cases.json` asserted in both suites.
 
 ## Conventions
 

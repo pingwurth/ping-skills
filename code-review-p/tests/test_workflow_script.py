@@ -64,6 +64,58 @@ def test_script_exists_and_contract_markers():
     assert "Math.max(1, Math.min(" in src, "maxRounds 缺少下界钳制（maxRounds:0 会空跑）"
 
 
+def test_self_describing_schemas_and_journal():
+    """v2.0 契约：finder/refuter 返回自描述（angle / file+line+summary+lens），
+    返回值携带压缩 journal —— crp.py submit --kind carrier1 的摄取前提。"""
+    src = script_src()
+    # finder 返回含 angle
+    assert "angle: { type: 'string'" in src, "CANDIDATES_SCHEMA 缺少自描述 angle"
+    assert "required: ['angle', 'candidates']" in src
+    # refuter 返回回显 finding 身份与透镜
+    for marker in ("file: { type: 'string'", "summary: { type: 'string'",
+                   "lens: { type: 'string', enum: ['correctness', 'reproduction', 'security']",
+                   "required: ['file', 'line', 'summary', 'lens', 'verdict', 'evidence', 'severity']"):
+        assert marker in src, f"VERDICT_SCHEMA 缺少 {marker.split(':')[0]}"
+    # 压缩 journal(兜底摄取通道) + 计数键为 snake_case(Python apply_compact 对齐)
+    assert "journal: {" in src and "journalFinders" in src and "journalVerdicts" in src
+    assert "counters: { rounds: round, total_seen: seen.length, dup_dropped: dupDropped }" in src
+    # 透镜按构造打标(不信任 agent 回显)
+    assert "lens: ls[i][0]" in src
+
+
+# ── 奇偶校验：与 Python(ledger.py) 共享夹具的双向断言 ────────────────
+
+FIXTURES = Path(__file__).parent / "fixtures"
+DEDUP_CASES = json.loads((FIXTURES / "dedup_cases.json").read_text(encoding="utf-8"))
+
+
+@requires_node
+def test_parity_fixtures_against_js():
+    """tests/fixtures/dedup_cases.json 由 Python 与 JS 两侧共同遍历 —— 锁死语义漂移。"""
+    block = extract_pure_block(script_src())
+    js = (
+        block
+        + f"\nconst cases = {json.dumps(DEDUP_CASES['dup_cases'], ensure_ascii=False)};"
+        + "\nconst out = cases.map(c => ({name: c.name, got: !!isDup(c.seen, c.cand), want: c.dup}));"
+        + "\nconsole.log(JSON.stringify(out.filter(r => r.got !== r.want)))"
+    )
+    mismatches = json.loads(run_node(js))
+    assert mismatches == [], f"JS/期望分歧: {mismatches}"
+
+
+@requires_node
+def test_parity_norm_fixtures_against_js():
+    block = extract_pure_block(script_src())
+    js = (
+        block
+        + f"\nconst cases = {json.dumps(DEDUP_CASES['norm_cases'], ensure_ascii=False)};"
+        + "\nconst out = cases.map(c => ({f: c.f, got: normFile(c.f, c.root), want: c.expected}));"
+        + "\nconsole.log(JSON.stringify(out.filter(r => r.got !== r.want)))"
+    )
+    mismatches = json.loads(run_node(js))
+    assert mismatches == [], f"normFile JS/期望分歧: {mismatches}"
+
+
 # ── 语法门禁（node 包装检查） ────────────────────────────────────────
 
 @requires_node

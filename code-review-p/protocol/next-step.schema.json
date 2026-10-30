@@ -1,0 +1,210 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/skills/code-review-p/protocol/next-step.schema.json",
+  "title": "NEXT_STEP protocol payload",
+  "description": "code-review-p 确定性引擎(crp.py)每次调用在 stdout 末尾输出的唯一协议块(被 :::NEXT_STEP_BEGIN::: / :::NEXT_STEP_END::: 包裹的 JSON)。调用方只解析标记块中的 JSON。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "script",
+    "status",
+    "exit_code",
+    "summary",
+    "artifacts",
+    "next_step"
+  ],
+  "properties": {
+    "protocol_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "script": {
+      "type": "string",
+      "description": "产出本协议块的入口标识, 如 crp.py resume"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["success", "empty", "failed", "needs_input"]
+    },
+    "exit_code": {
+      "type": "integer",
+      "description": "0=步骤干净完成(含 finish); 1=等待 LLM/用户工作(正常流转信号, 非失败); 2=脚本执行错误; 3=状态/提交错误",
+      "enum": [0, 1, 2, 3]
+    },
+    "summary": {
+      "type": "string",
+      "description": "面向调用方的一句话结论(可多行, 如 runs 列表)"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["path", "kind"],
+        "properties": {
+          "path": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "description": "产物类型",
+            "examples": ["state", "run_dir", "brief", "digest", "report", "scope"]
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "可选的量化指标(轮次、候选计数、账目等)",
+      "additionalProperties": true
+    },
+    "next_step": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "reason"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["run_script", "do_work", "ask_user", "finish", "abort"]
+        },
+        "reason": { "type": "string" },
+        "script": {
+          "type": "string",
+          "description": "type=run_script 时, 下一个脚本的绝对路径(恒为 crp.py)"
+        },
+        "params": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "type=run_script 时的命令行参数(含子命令与 --run-dir)"
+        },
+        "instructions": {
+          "type": "string",
+          "description": "type=do_work 时, 交给 LLM 的判断类工作说明(章程指向 references/*.md)"
+        },
+        "context": {
+          "type": "object",
+          "description": "type=do_work 时的紧凑内联上下文(角度表/digest/计数)",
+          "additionalProperties": true
+        },
+        "output": {
+          "type": "string",
+          "description": "type=do_work 时, LLM 应写入的输出文件绝对路径"
+        },
+        "shape": {
+          "type": "string",
+          "description": "type=do_work 时, 提交文件形状说明(指向 references/submissions.md + 最小示例)"
+        },
+        "submit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["script", "params"],
+          "description": "type=do_work 时由脚本给出的提交命令; 调用方写完 output 文件后逐字执行 script+params, 不得增删参数",
+          "properties": {
+            "script": {
+              "type": "string",
+              "description": "提交命令绝对路径(恒为 crp.py)"
+            },
+            "params": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "命令行参数(含 submit --kind … --file … --run-dir …)"
+            }
+          }
+        },
+        "question": {
+          "type": "string",
+          "description": "type=ask_user 时, 向用户逐字转述的问题"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "type=abort 时须逐字转述给用户的中止说明。调用方转述后立即终止本技能: 禁止执行任何后续脚本、禁止重试。无 resume(不等待答复)"
+        },
+        "resume": {
+          "type": "array",
+          "description": "type=ask_user 时的用户选项恢复指引。用户答复后, 调用方应选取匹配的选项: 有 script 者逐字执行其 script+params(占位符表示需替换为用户给定的值); terminate 选项无命令, 直接结束任务",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["option", "label"],
+            "properties": {
+              "option": {
+                "type": "string",
+                "description": "选项标识",
+                "enum": ["approve_all", "skip_all", "choice", "new_scope", "resume_old_scope", "resume_run", "terminate"]
+              },
+              "label": {
+                "type": "string",
+                "description": "人读选项名, 与 question 中列出的选项一致"
+              },
+              "script": {
+                "type": "string",
+                "description": "恢复脚本绝对路径(恒为 crp.py); terminate 选项无此项"
+              },
+              "params": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "恢复脚本命令行参数(已含 answer --run-dir … --key … --choice …; 占位符如 TARGET 表示需替换为用户给定的值)"
+              },
+              "note": {
+                "type": "string",
+                "description": "需用户补充值(如新范围 TARGET)或动作说明"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "option": { "not": { "const": "terminate" } }
+                  }
+                },
+                "then": { "required": ["script", "params"] }
+              }
+            ]
+          }
+        },
+        "deliverables": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "type=finish 时的交付物路径列表(报告/状态/台账导出)"
+        },
+        "report": {
+          "type": "string",
+          "description": "type=finish 时由引擎渲染的完整审查报告; 调用方须逐字转述, 不得改写任何数字、路径或命令。可选; status/runs 等信息型命令的 finish 不携带本字段"
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "run_script" } } },
+          "then": { "required": ["script", "params"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "do_work" } } },
+          "then": { "required": ["instructions", "output", "submit"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "ask_user" } } },
+          "then": { "required": ["question"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "abort" } } },
+          "then": { "required": ["message"], "not": { "required": ["resume"] } }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["script", "next_step"],
+        "properties": {
+          "script": { "not": { "enum": ["crp.py status", "crp.py runs"] } },
+          "next_step": {
+            "required": ["type"],
+            "properties": { "type": { "const": "finish" } }
+          }
+        }
+      },
+      "then": { "properties": { "next_step": { "required": ["report"] } } }
+    }
+  ]
+}

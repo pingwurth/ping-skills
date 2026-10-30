@@ -1,0 +1,66 @@
+{
+  "comment": "Python(ledger) 与 JS(deep-review.js pure helpers) 共享的去重奇偶校验夹具; 两套测试都遍历本文件, 锁死跨实现语义漂移。",
+  "dup_cases": [
+    {
+      "name": "cjk-distinct-same-line-not-merged",
+      "seen": [{"file": "src/auth.ts", "line": 42, "summary": "令牌比较先于过期解析，NaN 通过校验"}],
+      "cand": {"file": "src/auth.ts", "line": 42, "summary": "缺少并发锁，重复提交订单"},
+      "dup": false
+    },
+    {
+      "name": "cjk-same-defect-line-drift",
+      "seen": [{"file": "src/auth.ts", "line": 42, "summary": "令牌比较先于过期解析，NaN 通过校验"}],
+      "cand": {"file": "src/auth.ts", "line": 44, "summary": "令牌比较先于过期解析，NaN 通过校验"},
+      "dup": true
+    },
+    {
+      "name": "english-band-in",
+      "seen": [{"file": "a.py", "line": 10, "summary": "Missing await on fetchUser before reading result"}],
+      "cand": {"file": "a.py", "line": 13, "summary": "Missing await on fetchUser before reading result"},
+      "dup": true
+    },
+    {
+      "name": "english-band-out",
+      "seen": [{"file": "a.py", "line": 10, "summary": "Missing await on fetchUser before reading result"}],
+      "cand": {"file": "a.py", "line": 14, "summary": "Missing await on fetchUser before reading result"},
+      "dup": false
+    },
+    {
+      "name": "distinct-summaries-same-line",
+      "seen": [{"file": "a.py", "line": 7, "summary": "Missing await on fetchUser"}],
+      "cand": {"file": "a.py", "line": 7, "summary": "Off-by-one in the retry loop bound"},
+      "dup": false
+    },
+    {
+      "name": "empty-summary-never-merges",
+      "seen": [{"file": "a.py", "line": 7, "summary": ""}],
+      "cand": {"file": "a.py", "line": 7, "summary": ""},
+      "dup": false
+    },
+    {
+      "name": "hangul-shingle-same-defect",
+      "seen": [{"file": "svc/pay.go", "line": 30, "summary": "결제 중복 처리 오류"}],
+      "cand": {"file": "svc/pay.go", "line": 31, "summary": "결제 중복 처리 오류 발생"},
+      "dup": true
+    },
+    {
+      "name": "cross-file-never-merges",
+      "seen": [{"file": "a.py", "line": 10, "summary": "Missing await on fetchUser before reading result"}],
+      "cand": {"file": "b.py", "line": 10, "summary": "Missing await on fetchUser before reading result"},
+      "dup": false
+    },
+    {
+      "name": "paraphrase-token-overlap",
+      "seen": [{"file": "a.py", "line": 5, "summary": "Missing await on fetchUser before reading result"}],
+      "cand": {"file": "a.py", "line": 6, "summary": "fetchUser 的 await 缺失导致 result 未就绪"},
+      "dup": true
+    }
+  ],
+  "norm_cases": [
+    {"f": "/repo/x/services/billing/A.java", "root": "/repo/x", "expected": "services/billing/A.java"},
+    {"f": "services/billing/A.java", "root": "/repo/x", "expected": "services/billing/A.java"},
+    {"f": "./services/billing/A.java", "root": "/repo/x", "expected": "services/billing/A.java"},
+    {"f": "\\repo\\x\\services\\B.java", "root": "/repo/x", "expected": "services/B.java"},
+    {"f": "/elsewhere/C.java", "root": "/repo/x", "expected": "/elsewhere/C.java"}
+  ]
+}
