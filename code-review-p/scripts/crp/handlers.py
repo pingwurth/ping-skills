@@ -299,15 +299,26 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                 raise StepError.state_error("carrier1 需要 --transcript-dir 或 --file")
             transcript_dir: Optional[Path] = None
             compact_file: Optional[Path] = None
+            js_counters: Optional[dict] = None
             if args.transcript_dir:
                 transcript_dir = Path(args.transcript_dir)
             else:
                 sniff = Path(args.file).read_text(encoding="utf-8").strip()
-                transcript_dir = None if sniff.startswith("{") else Path(sniff.splitlines()[0])
-                compact_file = Path(args.file) if transcript_dir is None else None
+                lines = [l for l in sniff.splitlines() if l.strip()]
+                if lines and lines[0].startswith("{"):
+                    compact_file = Path(args.file)  # 压缩 journal 模式
+                else:
+                    transcript_dir = Path(lines[0].strip())
+                    # 可选第二行: workflow 返回值计数 JSON —— parity 对照(分歧上报告)
+                    if len(lines) > 1 and lines[1].strip().startswith("{"):
+                        try:
+                            js_counters = json.loads(lines[1])
+                        except ValueError:
+                            js_counters = None
             try:
                 if transcript_dir is not None and (transcript_dir / "journal.jsonl").is_file():
-                    note = journal.ingest_transcript(state, transcript_dir)
+                    note = journal.ingest_transcript(state, transcript_dir,
+                                                     js_counters=js_counters)
                 else:
                     compact_file = compact_file or Path(args.file)
                     note = journal.apply_compact(state, journal.load_compact(compact_file))

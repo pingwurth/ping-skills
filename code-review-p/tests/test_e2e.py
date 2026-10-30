@@ -537,3 +537,95 @@ def test_c009_answer_run不死锁(tmp_path, quick_repo):
         env={**os.environ, config.CRP_HOME_ENV: str(tmp_path / "home")})
     assert proc.returncode in (0, 1), "不得挂死或崩溃"
     assert ":::NEXT_STEP_BEGIN:::" in proc.stdout
+
+
+# ── 遗留回修: 计数口径与契约缺口 ────────────────────────────────────
+def test_口径_逐条丢弃不整批消失(tmp_path):
+    """观察项 1 回归: 单条非法候选只丢那一条, 同 finder 其余候选必须入账。
+
+    v2.0.1 原版: 全有或全无按 finder 跳过, 9 条超长 summary 让 32 条候选
+    静默消失(96→64) —— 无声上限正是 SKILL 禁止的行为。
+    """
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 1, "summary": "missing await on fetchUser call",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"},
+        {"file": "a.py", "line": 2, "summary": "x" * 600,  # 超长 —— 只丢这条
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"},
+        {"file": "a.py", "line": 30, "summary": "inverted null check dereferences pointer",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"},
+    ]}], "verdicts": [], "counters": {}}
+    journal_mod.apply_compact(st, data)
+    summaries = [c["summary"] for c in st.candidates if c["status"] != "dup"]
+    assert summaries == ["missing await on fetchUser call",
+                         "inverted null check dereferences pointer"]
+    assert st.accounting["invalid_dropped"] == 1
+    assert st.coverage["angles"]["A"]["dropped_invalid"] == 1
+
+
+def test_口径_parity原始总数不变式(tmp_path):
+    """raw(JS fresh+dup) == raw(Py fresh+dup+invalid+overcap); 可解释分歧注明成因而非告警。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 1, "summary": "fresh one",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"},
+        {"file": "a.py", "line": 3, "summary": "fresh one",  # dup
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"},
+        {"file": "a.py", "line": 5, "summary": "y" * 600,  # invalid
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"},
+    ]}], "verdicts": [], "counters": {"total_seen": 2, "dup_dropped": 1}}
+    journal_mod.apply_compact(st, data)
+    notes = st.accounting.get("parity_notes")
+    # raw 两侧一致(3==3), 分桶差异(1 invalid)被解释 → 不应出现"人工查"告警
+    assert notes == [] or all("人工" not in n for n in notes), notes
+
+
+def test_口径_未解释分歧必须告警(tmp_path):
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 1, "summary": "only fresh candidate",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}],
+        "verdicts": [], "counters": {"total_seen": 5, "dup_dropped": 0}}  # JS 称 5
+    journal_mod.apply_compact(st, data)
+    assert any("人工" in n for n in st.accounting.get("parity_notes", []))
+
+
+def test_退出码契约_一二三各可证(tmp_path, quick_repo):
+    """c046 回归: exit==payload 对 1(do_work)/2(执行错误)/3(状态错误) 各至少一条。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick")
+    assert payload["exit_code"] == config.EXIT_CONTINUE, "do_work 等待 = 1(正常流转)"
+    # exit 2: carrier1 摄取失败(垃圾文件)
+    d2, p2 = _driver(quick_repo, tmp_path / "home2", "standard")
+    while p2["next_step"]["type"] == "do_work":
+        ns = p2["next_step"]
+        d2._note_run_dir(ns)
+        if "carrier" in str(ns.get("submit", {}).get("params", [])):
+            (d2.run_dir / "in").mkdir(parents=True, exist_ok=True)
+            (d2.run_dir / "in" / "03-carrier.json").write_text(
+                json.dumps({"carrier": 1, "reason": "x"}), encoding="utf-8")
+            p2, _ = d2.run_argv(ns["submit"]["params"])
+            break
+        d2.fabricate(ns)
+        p2, _ = d2.run_argv(ns["submit"]["params"])
+    bad = d2.run_dir / "in" / "garbage.json"
+    bad.write_text('{"finders": []}', encoding="utf-8")  # 空 finders → 摄取失败
+    p3, rc3 = d2.run_argv(["submit", "--kind", "carrier1", "--file", str(bad),
+                           "--run-dir", str(d2.run_dir)])
+    assert p3["exit_code"] == config.EXIT_ERROR and rc3 == config.EXIT_ERROR
+    assert p3["next_step"]["type"] == "ask_user"

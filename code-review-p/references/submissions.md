@@ -2,9 +2,13 @@
 
 `crp.py submit --kind <kind> --file <file>` 的每种提交文件形状与示例。
 全部校验为**全有或全无**: 任何字段不合法, 整份拒收(exit 3, 错误逐条列出),
-不入账; 字节相同的重投(同轮同种类)被幂等吸收。大小上限拒收不截断:
-单文件 ≤200 候选 / summary ≤500 字符 / failure_scenario ≤2000 /
-evidence ≤4000 / votes ≤40。
+不入账。大小上限拒收不截断: 单文件 ≤200 候选 / summary ≤500 字符 /
+failure_scenario ≤2000 / evidence ≤4000 / votes ≤40(deep-review.js 的
+schema 已带同值 maxLength, 生成端与接收端对齐)。
+
+**幂等语义**: 提交幂等键 = `kind | round | sha256(文件字节)` ——
+同轮同种类字节相同的重投(孤儿结果再次送达)被吸收为无操作成功, 计数不变;
+跨轮的相同字节是**新工作**(如连续空的 gap 轮), 不会被误吞。
 
 ## overlay — 项目配置提取(Phase 1)
 
@@ -137,9 +141,11 @@ markdown 文本, 六节 `##` 标题(可用审查语言, 节序即契约):
 `--transcript-dir <dir>`(优先) 或 `--file <file>`:
 
 - **transcript 模式**: 把 Workflow 工具结果里的 transcriptDir 路径写入文件
-  (单行)提交, 引擎直接读 `<dir>/journal.jsonl`。
+  (第一行)提交, 引擎直接读 `<dir>/journal.jsonl`。**可选第二行**: workflow
+  返回值里的计数 JSON(如 `{"rounds":1,"totalSeen":66,"dupDropped":30}`)——
+  引擎摄取后与 Python 重算对照, 分歧记入报告 parity 注记(可见, 不静默)。
 - **压缩 journal 模式**(journal 不可读的兜底): 把 deep-review.js 返回值中的
   `journal` 对象写成 JSON 文件提交。引擎按内容嗅探(行首是 `{` 即 JSON)。
 
-引擎在 Python 侧重算去重/裁决/计数; 与 JS 内部计数分歧记入报告
-parity 注记(可见, 不静默)。
+引擎在 Python 侧从原始 agent 返回重算去重/裁决/计数; 单条非法候选(如超长
+summary)逐条丢弃并计入账目(`invalid_dropped`), 绝不静默消失。

@@ -103,7 +103,12 @@ def _match_candidate(state: State, file, line, summary) -> Optional[dict]:
 # 摄取主体
 # --------------------------------------------------------------------------- #
 def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
-    """候选入账 + 票据挂载; 返回 finder 记录数。"""
+    """候选入账 + 票据挂载; 返回 finder 记录数。
+
+    逐条校验逐条丢弃(计数可见) —— 全有或全无的整批跳过曾让 96 条原始候选
+    静默变 64(自食验收观察项 1 的根因): 单条非法(如超长 summary)只丢那一条,
+    计入 accounting.invalid_dropped 与 coverage.dropped_invalid。
+    """
     finder_count = 0
     gap_seen = 0
     root = (state.repo or {}).get("cwd", "")
@@ -116,19 +121,25 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
             if angle == config.GAP_ANGLE_KEY:
                 gap_seen += 1
                 round_no, origin = 1 + gap_seen, "gap"
-            items = {"items": [{
-                "angle": angle,
-                "coverage": {"ran": True},
-                "candidates": [dict(c, file=ledger.norm_file(c.get("file"), root))
-                               for c in (result.get("candidates") or [])],
-            }]}
-            errors = ledger.validate_candidates_file(items)
-            if errors:
-                module_logger().warning(f"journal finder(angle={angle}) 校验失败跳过: {errors}")
-                state.coverage.setdefault("angles", {}).setdefault(
-                    angle, {"ran": False, "raw": 0, "fresh": 0, "dropped": 0})
-                continue
-            ledger.ingest_candidates(state, items, origin=origin, round_no=round_no)
+            valid: list[dict] = []
+            cov = state.coverage.setdefault("angles", {}).setdefault(
+                angle, {"ran": True, "raw": 0, "fresh": 0, "dropped": 0, "dropped_invalid": 0})
+            for c in (result.get("candidates") or []):
+                if not isinstance(c, dict):
+                    c = {}
+                c = dict(c, file=ledger.norm_file(c.get("file"), root))
+                errs = ledger.validate_candidate(c, f"journal:{angle}")
+                if errs:
+                    module_logger().warning(f"journal 候选非法丢弃: {errs}")
+                    state.accounting["invalid_dropped"] = \
+                        state.accounting.get("invalid_dropped", 0) + 1
+                    cov["dropped_invalid"] = cov.get("dropped_invalid", 0) + 1
+                    continue
+                valid.append(c)
+            items = {"items": [{"angle": angle, "coverage": {"ran": True},
+                                "candidates": valid}]}
+            if valid:
+                ledger.ingest_candidates(state, items, origin=origin, round_no=round_no)
         elif kind == "refuter":
             cand = _match_candidate(state, result.get("file"), result.get("line"),
                                     result.get("summary"))
@@ -189,8 +200,49 @@ def _account_rounds(state: State) -> None:
     state.phase, state.cursor["awaiting"] = "report", "details"
 
 
-def ingest_transcript(state: State, transcript_dir: Path) -> str:
+def _parity_notes(state: State, js: dict) -> None:
+    """JS 内部计数 vs Python 重算的可见对照(分歧记入 parity_notes, 不静默)。
+
+    口径: JS totalSeen/dupDropped 为去重后/去重数; Python 台账
+    fresh + dup + invalid_dropped + 超帽丢弃 = 原始候选数。
+    不变式 = 原始总数两侧相等; 分桶差异若能被 invalid 丢弃解释(JS 生成端
+    schema 已补 maxLength 后不会再发生), 注明成因而非告警。
+    """
+    acc = state.accounting
+    fresh = sum(1 for c in state.candidates if c["status"] != "dup")
+    py_fresh, py_dup = fresh, acc.get("dup_dropped", 0)
+    py_invalid = acc.get("invalid_dropped", 0)
+    py_overcap = sum(cov.get("dropped", 0) for cov in
+                     (state.coverage.get("angles") or {}).values())
+    js_fresh = js.get("total_seen", js.get("totalSeen"))
+    js_dup = js.get("dup_dropped", js.get("dupDropped"))
+    if js_fresh is None or js_dup is None:
+        return
+    js_raw = int(js_fresh) + int(js_dup)
+    py_raw = py_fresh + py_dup + py_invalid + py_overcap
+    notes = acc.setdefault("parity_notes", [])
+    if js_raw != py_raw:
+        notes.append(f"raw: JS={js_raw} Python={py_raw} —— 原始候选总数不一致, "
+                     "存在未记账的丢弃(人工查 coverage 与 journal)")
+        return
+    diff = abs(int(js_fresh) - py_fresh) + abs(int(js_dup) - py_dup)
+    if diff == 0:
+        return
+    if diff <= py_invalid:
+        notes.append(f"分桶分歧 fresh(JS={js_fresh}/Py={py_fresh}) dup(JS={js_dup}/Py={py_dup}) "
+                     f"由 {py_invalid} 条 invalid 丢弃完全解释(JS schema 未限长全收; "
+                     "生成端已补 maxLength, 以后不再发生)")
+    else:
+        notes.append(f"分桶分歧 fresh(JS={js_fresh}/Py={py_fresh}) dup(JS={js_dup}/Py={py_dup}) "
+                     "超出 invalid 丢弃可解释范围 —— 去重语义需人工对照")
+
+
+def ingest_transcript(state: State, transcript_dir: Path,
+                      js_counters: Optional[dict] = None) -> str:
     """摄取 transcript journal: 候选入账 → 票据终裁 → 轮次/账目重算 → 进入报告。
+
+    js_counters(可选): workflow 返回值里的计数(rounds/totalSeen/dupDropped),
+    用于跨引擎 parity 对照(分歧记入 parity_notes 上报告)。
 
     载体 1 的 gap 循环在 workflow 内部完成(maxRounds 已由扫描计划传入),
     摄取后引擎直接进入报告阶段 —— 不再开引擎侧 gap 轮。
@@ -200,6 +252,8 @@ def ingest_transcript(state: State, transcript_dir: Path) -> str:
         raise ValueError(f"journal 中未发现 finder 返回: {transcript_dir}")
     _finalize_all(state)
     _account_rounds(state)
+    if js_counters:
+        _parity_notes(state, js_counters)
     return (f"journal 摄取: {count} finder 返回, "
             f"{state.accounting.get('total_seen', 0)} 入账, "
             f"{len(state.accounting.get('round_history') or [])} 轮")
@@ -221,11 +275,6 @@ def apply_compact(state: State, data: dict) -> str:
     _finalize_all(state)
     _account_rounds(state)
     js = data.get("counters") or {}
-    ours = {"total_seen": state.accounting.get("total_seen", 0),
-            "dup_dropped": state.accounting.get("dup_dropped", 0)}
-    for key, value in ours.items():
-        theirs = js.get(key)
-        if theirs is not None and theirs != value:
-            state.accounting.setdefault("parity_notes", []).append(
-                f"{key}: JS={theirs} Python={value}(以 Python 台账为准)")
+    if js:
+        _parity_notes(state, js)
     return f"压缩 journal 摄取: {count} finder 返回"

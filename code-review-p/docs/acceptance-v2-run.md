@@ -58,7 +58,15 @@ Run ID：`crp-20261030-133633-6304`（`<XDG state>/code-review-p/ping-skills-d53
 
 ## 五、观察项（不计缺陷，回修时对齐）
 
-1. **JS/Python 台账计数口径分歧**（66/30 vs 64/12）：两侧去重顺序与票据回配语义（c051）共同所致；transcript 模式无 parity 对照路径，分歧未上报告。回修后应以共享夹具+transcript 模式 parity 注记锁死。
+1. **JS/Python 台账计数口径分歧**（66/30 vs 64/12）——**已回修并实证对账**：
+   根因 = journal 摄取对含非法候选（9 条 summary 超长）的 finder 整批跳过
+   （全有或全无），32 条候选静默丢失（96→64）。修复后用本 run 的真实
+   journal 重放：**96 原始候选完全对账**（61 fresh + 26 dup + 9 invalid + 0
+   超帽 = 96）；剩余分桶差异（66/61、30/26）恰好全部由 9 条 invalid 解释
+   （JS schema 未限长全收）。生成端 schema 已补 maxLength（500/2000/4000，
+   与 Python 接收上限逐值对齐），未来不再产生 invalid 分歧；transcript 模式
+   支持可选计数行做 parity 对照（raw 总数不变式 + 可解释分歧注成因、
+   未解释分歧告警），文档见 submissions.md。
 2. workflow 预算耗尽未跑 gap 轮（设计内降级，coverage 记账 E 角度 ran:false）。
 3. 7 个 agent 429 阵亡的处理全部符合契约（finder→coverage hole；refuter→单票/零票 PLAUSIBLE 保留或 inline 补证缺失）。
 
@@ -72,9 +80,15 @@ Run ID：`crp-20261030-133633-6304`（`<XDG state>/code-review-p/ping-skills-d53
 （有 Makefile 仓库 e2e、trusted overlay 排除 e2e、子目录调用、--fix 全链路 e2e、队列
 累加、quick+wf、journal 升级、answer run 防死锁），套件 115 → 123 全绿。
 
-遗留（下轮）：P2 其余（c038 argparse 不经协议块、c043/c046/c048 契约测试缺口、
-c041 幂等键文档、c052 scope.md 次序描述、c012 locale 解码、c015 解析防御）与
-观察项 1（JS/Python 计数口径 —— c051 修复后需复跑对照）；P3 由 ledger.json 存档。
+**遗留项二轮回修亦完成**（同日）：
+- 观察项 1 计数口径（见 §5，逐条丢弃+计数、JS maxLength 对齐、parity 不变式与归因）；
+- c038 argparse 用法错误转 exit-3 协议块（不裸 SystemExit）；
+- c046 退出码契约 exit 1/2/3 各有断言（do_work 等待=1、journal 摄取失败=2、错序/用法=3）；
+- c048 损坏 state 的 CLI 级 e2e（恰一块 exit 3，不静默重建）；
+- c041 幂等键语义（kind+round+sha256）与 carrier1 可选计数行写入 submissions.md；
+- c052 路径受限阶梯改为 HEAD 先行（代码对齐 scope.md 契约，附 upstream 冲突场景测试）；
+- c012 git/gh 子进程显式 utf-8/replace 解码；c015 package.json scripts 类型防御。
+套件 123 → 130 全绿。剩余 P3 由 ledger.json 存档。
 
 ## 附：证据指针
 

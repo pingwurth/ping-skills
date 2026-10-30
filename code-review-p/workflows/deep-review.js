@@ -34,8 +34,10 @@ const CANDIDATES_SCHEMA = {
         properties: {
           file: { type: 'string', description: 'repo-relative path, forward slashes' },
           line: { type: 'number' },
-          summary: { type: 'string' },
-          failure_scenario: { type: 'string' },
+          // maxLength mirrors the Python ledger's acceptance limits (config.py) —
+          // generation-side parity: agents cannot produce what the engine drops.
+          summary: { type: 'string', maxLength: 500 },
+          failure_scenario: { type: 'string', maxLength: 2000 },
           confidence: { type: 'number' },
           severity: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'] },
           category: { type: 'string' },
@@ -55,10 +57,10 @@ const VERDICT_SCHEMA = {
   properties: {
     file: { type: 'string', description: 'the finding file, repo-relative, exactly as given' },
     line: { type: 'number', description: 'the finding line exactly as given' },
-    summary: { type: 'string', description: 'the finding summary exactly as given' },
+    summary: { type: 'string', maxLength: 500, description: 'the finding summary exactly as given' },
     lens: { type: 'string', enum: ['correctness', 'reproduction', 'security'] },
     verdict: { type: 'string', enum: ['CONFIRMED', 'PLAUSIBLE', 'REFUTED'] },
-    evidence: { type: 'string' },
+    evidence: { type: 'string', maxLength: 4000 },
     severity: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'] },
   },
   required: ['file', 'line', 'summary', 'lens', 'verdict', 'evidence', 'severity'],

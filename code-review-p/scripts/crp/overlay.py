@@ -64,8 +64,11 @@ def heuristic_gates(cwd: str | Path) -> list[str]:
             continue
         if name == "package.json":
             try:
-                scripts = (json.loads(text).get("scripts") or {})
+                parsed = json.loads(text)
             except ValueError:
+                parsed = {}
+            scripts = parsed.get("scripts") if isinstance(parsed, dict) else None
+            if not isinstance(scripts, dict):  # c015: scripts 非对象(畸形 json)不迭代
                 scripts = {}
             for key in scripts:
                 add(f"npm run {key}")

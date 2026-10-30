@@ -22,8 +22,9 @@ def run(args: list[str], cwd: str | Path) -> tuple[bool, str]:
     超时/可执行缺失一律视为失败(ok=False), 不抛异常。
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # c012: 显式 utf-8/replace —— locale 编码在非 UTF-8 环境会 strict 崩
             ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=config.GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -58,6 +59,7 @@ def porcelain_z(cwd: str | Path) -> list[dict]:
         proc = subprocess.run(
             ["git", "status", "--porcelain", "-z", "-uall"],
             cwd=str(cwd), capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             timeout=config.GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):

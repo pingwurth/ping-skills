@@ -80,6 +80,20 @@ def test_路径目标_有改动走受限阶梯(tmp_path):
     assert "-- src" in sc["scope_command"]
 
 
+def test_路径目标_HEAD先行于范围级(tmp_path):
+    """c052 回归: 路径受限时 `git diff HEAD -- <path>` 先行(scope.md 契约),
+    即使 upstream 范围也触及该路径 —— 工作树是路径目标的主场景。
+    注意 `git diff HEAD` 看不见 untracked, 所以用已跟踪文件的工作树改动。"""
+    origin = RepoBuilder.init(tmp_path, name="origin")
+    origin.commit({"README.md": "hi\n", "src/a.py": "x=1\n"}, "init")
+    clone = origin.clone(tmp_path)
+    clone.commit({"src/pushed.py": "pass\n"}, "pushed path work")  # upstream 范围也触及 src
+    clone.edit({"src/a.py": "x=2\n"})                             # 已跟踪文件的工作树改动
+    sc = scope_mod.resolve_scope(clone.root, "src")
+    assert sc["scope_command"] == "git diff HEAD -- src", "路径受限必须 HEAD 先行"
+    assert "src/a.py" in sc["diff_files"] and "src/pushed.py" not in sc["diff_files"]
+
+
 def test_路径目标_干净文件回退whole_file(tmp_path):
     repo = RepoBuilder.init(tmp_path)
     repo.commit({"src/a.py": "x=1\n"}, "init")

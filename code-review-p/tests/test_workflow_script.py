@@ -81,6 +81,10 @@ def test_self_describing_schemas_and_journal():
     assert "counters: { rounds: round, total_seen: seen.length, dup_dropped: dupDropped }" in src
     # 透镜按构造打标(不信任 agent 回显)
     assert "lens: ls[i][0]" in src
+    # 生成端限长与 Python 台账接收上限逐值对齐(计数口径回修):
+    # summary 500 / failure_scenario 2000 / evidence 4000
+    assert src.count("maxLength: 500") == 2, "finder+refuter 的 summary 均须限长 500"
+    assert "maxLength: 2000" in src and "maxLength: 4000" in src
 
 
 # ── 奇偶校验：与 Python(ledger.py) 共享夹具的双向断言 ────────────────

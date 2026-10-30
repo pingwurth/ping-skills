@@ -34,8 +34,23 @@ class EmitContext:
     scripts_dir: Path = transitions.SCRIPTS_DIR
 
 
+class _UsageError(Exception):
+    """argparse 用法错误(回修 c038: 必须转协议块, 不得裸 SystemExit)。"""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+class _ProtocolParser(argparse.ArgumentParser):
+    """error() 不再 SystemExit —— 交给 main 转成 exit-3 协议块。"""
+
+    def error(self, message: str):  # type: ignore[override]
+        raise _UsageError(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ProtocolParser(
         prog=config.ENTRY_FILENAME,
         description="code-review-p 确定性引擎(NEXT_STEP 协议驱动)",
     )
@@ -91,10 +106,22 @@ def _internal_error_decision(exc: Exception) -> Decision:
 def main(argv: Optional[list[str]] = None) -> int:
     """入口统一执行框架, 返回进程退出码。"""
     parser = build_parser()
-    args = parser.parse_args(argv)
-    cmd = getattr(args, "cmd", None)
-    if not cmd:
-        parser.error("缺少子命令(start/resume/submit/answer/status/runs/report)")
+    try:
+        args = parser.parse_args(argv)
+        cmd = getattr(args, "cmd", None)
+        if not cmd:
+            parser.error("缺少子命令(start/resume/submit/answer/status/runs/report)")
+    except _UsageError as err:
+        # c038 回归: 用法错误同样恰出一个协议块(exit 3), 调用方可按协议处理
+        decision = Decision(status="failed", exit_code=config.EXIT_STATE,
+                            summary=f"用法错误: {err.message}",
+                            route=Route.ASK_USER, reason="参数不合法",
+                            question=f"用法错误: {err.message}\n查看帮助: crp.py --help")
+        rc = transitions.RouteContext()
+        next_step = transitions.build_next_step(decision, rc)
+        payload = protocol.payload_from_decision(config.ENTRY_FILENAME, decision, next_step)
+        protocol.emit(payload)
+        return decision.exit_code
 
     from . import handlers  # 延迟导入: handlers 依赖本模块的 EmitContext, 断循环
 

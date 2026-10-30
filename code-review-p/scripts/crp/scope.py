@@ -86,7 +86,8 @@ def _pr_diff_files(cwd: str | Path, pr_number: Optional[int] = None) -> Optional
     args.append("--name-only")
     try:
         proc = subprocess.run(["gh", *args], cwd=str(cwd), capture_output=True,
-                              text=True, timeout=config.GIT_TIMEOUT_SECONDS)
+                              text=True, encoding="utf-8", errors="replace",
+                              timeout=config.GIT_TIMEOUT_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -156,7 +157,11 @@ def _finish_scope(cwd: Path, scope: dict, files: list[str],
 
 
 def _ladder(cwd: Path, target: Optional[str], path_restricted: bool) -> dict:
-    """无显式目标(或路径受限)时的 2→5 级阶梯; 逐级留痕。"""
+    """无显式目标(或路径受限)时的 2→5 级阶梯; 逐级留痕。
+
+    路径受限时 HEAD 先行(references/scope.md 契约, 回修 c052): 路径目标的
+    主场景是"审我刚改的这块", 工作树优先于远端范围。
+    """
     probes: list[dict] = []
     untracked = gitops.untracked_files(cwd)
 
@@ -178,7 +183,7 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool) -> dict:
         """范围 2–4 级: porcelain 有暂存/未暂存改动时叠加 `git diff HEAD`(路径受限)。"""
         secondary: list[str] = []
         if rung in (2, 3, 4):
-            ok, out = gitops.run(["status", "--porcelain", "-z"], cwd)
+            ok, out = gitops.run(["status", "--porcelain", "-z", "-uall"], cwd)
             has_wt = ok and any(
                 rec and not rec.startswith("??") for rec in out.split("\0"))
             if has_wt:
@@ -187,6 +192,18 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool) -> dict:
                     secondary = [_display("git diff HEAD", target, path_restricted)]
                     files = sorted(set(files) | set(wt_files))
         return files, secondary
+
+    # ── 路径受限: HEAD 先行(工作树是该路径最常见的审查对象) ──
+    if path_restricted and target:
+        files = _diff_files(cwd, ["HEAD", "--", target])
+        probes.append({"cmd": f"git diff --name-only HEAD -- {target}",
+                       "rc": 0 if files is not None else 1, "empty": not files})
+        if files:
+            scope = _base_scope(cwd, "worktree")
+            scope.update(rung=5, scope_command=_display("git diff HEAD", target, True),
+                         commit_log_cmd="git log --oneline -5")
+            ins, dele = _numstat(cwd, ["HEAD", "--", target])
+            return _finish_scope(cwd, scope, files, untracked_in_scope(), (ins, dele))
 
     # ── rung 2: 当前分支的 PR ──
     files = None if path_restricted else _pr_diff_files(cwd)
