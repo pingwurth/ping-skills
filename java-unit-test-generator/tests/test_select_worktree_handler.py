@@ -287,16 +287,16 @@ def test_main_missing_codegraph_emits_abort_protocol(tmp_path, capsys):
 # 前置检查 2: opencode 的 codegraph MCP 必须已连接
 # --------------------------------------------------------------------------- #
 def test_mcp_cli_name_derived_from_script_third_parent(monkeypatch):
-    """_mcp_cli_name: 由脚本第 3 层上级目录(.claude 等)推断 CLI; 非 '.' 目录返回 None。"""
+    """_mcp_cli_name: 由脚本第 3 层上级目录(.claude 等)推断 CLI; 非 '.' 目录回退默认 opencode。"""
     for host, expected in [(".claude", "claude"), (".opencode", "opencode"),
                            (".qoder", "qoder"), (".qwen", "qwen"), (".codex", "codex")]:
         monkeypatch.setattr(sw, "__file__",
                             f"/p/{host}/skills/java-unit-test-generator/scripts/select_worktree.py")
         assert sw._mcp_cli_name() == expected
-    # 源码仓内直接运行(上级目录非 '.' 开头) -> 无法推断
+    # 源码仓内直接运行(上级目录非 '.' 开头) -> 无法推断, 回退默认 opencode
     monkeypatch.setattr(sw, "__file__",
                         "/p/ping-skills/java-unit-test-generator/scripts/select_worktree.py")
-    assert sw._mcp_cli_name() is None
+    assert sw._mcp_cli_name() == "opencode"
 
 
 def test_mcp_connected_when_opencode_reports_connected(monkeypatch):
@@ -345,16 +345,20 @@ def test_mcp_not_connected_when_opencode_missing(monkeypatch):
     mock_run.assert_called_once()
 
 
-def test_mcp_not_connected_when_cli_undiscoverable(monkeypatch):
-    """_codegraph_mcp_connected: 第 3 层上级目录无法推断 CLI -> 不执行 mcp list, 直接判定未连接。"""
+def test_mcp_falls_back_to_default_cli_when_undiscoverable(monkeypatch):
+    """_codegraph_mcp_connected: 第 3 层上级目录无法推断 CLI -> 回退默认 opencode 执行 mcp list。"""
     monkeypatch.setattr(sw, "_codegraph_mcp_connected", _ORIG_MCP_CONNECTED)
-    monkeypatch.setattr(sw, "_mcp_cli_name", lambda: None)
-    with patch("scripts.select_worktree.run_command") as mock_run:
+    monkeypatch.setattr(sw, "__file__",
+                        "/p/ping-skills/java-unit-test-generator/scripts/select_worktree.py")
+    fake = CommandResult(ok=True, returncode=0,
+                         stdout="codegraph           connected\n", stderr="")
+    with patch("scripts.select_worktree.run_command", return_value=fake) as mock_run:
         connected, detail = sw._codegraph_mcp_connected()
 
-    assert connected is False
-    assert "推断 MCP CLI" in detail
-    mock_run.assert_not_called()
+    assert connected is True
+    assert detail == ""
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0] == ["opencode", "mcp", "list"]
 
 
 def test_mcp_launch_failed_no_retry(monkeypatch):

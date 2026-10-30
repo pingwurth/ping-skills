@@ -35,7 +35,7 @@
        <cli> 由脚本第 3 层上级目录决定: 安装布局为
        <project>/.<tool>/skills/<skill>/scripts/本文件, 取 Path(__file__).parents[3]
        (一般为 .opencode/.claude/.qoder/.qwen/.codex)去掉前导 '.', 如 .claude -> claude;
-       无法推断(非 '.' 开头目录, 如源码仓内直接运行)同样中止。
+       无法推断(非 '.' 开头目录, 如源码仓内直接运行)时回退默认 CLI opencode。
     2. 工程根目录(位置参数 WORK_DIR)必须存在 CodeGraph 索引目录 .codegraph。
     缺失时在一切 worktree 操作之前彻底中断任务 -> abort(exit 2, failed), message
     分别提示用户执行 `codegraph install` / `codegraph init` 后重新运行本技能
@@ -319,6 +319,8 @@ _MCP_LIST_TIMEOUT_SECONDS = 5
 # 按检查通过处理, 见 _codegraph_mcp_connected)
 _MCP_LIST_ATTEMPTS = 3
 _MCP_RETRY_DELAY_SECONDS = 1
+# CLI 推断失败(非 '.' 开头目录, 如源码仓内直接运行)时回退的默认宿主 CLI
+_MCP_CLI_FALLBACK = "opencode"
 
 
 def _mcp_output_says_connected(output: str) -> bool:
@@ -369,28 +371,26 @@ def _mcp_cli_for_host_dir(host_dir_name: str) -> str | None:
     return None
 
 
-def _mcp_cli_name() -> str | None:
-    """按脚本第 3 层上级目录推断 MCP CLI 名(`.claude` -> `claude`); 推断失败返回 None。"""
-    return _mcp_cli_for_host_dir(_host_dir_name())
+def _mcp_cli_name() -> str:
+    """按脚本第 3 层上级目录推断 MCP CLI 名(`.claude` -> `claude`); 推断失败回退默认 opencode。"""
+    return _mcp_cli_for_host_dir(_host_dir_name()) or _MCP_CLI_FALLBACK
 
 
 def _codegraph_mcp_connected() -> tuple[bool, str]:
     """执行 `<cli> mcp list`, 由 stdout+stderr 判定 codegraph MCP 是否已连接。
 
-    <cli> 由 _mcp_cli_name() 从脚本第 3 层上级目录推断(.claude -> claude 等)。
-    判定语义见 _mcp_output_says_connected。无匹配时最多尝试 `_MCP_LIST_ATTEMPTS`
-    次(间隔 `_MCP_RETRY_DELAY_SECONDS` 秒, 规避宿主 CLI 冷启动瞬态); CLI 无法
-    推断/命令不存在(launch_failed)立即判定未连接; 执行超时(timed_out)不重试,
-    按检查通过处理(视为已连接, 宿主 CLI 偶发挂起不代表 MCP 未配置)。
+    <cli> 由 _mcp_cli_name() 从脚本第 3 层上级目录推断(.claude -> claude 等),
+    推断失败回退默认 opencode。判定语义见 _mcp_output_says_connected。
+    无匹配时最多尝试 `_MCP_LIST_ATTEMPTS` 次(间隔 `_MCP_RETRY_DELAY_SECONDS`
+    秒, 规避宿主 CLI 冷启动瞬态); 命令不存在(launch_failed)立即判定未连接;
+    执行超时(timed_out)不重试, 按检查通过处理(视为已连接, 宿主 CLI 偶发挂起
+    不代表 MCP 未配置)。
 
     Returns:
         (connected, detail): connected=True 表示已连接(含 mcp list 执行超时按
         通过处理); detail 为未连接原因(供报错)。
     """
     cli = _mcp_cli_name()
-    if cli is None:
-        return False, (f"无法由脚本第 3 层上级目录名 {_host_dir_name()!r} 推断 MCP CLI"
-                       f"(期望 .opencode/.claude/.qoder/.qwen/.codex 等 '.' 开头目录)")
     detail = ""
     for attempt in range(1, _MCP_LIST_ATTEMPTS + 1):
         result = run_command([cli, "mcp", "list"], timeout=_MCP_LIST_TIMEOUT_SECONDS)
@@ -427,7 +427,7 @@ def _require_codegraph_mcp(logger) -> None:
         return
     logger.error(f"codegraph MCP 未连接, 任务中止: {detail}")
     question = (
-        f"宿主 MCP 客户端({_mcp_cli_name() or '未知 CLI'}) 的 codegraph MCP 未连接, "
+        f"宿主 MCP 客户端({_mcp_cli_name()}) 的 codegraph MCP 未连接, "
         f"本任务已中止。\n"
         f"原因: {detail}\n"
         f"请由用户手动执行以下命令完成 MCP 配置:\n"
