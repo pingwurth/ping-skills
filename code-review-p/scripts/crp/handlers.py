@@ -142,6 +142,33 @@ def _resolve_entry_point(args) -> tuple[Path, StateStore]:
 # --------------------------------------------------------------------------- #
 # start
 # --------------------------------------------------------------------------- #
+def _init_overlay_state(state: State, cwd: Path) -> None:
+    """overlay 初始化(cmd_start 与 cmd_answer 共用; 回修 c025/c057/c001)。
+
+    - 一切发现/信任判定在仓库顶层执行(scope 路径即顶层相对 —— 子目录植入的
+      overlay 不得因此被判 trusted, A3/A4 不被绕过);
+    - 需要 overlay 工作时 phase=overlay 且 **awaiting="overlay"**(否则提交
+      过不了种类核对 → 无限 exit-3 循环); 无 overlay 且无启发式门禁 → 直达 brief。
+    """
+    root = gitops.repo_root(cwd) or cwd
+    overlay_path = overlay.discover(root)
+    trust, basis = overlay.trust_of(state.scope, overlay_path)
+    state.overlay = {"path": overlay_path, "trust": trust, "trust_basis": basis,
+                     "exclusions_applied": [], "exclusions_suspended": [],
+                     "gates": []}
+    if overlay_path is None:
+        gates = overlay.heuristic_gates(root)
+        state.overlay["heuristic_gates"] = gates
+        if not gates:
+            state.phase, state.cursor["awaiting"] = "brief", "brief"
+        else:
+            # 有启发式候选 → 走 overlay 提取(LLM 查看实际执行内容并标注语义)
+            state.cursor["awaiting"] = "overlay"
+    else:
+        state.overlay["heuristic_gates"] = []
+        state.cursor["awaiting"] = "overlay"
+
+
 def cmd_start(args) -> tuple[Decision, EmitContext]:
     cwd = Path.cwd()
     mode = args.mode
@@ -169,20 +196,7 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
     if sc.get("escape_hatch"):
         return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
 
-    # overlay 发现 + 信任判定 + 启发式门禁(确定性部分全部在此完成)
-    overlay_path = overlay.discover(cwd)
-    trust, basis = overlay.trust_of(sc, overlay_path)
-    state.overlay = {"path": overlay_path, "trust": trust, "trust_basis": basis,
-                     "exclusions_applied": [], "exclusions_suspended": [],
-                     "gates": []}
-    if overlay_path is None:
-        gates = overlay.heuristic_gates(cwd)
-        state.overlay["heuristic_gates"] = gates
-        if not gates:
-            state.phase, state.cursor["awaiting"] = "brief", "brief"
-        # 有启发式候选 → 仍走 overlay 提取(LLM 查看实际执行内容并标注语义)
-    else:
-        state.overlay["heuristic_gates"] = []
+    _init_overlay_state(state, cwd)
     _touch(state)
     StateStore(run_dir).save(state)
     return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
@@ -359,7 +373,16 @@ def _validate_kind(state: State, kind: str, data: object):
     """按种类校验并返回 (errors, apply_fn)。apply 仅在校验全过后调用(state, run_dir)。"""
     if kind == "overlay":
         errs = overlay.validate_overlay_file(data)
-        return errs, lambda st, rd: json.dumps(overlay.apply_overlay(st, data), ensure_ascii=False)
+
+        def _apply_overlay(st: State, rd: Path) -> str:
+            summary = json.dumps(overlay.apply_overlay(st, data), ensure_ascii=False)
+            # phase 推进(回修 c057 第二半): 有待确认门禁 → gates; 否则直达 brief
+            if overlay.pending_gate_question_count(st):
+                st.phase, st.cursor["awaiting"] = "gates", "answer"
+            else:
+                st.phase, st.cursor["awaiting"] = "brief", "brief"
+            return summary
+        return errs, _apply_overlay
 
     if kind == "brief":
         errs = _validate_brief(data)
@@ -506,7 +529,7 @@ def _apply_details(state: State, data: dict, run_dir: Path) -> str:
                     "text": text}
     if state.fix_requested and not state.fix.get("re_review_done"):
         state.phase = "fix"
-        state.cursor["awaiting"] = "fix_outcomes"
+        state.cursor["awaiting"] = "fix-outcomes"  # 与 argparse/decisions 的提交种类逐字一致(回修 c017)
         return f"报告已渲染({len(text.splitlines())} 行) —— 进入 --fix"
     state.phase = "done"
     state.cursor["awaiting"] = ""
@@ -560,19 +583,15 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                                 summary="用户终止(范围逃逸口)", route=Route.ABORT,
                                 reason="用户选择终止", question="已按用户指示终止本次审查。"), EmitContext(run_dir=run_dir, state=state)
             if choice == "choice" and args.value:
-                sc = scope_mod.resolve_scope(state.repo.get("cwd", str(Path.cwd())), args.value)
+                cwd_a = Path(state.repo.get("cwd", str(Path.cwd())))
+                sc = scope_mod.resolve_scope(cwd_a, args.value)
                 state.target = args.value
                 state.scope = sc
                 if sc.get("escape_hatch"):
                     state.pending_question = {"key": "scope", "at": _now()}
                     _touch(state); store.save(state)
-                    return _scope_escape_ask(sc), EmitContext(run_dir=run_dir, state=state)
-                overlay_path = overlay.discover(state.repo.get("cwd", str(Path.cwd())))
-                trust, basis = overlay.trust_of(sc, overlay_path)
-                state.overlay = {"path": overlay_path, "trust": trust, "trust_basis": basis,
-                                 "exclusions_applied": [], "exclusions_suspended": [], "gates": []}
-                if overlay_path is None and not overlay.heuristic_gates(state.repo.get("cwd", ".")):
-                    state.phase, state.cursor["awaiting"] = "brief", "brief"
+                    return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
+                _init_overlay_state(state, cwd_a)
                 state.pending_question = None
                 _touch(state); store.save(state)
                 d = decisions.decide_next(state, _ctx(state, run_dir))
@@ -627,7 +646,13 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
 
         if key == "run":
-            return cmd_resume(args)
+            # 回修 c009: 锁内不得再调 cmd_resume(其自身加锁 → 同进程 flock 自死锁);
+            # 交回路由器逐字执行
+            return Decision(status="success", exit_code=config.EXIT_OK,
+                            summary="run 答复已接收 —— 交回路由器",
+                            route=Route.RESUME, reason="answer run → resume",
+                            route_params=["resume", "--run-dir", str(run_dir)]), \
+                EmitContext(run_dir=run_dir, state=state)
         raise StepError.state_error(f"未知 answer key: {key}")
 
 

@@ -73,19 +73,30 @@ def _classify(result) -> str:
 
 
 def _match_candidate(state: State, file, line, summary) -> Optional[dict]:
-    """把 refuter 自描述返回匹配回台账候选(echo 的 file:line+summary)。"""
+    """把 refuter 自描述返回匹配回台账候选。
+
+    回修 c051: echo 的 file:line 可能与台账条目有小漂移(多 finder 对同一缺陷
+    的行号取点不同), 只做精确匹配会让票据落在 dup 副本或完全丢失 —— 与
+    find_dup 同语义: 同 file + 行号 ±DEDUP_LINE_BAND + 摘要重叠; 精确命中
+    优先, 带内命中唯一才算。
+    """
+    from . import config as _config
     nf = ledger.norm_file(file, (state.repo or {}).get("cwd", ""))
-    exact = fallback = None
+    exact = None
+    banded = []
+    toks = ledger.tokens_of(summary or "")
     for c in state.candidates:
         if c.get("file") != nf or c.get("status") == "dup":
             continue
-        if (c.get("line") or 0) != (line or 0):
-            continue
-        if c.get("summary") == summary:
+        if (c.get("line") or 0) == (line or 0) and c.get("summary") == summary:
             exact = c
             break
-        fallback = fallback or c
-    return exact or fallback
+        if abs((c.get("line") or 0) - (line or 0)) <= _config.DEDUP_LINE_BAND and \
+                ledger.overlap_toks(toks, ledger.tokens_of(c.get("summary", ""))):
+            banded.append(c)
+    if exact is not None:
+        return exact
+    return banded[0] if len(banded) == 1 else None
 
 
 # --------------------------------------------------------------------------- #
@@ -137,13 +148,29 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
 
 
 def _finalize_all(state: State) -> None:
-    """终裁: 有票走票数法; 无票(workflow 预算耗尽保留为 PLAUSIBLE)显式落账。"""
+    """终裁。
+
+    回修 c023: quick 模式走 floor-only 语义(verdict 保持 null), 不得套用
+    mode keep 阈值; 回修 c018: 单票把 P2/P3 升为 P0/P1 时改写 severity,
+    使聚合按高危法定票数走(单票不足 quorum → PLAUSIBLE, 不再按单票终裁)。
+    """
+    if state.mode == "quick":
+        verify.finalize_without_verify(state)
+        return
     for c in state.candidates:
         if c.get("status") in ("dup", "verified", "unverified"):
             continue
-        if not c.get("votes"):
+        votes = c.get("votes") or []
+        if not votes:
             c["evidence"] = ("workflow 预算耗尽前未经反驳(deep 保留 PLAUSIBLE) —— "
                              "无引证可用, 见 journal")
+        elif not verify.is_high(c.get("severity")):
+            highs = [v for v in votes if verify.is_high(v.get("severity"))]
+            if highs:
+                c["severity"] = highs[0].get("severity")
+                c["evidence"] = ((c.get("evidence") or "") +
+                                 " [refuter 升级为高危; journal 路径无补透镜通道, "
+                                 "按高危法定票数聚合]")
         verify.finalize_candidate(state, c)
 
 

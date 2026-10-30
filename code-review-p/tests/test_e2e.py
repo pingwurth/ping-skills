@@ -101,6 +101,12 @@ class Driver:
                 "open_questions": "无", "residual_risks": "r", "testing_gaps": "t",
                 "summary_bullets": ["b1", "b2", "b3"], "details": details,
             }, ensure_ascii=False), encoding="utf-8")
+        elif kind == "fix-outcomes":
+            outcomes = [{"id": k["id"], "outcome": "fixed", "reason": "",
+                         "gate_results": "pytest ✓"}
+                        for k in ctx.get("kept", [])]
+            out.write_text(json.dumps({"outcomes": outcomes}, ensure_ascii=False),
+                           encoding="utf-8")
         else:
             raise AssertionError(f"未知 do_work 种类: {kind}")
 
@@ -123,7 +129,13 @@ class Driver:
                 payload, _rc = self.run_argv(ns["params"])
                 continue
             if t == "ask_user":
-                return payload  # 由具体测试用例作答
+                # 门禁询问自动批准(带完整参数的 approve_all); 其余询问交回调用方
+                approve = next((o for o in ns.get("resume", [])
+                                 if o.get("option") == "approve_all" and o.get("script")), None)
+                if approve is None:
+                    return payload  # 由具体测试用例作答
+                payload, _rc = self.run_argv(approve["params"])
+                continue
             raise AssertionError(f"未知 next_step.type: {t}")
         raise AssertionError("协议循环超过步数上限(疑似不收敛)")
 
@@ -334,16 +346,20 @@ def test_载体1_transcript目录摄取(tmp_path, quick_repo):
             break
         d.fabricate(ns)
         payload, _ = d.run_argv(ns["submit"]["params"])
-    # 伪造 Workflow 工具的 transcriptDir + journal.jsonl
+    # 伪造 Workflow 工具的 transcriptDir + journal.jsonl(真实形状: type/label/result 行)
     tdir = tmp_path / "wf-transcript"
     tdir.mkdir()
     (tdir / "journal.jsonl").write_text("\n".join([
-        json.dumps({"label": "find:A", "result": {"angle": "A", "candidates": [
+        json.dumps({"type": "launched"}),
+        json.dumps({"type": "started", "label": "find:A"}),
+        json.dumps({"type": "result", "label": "find:A", "result": {"angle": "A", "candidates": [
             {"file": "src/a.py", "line": 7, "summary": "transcript found the defect",
              "failure_scenario": "fs", "confidence": 0.85, "severity": "P2",
              "category": "correctness"}]}}, ensure_ascii=False),
-        json.dumps({"label": "verify:src/a.py:7:correctness", "result": {
-            "file": "src/a.py", "line": 7, "summary": "transcript found the defect",
+        json.dumps({"type": "started", "label": "verify:correctness"}),
+        # 回显行号与台账漂移 ±2(c051 回归: 带内唯一命中仍可回配)
+        json.dumps({"type": "result", "label": "verify:correctness", "result": {
+            "file": "src/a.py", "line": 9, "summary": "transcript found the defect",
             "lens": "correctness", "verdict": "CONFIRMED", "evidence": "quoted",
             "severity": "P2"}}, ensure_ascii=False),
     ]), encoding="utf-8")
@@ -353,3 +369,171 @@ def test_载体1_transcript目录摄取(tmp_path, quick_repo):
     assert payload["next_step"]["type"] == "do_work"
     final = d.drive(payload)
     assert "transcript found the defect" in d.report
+
+
+# ── 回修回归(v2.0 自食验收 P0/P1) ────────────────────────────────────
+def test_c057_有Makefile仓库不死于overlay阶段(tmp_path):
+    """c057 回归: 存在启发式门禁的仓库, overlay do_work 的提交必须被接受。
+
+    v2.0.0 原版: awaiting 从未设为 "overlay" → 第二个协议步即无限 exit-3。
+    """
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    first = payload["next_step"]
+    assert first["type"] == "do_work"
+    assert first["submit"]["params"][first["submit"]["params"].index("--kind") + 1] == "overlay", \
+        "有门禁候选的仓库第一步必须是 overlay 提取"
+    final = d.drive(payload)  # 若死循环会撞 max_steps 上限
+    assert final["next_step"]["type"] == "finish"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert "make check" in json.dumps(state["overlay"]["gates"])
+
+
+def test_c025_子目录调用overlay仍在顶层发现(tmp_path):
+    """c025 回归: 从子目录启动时 overlay 发现/信任判定必须在仓库顶层。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", ".claude/code-review-p.md": "# overlay\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d = Driver(repo.root / "src", tmp_path / "home")  # cwd = 子目录
+    payload, _ = d.run_argv(["start", "--mode", "quick"])
+    state = json.loads((Path(payload["next_step"]["submit"]["params"][
+        payload["next_step"]["submit"]["params"].index("--run-dir") + 1]) / "state.json")
+        .read_text(encoding="utf-8"))
+    assert state["overlay"]["path"] == ".claude/code-review-p.md"
+    assert state["overlay"]["trust"] == "trusted"  # 顶层发现 + 未被 diff 触及
+
+
+def test_c057b_受信任overlay提交后进入brief且排除生效(tmp_path):
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "gen/g.py": "1\n",
+                 ".claude/code-review-p.md": "# overlay\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n", "gen/g.py": "2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    ns = payload["next_step"]
+    assert ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1] == "overlay"
+    d._note_run_dir(ns)
+    d.fabricate(ns)
+    # 改写 overlay 提交: 带排除项
+    Path(ns["output"]).write_text(json.dumps({
+        "red_lines": [], "gates": [], "exclusions": ["gen/"], "invariants": []},
+        ensure_ascii=False), encoding="utf-8")
+    payload, _ = d.run_argv(ns["submit"]["params"])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "brief", "overlay 应用后必须推进 phase(apply 半边)"
+    assert state["scope"]["diff_files"] == ["src/a.py"], "trusted 排除项必须应用"
+    d.drive(payload)
+
+
+def test_c017_fix全链路不再死循环(tmp_path, quick_repo):
+    """c017 回归: --fix 的 fix-outcomes 提交必须被接受并触发复审轮。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick", extra=["--fix"])
+    seen_kinds = []
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        kind = ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1]
+        if kind == "fix-outcomes":
+            seen_kinds.append(kind)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert "fix-outcomes" in seen_kinds
+    assert payload["next_step"]["type"] == "finish"
+    report = payload["next_step"].get("report") or ""
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "done"
+    assert state["fix"]["re_review_done"] is True
+    assert state["fix"]["outcomes"], "fix 结果必须入账"
+    assert "Fix outcome:** fixed" in report
+
+
+def test_c049_验证队列累加语义(tmp_path):
+    """c049 回归: 同轮分角度多次提交时, build_verify_queue 必须累加而非覆盖。"""
+    from crp import verify as verify_mod
+    from crp.models import State
+    st = State(mode="standard", cursor={"round": 1, "round_kind": "sweep", "awaiting": "candidates",
+                                        "pending_angles": [], "pending_verify": [],
+                                        "lens_requests": [], "dry_streak": 0})
+    st.candidates = [
+        {"id": "c001", "file": "a.py", "line": 1, "summary": "first submission defect",
+         "failure_scenario": "f", "confidence": 0.9, "severity": "P2",
+         "category": "correctness", "status": "fresh"},
+        {"id": "c002", "file": "b.py", "line": 2, "summary": "second submission defect",
+         "failure_scenario": "f", "confidence": 0.9, "severity": "P2",
+         "category": "correctness", "status": "fresh"},
+    ]
+    # 两次提交分别入队(旧版第二次赋值会覆盖第一次)
+    verify_mod.build_verify_queue(st, ["c001"])
+    verify_mod.build_verify_queue(st, ["c002"])
+    queued = {p["id"] for p in st.cursor["pending_verify"]}
+    assert queued == {"c001", "c002"}, "分角度多次提交的候选必须全部留在验证队列"
+    # 幂等: 重复入队同一 id 不产生重复条目
+    verify_mod.build_verify_queue(st, ["c002"])
+    assert len(st.cursor["pending_verify"]) == 2
+
+
+def test_c023_quick载体1走floor_only(tmp_path, quick_repo):
+    """c023 回归: quick + carrier1 时 verdict 保持 null(floor-only)。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick")
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        if "carrier" in str(ns.get("submit", {}).get("params", [])):
+            (d.run_dir / "in").mkdir(parents=True, exist_ok=True)
+            (d.run_dir / "in" / "03-carrier.json").write_text(
+                json.dumps({"carrier": 1, "reason": "quick+wf"}), encoding="utf-8")
+            payload, _ = d.run_argv(ns["submit"]["params"])
+            break
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    compact = d.run_dir / "in" / "04-j.json"
+    compact.write_text(json.dumps({
+        "finders": [{"angle": "A", "candidates": [
+            {"file": "src/a.py", "line": 3, "summary": "quick wf defect alpha",
+             "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+             "category": "correctness"}]}],
+        "verdicts": [{"file": "src/a.py", "line": 3, "summary": "quick wf defect alpha",
+                      "lens": "correctness", "verdict": "PLAUSIBLE",
+                      "evidence": "q", "severity": "P2"}],
+        "counters": {}}, ensure_ascii=False), encoding="utf-8")
+    payload, _ = d.run_argv(["submit", "--kind", "carrier1", "--file", str(compact),
+                             "--run-dir", str(d.run_dir)])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    c = next(c for c in state["candidates"] if c["summary"] == "quick wf defect alpha")
+    assert c["verdict"] is None and c["kept"] is True  # quick: floor-only, 无 mode 阈值
+    assert c["status"] == "unverified"
+
+
+def test_c018_journal单票升级走高危quorum(tmp_path):
+    """c018 回归: journal 路径单票把 P2 升 P1 → 不得单票 CONFIRMED 终裁。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 5, "summary": "upgrade rule defect beta",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}],
+        "verdicts": [{"file": "a.py", "line": 5, "summary": "upgrade rule defect beta",
+                      "lens": "correctness", "verdict": "CONFIRMED",
+                      "evidence": "q", "severity": "P1"}],
+        "counters": {}}
+    journal_mod.apply_compact(st, data)
+    c = next(c for c in st.candidates if c["status"] != "dup")
+    assert c["severity"] == "P1", "升级必须改写 severity"
+    assert c["verdict"] == "PLAUSIBLE", "单票不足高危 quorum → PLAUSIBLE"
+
+
+def test_c009_answer_run不死锁(tmp_path, quick_repo):
+    """c009 回归: answer --key run 在锁内不得再入锁(原版同进程 flock 自死锁)。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick")
+    d._note_run_dir(payload["next_step"])
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, str(ENTRY), "answer", "--run-dir", str(d.run_dir),
+         "--key", "run", "--choice", "resume_run"],
+        cwd=str(quick_repo.root), capture_output=True, text=True, timeout=30,
+        env={**os.environ, config.CRP_HOME_ENV: str(tmp_path / "home")})
+    assert proc.returncode in (0, 1), "不得挂死或崩溃"
+    assert ":::NEXT_STEP_BEGIN:::" in proc.stdout

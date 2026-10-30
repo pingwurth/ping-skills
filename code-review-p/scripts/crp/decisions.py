@@ -455,6 +455,9 @@ def fix_work(state: State, ctx: RouteCtx) -> Decision:
             "修完逐条记录 outcome: fixed / skipped(原因) / no_change_needed; "
             "修复前重跑覆盖该条的门禁, 绿了才算 fixed。"
         ),
+        context={"kept": [{"id": c["id"], "severity": c.get("severity_final"),
+                           "location": f"{c['file']}:{c['line']}", "summary": c["summary"]}
+                          for c in kept]},
         output=str(output),
         shape='{"outcomes": [{"id": "c001", "outcome": "fixed", "reason": "", "gate_results": "make check ✓"}]}',
         submit=_submit_cmd(ctx, "fix-outcomes", output),

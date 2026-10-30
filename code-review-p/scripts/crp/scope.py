@@ -207,8 +207,9 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool) -> dict:
     if files:
         scope = _base_scope(cwd, "upstream")
         ok, up = gitops.run(["rev-parse", "--short", "@{upstream}"], cwd)
+        base = up if ok else None  # 先落局部变量 —— scope.get("base") 在 update 前还是空(回修 c020)
         scope.update(rung=3, scope_command=_display("git diff @{upstream}...HEAD", target, path_restricted),
-                     base=up if ok else None, commit_log_cmd=commit_log(scope.get("base")))
+                     base=base, commit_log_cmd=commit_log(base))
         files, secondary = accumulate_working_tree(3, files)
         scope["secondary_commands"] = secondary
         ins, dele = _numstat(cwd, ["@{upstream}...HEAD"])
@@ -364,7 +365,9 @@ def resolve_scope(cwd: str | Path, target: Optional[str] = None) -> dict:
 # 排除项应用(overlay 阶段调用)
 # --------------------------------------------------------------------------- #
 def _matches_exclusion(path: str, pattern: str) -> bool:
-    p = pattern.strip().lstrip("./")
+    p = pattern.strip()
+    if p.startswith("./"):  # 前缀剥离而非字符集剥离(回修 c022: lstrip("./") 会吃掉前导点)
+        p = p[2:]
     if not p:
         return False
     if p.endswith("/"):

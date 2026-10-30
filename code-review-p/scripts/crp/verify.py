@@ -203,15 +203,19 @@ def finalize_without_verify(state: State) -> None:
 
 
 def build_verify_queue(state: State, ids: list[str]) -> None:
-    """把 fresh 候选排入验证队列(按严重度定透镜)。"""
-    queue = []
+    """把 fresh 候选**累加**进验证队列(按严重度定透镜)。
+
+    回修 c049: 分角度多次提交合法(SKILL §5), 覆盖式赋值会让早前提交的候选
+    永远进不了验证队列而静默消失 —— 必须累加。
+    """
     by_id = {c.get("id"): c for c in state.candidates}
+    existing = {p["id"] for p in state.cursor.get("pending_verify") or []}
     for cid in ids:
         cand = by_id.get(cid)
-        if cand is None:
+        if cand is None or cid in existing:
             continue
-        queue.append({"id": cid, "lenses": required_lenses(cand.get("severity"))})
-    state.cursor["pending_verify"] = queue
+        state.cursor.setdefault("pending_verify", []).append(
+            {"id": cid, "lenses": required_lenses(cand.get("severity"))})
 
 
 def finalize_round(state: State) -> str:
