@@ -3,8 +3,9 @@
 deep-review.js 是 Workflow 工具的脚本片段（顶层 return + workflow 全局函数），
 不能直接 ``node --check``：这里剥掉 ``export const meta``、把余下主体包进
 异步函数（以 args/agent/parallel/pipeline/phase/log/budget 为参数）后再做
-语法检查；并抽取脚本中的纯函数块（去重 isDup / 裁决聚合 aggregateVerdict）
-用 node 断言行为——覆盖 CJK 摘要不塌缩、±3 行漂移容忍、平局与法定票数。
+语法检查；并抽取脚本中的纯函数块（路径归一 normFile / 去重 isDup / 裁决聚合
+aggregateVerdict）用 node 断言行为——覆盖绝对/相对路径统一、CJK 摘要不塌缩、
+±3 行漂移容忍、平局与法定票数。
 无 node 环境时跳过（skip 并标注），脚本存在性与契约标记检查不依赖 node。
 """
 from __future__ import annotations
@@ -140,6 +141,41 @@ def test_empty_summary_never_merges():
         [], False,
     )
     assert r["dup"] is False
+
+
+# ── 路径归一（v1.4.1 #9 回归）：绝对/相对混用不得击穿去重 ────────────
+
+@requires_node
+def test_normfile_unifies_absolute_relative_dotslash_and_windows():
+    block = extract_pure_block(script_src())
+    js = block + """
+const root = '/repo/x';
+const cases = [
+  [normFile('/repo/x/services/billing/A.java', root), 'services/billing/A.java'],
+  [normFile('services/billing/A.java', root), 'services/billing/A.java'],
+  [normFile('./services/billing/A.java', root), 'services/billing/A.java'],
+  [normFile('\\\\repo\\\\x\\\\services\\\\B.java', root), 'services/B.java'],
+  [normFile('/elsewhere/C.java', root), '/elsewhere/C.java'],
+];
+console.log(JSON.stringify(cases.filter(([got, want]) => got !== want)));
+"""
+    assert json.loads(run_node(js)) == []
+
+
+@requires_node
+def test_dedup_composes_with_normfile():
+    """端到端纯函数证明：绝对路径入账 + 相对路径候选 → 判重（#9 现场）。"""
+    block = extract_pure_block(script_src())
+    js = (
+        block
+        + "\nconst root = '/repo/x';"
+        + "\nconst seen = [{file: normFile('/repo/x/a.py', root), line: 10,"
+        + " summary: 'Missing await on fetchUser before reading result'}];"
+        + "\nconst c = {file: normFile('a.py', root), line: 10,"
+        + " summary: 'Missing await on fetchUser before reading result'};"
+        + "\nconsole.log(JSON.stringify(isDup(seen, c)));"
+    )
+    assert json.loads(run_node(js)) is True
 
 
 # ── 裁决聚合：法定票数与平局（B5/B6 回归） ──────────────────────────

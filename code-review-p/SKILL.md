@@ -11,7 +11,7 @@ description: >-
   --fix applies the findings. Use for "review my changes",
   "review this PR", or before committing nontrivial work.
 argument-hint: "[branch | PR number | path | commit range | repo] [--quick | --deep] [--fix]"
-version: "1.4"
+version: "1.4.1"
 ---
 
 `quick → brief → A/B/C + red lines, 1 pass, no verify → ≤4 · standard → brief → 12 angles → dedup → verify → sweep → ≤10 (hot-angle fan-out when the diff is large) · deep → brief → parallel finders → adversarial verify → sweep loop → ≤20`
@@ -275,7 +275,13 @@ available wins:
    that path as `scriptPath` and `{brief, scope, cwd, angles}` as `args`;
    passing the full charters from references/angles.md via `angles` beats
    the script's condensed fallbacks. Only on an explicit deep / parallel
-   request — multi-agent orchestration is opt-in.
+   request — multi-agent orchestration is opt-in. Carrier 1 is reachable
+   **only from the main session** — a spawned subagent has no Workflow
+   tool and legally falls to carrier 2; invoke deep reviews directly, not
+   through a delegated runner. The default agent budget scales with
+   fan-out width (`max(45, 8×finders)`); a whole-file/repo sweep with
+   dense candidates should pass an explicit larger `maxAgents` (rule of
+   thumb: finders + 1.5× expected candidates).
 2. **Agent definitions** (`agents/review-finder.md`, `agents/review-refuter.md`)
    — spawn one per angle/candidate with the brief pasted into the prompt.
 3. **No subagent tool** — run the same phases sequentially in this context.

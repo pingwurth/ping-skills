@@ -68,3 +68,30 @@
 - 子代理 transcripts：同目录 `<task-id>.output`（finder 10 + refuter 15）
 - 审计者完整打分报告：见本报告来源（独立审计子代理输出，2026-10-30）
 - 基线快照：`/tmp/crp-acc-baseline.txt`、`/tmp/crp-acc-prep.txt`
+
+---
+
+## 附录 B — 缺陷 #8 关闭：Workflow 载体首次真实取证（2026-10-30 补充）
+
+**运行**：主会话显式 deep 请求，`scriptPath` 调用 step-by-step 已安装副本（v1.4，d89afee）；目标 `services/billing-service` whole-file（19 实质文件，无 diff 基线）；12 角度 finder（B 依 brief 降权剔除，T 执行定向清单）。Run ID `wf_74f9fe8c-d5e`。
+
+**取证结论（缺陷 #8 → 已关闭）**：
+
+| 取证项 | 结果 | 证据 |
+|---|---|---|
+| 载体 1 可达性与调用 | ✓ | Workflow 工具 + scriptPath + args（brief/scope/cwd/angles/maxRounds/maxAgents） |
+| 无栅栏流水线 | ✓ | 首个 refuter 文件活动 07:45:33，3 个 finder 存活至 07:46:48–51；12 finder + 33 refuter 重叠执行 |
+| P0/P1 票数法定 | ✓ | 高危票型 3C/0R/3 ×4；单票升级路径触发（预算阻断补票，log 记录 "upgraded … no lenses left"） |
+| 预算降级 | ✓ | maxAgents 45/45 耗尽：10+ 候选走预算兜底 PLAUSIBLE（evidence 明示），gap 轮被预留检查正确阻止（log "stopping before gap round 2"） |
+| 去重/账目/下限 | ✓ | dupDropped=28、totalSeen=43、<0.5 置信度下限丢弃 2 条（log）、coverage 按角度记账、deep cap 20 |
+| 故障韧性 | ✓ | 3 个 finder（K/L/T）死于 429，流水线继续，其余 9 角度 + 33 refuter 全部完成 |
+
+**本次暴露的新缺陷（已于同日 v1.4.1 全部修复，详见 DESIGN.md v1.4.1 注记：#9 候选路径先经 normFile 归一仓库相对路径 + finder 提示词/schema 钉死相对路径；#10 coverage 登记前置于 agent 调用；#11 rounds 仅计已执行轮；#12 预算默认 max(45, 8×角度数)；另补载体 1"仅主会话可达"说明）**：
+
+- **#9 去重路径未归一化（实质）**：不同 finder 混用绝对/相对路径，`p.file === c.file` 失败 → 5 对同缺陷双双入榜（1/8、3/4、13/16、17/20 及 154/193 邻近对）。修复：脚本对 file 做 repo 相对化归一 + finder 提示词/schema 钉死"仓库相对路径"。
+- **#10 失败 finder 不进 coverage**：K/L/T 仅出现在 `<failures>`，coverage 图谱无 ran:false 条目（agent 抛错时 stage 2 未执行）。修复：stage 1 先登记 coverage 再调 agent，或 catch 后登记。
+- **#11 rounds 计数含未执行轮**：`round++` 先于预算 break，返回 rounds=2 但 gap 轮实际未跑。修复：只计已执行轮。
+- **#12 预算默认值对 whole-file 偏小**：12 finder × ~8 候选 = 43 fresh，refuter 预算仅 33 → 10+ 候选未验证。非 bug：whole-file 模式建议 maxAgents ≥ finder 数 + 候选数 × 1.5，或脚本按 scope 自适应。
+- 观察（不计缺陷）：33 票 0 驳倒（上一轮区域跑法驳回 5 条）——本目标真问题密度高 + 单透镜非高危路径本就不设驳倒闸，但确认偏斜值得在下次运行观察。
+
+**与验收运行的可对照性**：angle 分区在同一区域复现了验收 #7（CAS 丢弃，3C/0R/3）与 #8（无事务账本，含 README 双重虚假声明的更完整证据链），并新增 outbox 拼接、attempt_state 语义、errors.proto 单源、死依赖等——分区维度不影响核心缺陷召回。

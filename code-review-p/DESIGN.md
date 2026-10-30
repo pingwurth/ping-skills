@@ -206,6 +206,33 @@ pass — flow confirmed, 8 defects filed) closed five document gaps:
    forbidden); finder severity pinned to P0–P3 (a P4 escaped the enum in
    the run).
 
+**v1.4.1 — First real Workflow-carrier run fixes.** The billing-service
+whole-file run (acceptance report, appendix B) validated the carrier
+end-to-end and filed four defects, all closed here:
+
+1. **#9 dedup path normalization** — finders mixed absolute and
+   repo-relative paths, so dedup's file-equality check failed and the
+   same defect entered the ledger twice (five duplicate pairs burned
+   deep-cap slots in the run). Every candidate path is now normalized
+   repo-relative (`normFile`) before dedup, and the finder prompt +
+   candidates schema pin repo-relative paths.
+2. **#10 coverage registers before spawn** — a finder killed mid-flight
+   (the run lost K/L/T to rate limits) left no coverage entry because
+   registration lived in the pipeline's second stage. It now precedes
+   the agent call, so failures surface as `{ran:false}` instead of
+   vanishing.
+3. **#11 rounds count executed sweeps only** — the budget break fired
+   after `round++`, inflating `rounds` by the never-run gap round.
+4. **#12 budget default scales with fan-out width** — `max(45,
+   8×angle count)`; the run's flat 45 strangled a 12-finder/43-candidate
+   sweep's verification mid-flight (10+ candidates fell to unverified
+   PLAUSIBLE). SKILL.md documents the whole-file rule of thumb
+   (finders + 1.5× expected candidates).
+5. Carrier-1 reachability documented in SKILL.md: main session only —
+   a delegated subagent has no Workflow tool and legally falls to
+   carrier 2 (the acceptance run's degradation was correct behavior,
+   but undocumented).
+
 ## What was deliberately left out
 
 - Harness-specific machinery: ReportFindings tool schema, GitHub posting
