@@ -179,6 +179,10 @@ OVERLAY_CANDIDATE_PATHS = (".claude/code-review-p.md", "code-review-p.md")
 HEURISTIC_GATE_FILES = ("Makefile", "makefile", "GNUmakefile", "justfile", "package.json")
 HEURISTIC_GATE_DIR = ".github/workflows"
 HEURISTIC_GATE_PATTERN = r"check|lint|test|verify|migration"  # re.IGNORECASE
+# untracked 行数统计的防灌水闸(P3 回修): 超过尺寸上限或首段含 NUL(二进制,
+# 与 git 的判定同源)按 0 计 —— 编译产物不得把 insertions 顶穿 fan-out 阈值
+UNTRACKED_INSERTIONS_MAX_BYTES = 1_000_000
+BINARY_SNIFF_BYTES = 8192
 
 # --------------------------------------------------------------------------- #
 # brief(六节契约; 语言中立校验)

@@ -61,8 +61,10 @@ git rev-parse -q --verify master
 
 ## 统计与 fan-out
 
-`stats` 来自 `--numstat` 求和 + untracked 行数; 驱动 standard 模式 fan-out
-启发式(>8 文件或 ≥800 行 → 热点角度集 B/C/E/L/T)。
+`stats` 来自 `--numstat` 求和 + untracked 行数(二进制/超 1MB 的未跟踪文件按
+0 行计, 不灌水); 驱动 standard 模式 fan-out 启发式(>8 文件或 ≥800 行 →
+热点角度集 B/C/E/L/T)。路径目标在原始调用目录分类后统一归一为顶层相对
+(子目录启动的相对路径目标不会误判为分支)。
 
 ## 漂移探测(续跑/每次 submit)
 

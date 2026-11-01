@@ -72,8 +72,15 @@ def heuristic_gates(cwd: str | Path) -> list[str]:
                 scripts = {}
             for key in scripts:
                 add(f"npm run {key}")
+        elif name == "justfile":
+            # P3 回修: justfile 配方生成 `just <name>` —— 原版套 Makefile 正则,
+            # just 仓库登记的 'make <x>' 门禁根本不存在(执行必失败)
+            for m in re.finditer(r"^([A-Za-z0-9_-]+)(\s+[^:\n]*)?:", text, re.MULTILINE):
+                add(f"just {m.group(1)}")
         else:
-            for m in re.finditer(r"^([A-Za-z0-9_.-]+):", text, re.MULTILINE):
+            # P3 回修: (?!=) 排除变量赋值 —— 'TESTS:= …'/'CHECK_FLAGS ?= …' 的
+            # 冒号后跟 '=', 原版把变量名当目标产出 'make <VAR>' 假门禁
+            for m in re.finditer(r"^([A-Za-z0-9_.-]+):(?!=)", text, re.MULTILINE):
                 add(f"make {m.group(1)}")
 
     wf = root / config.HEURISTIC_GATE_DIR

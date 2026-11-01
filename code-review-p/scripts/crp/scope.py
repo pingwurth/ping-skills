@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -110,10 +111,22 @@ def _numstat(cwd: str | Path, diff_args: list[str]) -> tuple[int, int]:
 
 
 def _file_insertions(path: Path) -> int:
-    """untracked 文本的行数(二进制/超大文件计 0)。"""
+    """untracked 文本的行数(二进制/超大文件计 0)。
+
+    P3 回修: docstring 一直承诺按 0 计但原版无任何检查 —— 未跟踪的编译
+    二进制/巨型 bundle 把原始行数灌进 stats.insertions, 轻松顶穿
+    FANOUT_LINE_THRESHOLD 把 standard 静默收窄成热点角度集。NUL 探测与
+    git 的二进制判定同源。
+    """
     try:
         with open(path, "rb") as fp:
-            return sum(1 for _ in fp)
+            data = fp.read(config.UNTRACKED_INSERTIONS_MAX_BYTES + 1)
+        if (len(data) > config.UNTRACKED_INSERTIONS_MAX_BYTES
+                or b"\x00" in data[:config.BINARY_SNIFF_BYTES]):
+            return 0
+        if not data:
+            return 0
+        return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
     except OSError:
         return 0
 
@@ -171,7 +184,12 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool) -> dict:
     def untracked_in_scope() -> list[str]:
         if not (path_restricted and target):
             return untracked
-        prefix = target.rstrip("/")
+        # P3 回修: 与 porcelain(顶层相对)比对前归一 './' 前缀与尾斜杠 ——
+        # 原版用 target 原文, './src' 形式的路径目标零命中 untracked
+        p = target
+        while p.startswith("./"):
+            p = p[2:]
+        prefix = p.rstrip("/")
         return [u for u in untracked if u == prefix or u.startswith(prefix + "/")]
 
     def commit_log(base: Optional[str]) -> str:
@@ -284,21 +302,37 @@ def _display(cmd: str, target: Optional[str], path_restricted: bool) -> str:
     return f"{cmd} -- {target}" if (path_restricted and target) else cmd
 
 
+def _as_root_relative(cwd0: Path, root: Path, target: str) -> str:
+    """路径目标归一为顶层相对(normpath, 不解析符号链接; 越界时原样返回)。"""
+    p = Path(target)
+    base = p if p.is_absolute() else (cwd0 / p)
+    try:
+        return Path(os.path.normpath(base)).relative_to(root).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
 def resolve_scope(cwd: str | Path, target: Optional[str] = None) -> dict:
     """解析审查范围; 返回 scope dict(见模块 docstring 的形状)。
 
     一切命令在仓库顶层执行(porcelain 路径相对顶层, 与 untracked/排除一致);
-    非顶层调用由本函数归一。
+    非顶层调用由本函数归一。目标分类在**原始调用目录**与顶层各试一次 ——
+    子目录启动时相对路径目标(c025)不得因顶层重定向被误判为分支而落进
+    逃逸口(P3 回修); path 目标统一归一为顶层相对后再进阶梯。
     """
-    cwd = Path(cwd).resolve()
-    root = gitops.repo_root(cwd)
-    if root is not None:
-        cwd = root.resolve()
+    cwd0 = Path(cwd).resolve()
+    root = gitops.repo_root(cwd0)
+    base = root.resolve() if root is not None else cwd0
 
     if not target:
-        return _ladder(cwd, None, False)
+        return _ladder(base, None, False)
 
-    kind = classify_target(cwd, target)
+    kind = classify_target(cwd0, target)
+    if kind != "path" and root is not None and classify_target(base, target) == "path":
+        kind = "path"
+    if kind == "path" and root is not None:
+        target = _as_root_relative(cwd0, base, target)
+    cwd = base
     untracked = gitops.untracked_files(cwd)
 
     if kind == "repo":
@@ -339,7 +373,11 @@ def resolve_scope(cwd: str | Path, target: Optional[str] = None) -> dict:
                 "probes": [{"cmd": f"git diff --name-only {target}", "rc": 0, "empty": True}]}
             return scope
         scope = _base_scope(cwd, "range")
-        base, _, head = target.partition("..")
+        # P3 回修: 三点对称差优先('main...feature' 原版按 '..' 拆出 head='.feature';
+        # 无 '...' 时才按 '..' 拆)
+        base, sep, head = target.partition("...")
+        if not sep:
+            base, _, head = target.partition("..")
         scope.update(rung=1, target=target, scope_command=f"git diff {target}",
                      base=base or None, head=head or None,
                      commit_log_cmd=f"git log --oneline {target}")
@@ -396,6 +434,9 @@ def apply_exclusions(scope: dict, patterns: list[str], source: str) -> dict:
     """把排除模式应用到 scope(就地); 返回被排除记录列表。
 
     排除模式为路径前缀/目录(尾 /)/glob; 排除路径完全不进审查范围。
+    P3 回修: untracked/raw_files 同步过滤 —— diff_files 本就含未跟踪文件,
+    但原版只滤 diff_files, scope['untracked'] 仍把被排除路径全量交给 brief
+    当审查目标(trusted overlay 的 'out of scope entirely' 承诺被打破)。
     """
     excluded: list[dict] = []
     kept: list[str] = []
@@ -405,7 +446,10 @@ def apply_exclusions(scope: dict, patterns: list[str], source: str) -> dict:
             excluded.append({"path": path, "pattern": hit, "reason": source, "applied": True})
         else:
             kept.append(path)
+    kept_set = set(kept)
     scope["diff_files"] = kept
+    scope["untracked"] = [u for u in scope.get("untracked", []) if u in kept_set]
+    scope["raw_files"] = [f for f in scope.get("raw_files", []) if f in kept_set]
     scope["excluded"] = scope.get("excluded", []) + excluded
     scope["stats"]["files"] = len(kept)
     return scope

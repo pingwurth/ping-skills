@@ -191,3 +191,78 @@ def test_gh缺失即下降不报错(tmp_path, monkeypatch):
     sc = scope_mod.resolve_scope(repo.root)
     # git 也不可用时一切 rung 失败 → 逃逸口而非异常
     assert isinstance(sc, dict) and sc.get("escape_hatch") is not None
+
+
+# ── P3 回修回归: 范围/门禁(2026-11-02 全面审查) ──────────────────────
+def test_p3_子目录相对路径目标不再误判(tmp_path):
+    """P3 回归: 顶层重定根后相对路径目标按顶层判定 —— (root/'mod.py') 不存在
+    且 ls-files 列的是 src/deep/mod.py → 误判 branch → git diff main...mod.py
+    失败落逃逸口, 用户点名的文件审查意图丢失。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/deep/mod.py": "x = 1\n"}, "init")
+    repo.edit({"src/deep/mod.py": "x = 2\n"})
+    sc = scope_mod.resolve_scope(repo.root / "src" / "deep", "mod.py")
+    assert not sc.get("escape_hatch"), "相对路径目标不得落逃逸口"
+    assert sc["diff_files"] == ["src/deep/mod.py"], "path 目标须归一为顶层相对"
+    assert sc["stats"]["files"] == 1
+
+
+def test_p3_点斜杠路径目标的untracked命中(tmp_path):
+    """P3 回归: untracked_in_scope 用 target 原文比对 porcelain 路径 ——
+    './src' 形式零命中, 显式累积要覆盖的洞被重新打开(只剩目录 whole-file)。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"README.md": "r\n"}, "init")
+    repo.untracked({"src/new.py": "n = 1\n"})
+    sc = scope_mod.resolve_scope(repo.root, "./src")
+    assert sc["untracked"] == ["src/new.py"]
+    assert "src/new.py" in sc["diff_files"]
+    assert not sc.get("escape_hatch")
+
+
+def test_p3_排除项同步过滤untracked(tmp_path):
+    """P3 回归: apply_exclusions 原版只滤 diff_files —— trusted overlay 排除
+    'gen/' 后 scope['untracked'] 仍把 gen/g_new.py 全量交给 brief 当审查目标,
+    'out of scope entirely' 承诺对未跟踪文件不成立。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "gen/g.py": "1\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    repo.untracked({"gen/g_new.py": "n = 1\n"})
+    sc = scope_mod.resolve_scope(repo.root)
+    assert set(sc["diff_files"]) == {"src/a.py", "gen/g_new.py"}
+    scope_mod.apply_exclusions(sc, ["gen/"], "overlay")
+    assert sc["diff_files"] == ["src/a.py"]
+    assert sc["untracked"] == [], "被排除的未跟踪路径不得再作为审查目标"
+    assert sc["raw_files"] == ["src/a.py"]
+    assert [e["path"] for e in sc["excluded"]] == ["gen/g_new.py"]
+
+
+def test_p3_二进制与巨型untracked行数计0(tmp_path):
+    """P3 回归: _file_insertions 承诺 '二进制/超大文件计 0' 但无任何检查 ——
+    50MB 构建产物把原始行数灌进 stats.insertions, 顶穿 FANOUT 阈值。"""
+    from crp import config
+    (tmp_path / "text.py").write_bytes(b"a\nb\nc\n")
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01\n" * 10)
+    (tmp_path / "huge.min.js").write_bytes(b"x" * (config.UNTRACKED_INSERTIONS_MAX_BYTES + 1))
+    assert scope_mod._file_insertions(tmp_path / "text.py") == 3
+    assert scope_mod._file_insertions(tmp_path / "blob.bin") == 0
+    assert scope_mod._file_insertions(tmp_path / "huge.min.js") == 0
+    # 集成: untracked 二进制不得抬高范围统计
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"README.md": "r\n"}, "init")
+    (repo.root / "out.bin").write_bytes(b"\x00" * 100)
+    sc = scope_mod.resolve_scope(repo.root)
+    assert sc["untracked"] == ["out.bin"]
+    assert sc["stats"]["insertions"] == 0
+
+
+def test_p3_区间三点目标base_head拆分(tmp_path):
+    """P3 回归: 'main...feature' 按 partition('..') 拆出 head='.feature' ——
+    三点对称差须优先, 无 '...' 才按 '..'。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"a.py": "1\n"}, "c1")
+    repo.commit({"b.py": "2\n"}, "c2")
+    sc = scope_mod.resolve_scope(repo.root, "HEAD~1...HEAD")
+    assert sc["kind"] == "range"
+    assert sc["base"] == "HEAD~1" and sc["head"] == "HEAD"
+    sc2 = scope_mod.resolve_scope(repo.root, "HEAD~1..HEAD")
+    assert sc2["base"] == "HEAD~1" and sc2["head"] == "HEAD"

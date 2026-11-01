@@ -110,3 +110,24 @@ def test_启发式门禁扫描(tmp_path):
     gates = overlay.heuristic_gates(repo.root)
     assert "make check" in gates and "make lint" in gates and "npm run test:unit" in gates
     assert not any("deploy" in g or "build" in g for g in gates)  # 非门禁名不进
+
+
+# ── P3 回修回归: 启发式门禁扫描(2026-11-02 全面审查) ─────────────────
+def test_p3_Makefile变量赋值不产门禁(tmp_path):
+    """P3 回归: '^([A-Za-z0-9_.-]+):' 同样命中 'TESTS:= …' 变量赋值行 ——
+    'make TESTS' 假门禁进入 A4 询问, 批准后 verify 执行必失败。"""
+    (tmp_path / "Makefile").write_text(
+        "TESTS:= test_a test_b\nCHECK_FLAGS:= -Wall\n"
+        "check:\n\techo ok\nlint: build\n\techo lint\n", encoding="utf-8")
+    gates = overlay.heuristic_gates(tmp_path)
+    assert "make check" in gates and "make lint" in gates
+    assert "make TESTS" not in gates and "make CHECK_FLAGS" not in gates
+
+
+def test_p3_justfile产just命令而非make(tmp_path):
+    """P3 回归: justfile 套 Makefile 正则并加 'make ' 前缀 —— just 仓库登记的
+    'make check' 门禁根本不存在, 依赖门禁的 finding 永远 'unverified by gate'。"""
+    (tmp_path / "justfile").write_text(
+        "check:\n echo ok\nlint:\n echo lint\n", encoding="utf-8")
+    gates = overlay.heuristic_gates(tmp_path)
+    assert gates == ["just check", "just lint"]

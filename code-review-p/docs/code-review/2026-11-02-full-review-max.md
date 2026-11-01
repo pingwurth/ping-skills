@@ -19,6 +19,8 @@
 
 > **第二批(P2 状态机/生命周期 8 条)同日回修**:①逃逸口 ask 落 pending_question,resume 遇 escape_hatch 重问(不再静默空审)②start --run-dir 指向已有运行防覆盖询问(--force 逃生)③drift new_scope 重导全空走逃逸口重问 ④resolve_run_dir 增加 include_done 回落,done 后裸 report/status/resume 可达(resume 重发 finish 块)⑤cmd_report 拒绝 phase=report(details 未提交时不再空渲染终结审查)⑥status 的 kept 改实时台账口径 ⑦carrier 的 max_agents/max_concurrent 真正生效(decisions.effective_limits,与计划取 min 只收紧)⑧_validate_carrier 排除 bool。
 
+> **第三批(P3 范围/门禁 7 条)同日回修**:①resolve_scope 目标分类在原始调用目录与顶层各试一次,path 目标归一为顶层相对(子目录相对路径不再误判 branch 落逃逸口)②untracked_in_scope 归一 './' 前缀与尾斜杠 ③apply_exclusions 同步过滤 untracked/raw_files(trusted 排除项对未跟踪文件同样 out of scope)④_file_insertions 二进制(NUL 探测)/超 1MB 按 0 计(config.UNTRACKED_INSERTIONS_MAX_BYTES)⑤range 目标三点 '…' 优先拆分(head 不再记成 '.feature')⑥Makefile 门禁正则排除 ':=' 变量赋值 ⑦justfile 配方生成 `just <name>` 而非 `make <name>`。
+
 | # | 位置 | 缺陷 |
 |---|---|---|
 | 1 | `scripts/crp/handlers.py:637` | 门禁确认在 brief 之前触发,answer --key gates 无条件把 phase 置 carrier → brief 阶段被整体跳过(keep 阈值回退 KEEP_NONE、angles 空、02-brief.md 永不生成) |
