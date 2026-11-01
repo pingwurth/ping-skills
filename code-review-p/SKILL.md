@@ -91,7 +91,10 @@ Carriers (record **before** any sweep work via `submit --kind carrier` —
 degradations get logged there, never reverse-engineered): ① Workflow script
 (`workflows/deep-review.js` via the host Workflow tool, main session only —
 then ingest via `--kind carrier1`), ② `agents/review-finder.md` /
-`agents/review-refuter.md` spawns, ③ inline sequential.
+`agents/review-refuter.md` spawns, ③ inline sequential. Parallel fan-out is
+**concurrency-capped** in every carrier (default 4 agents in flight; spawn in
+waves, never all angles at once). Override with `CRP_MAX_CONCURRENT`
+(in-flight cap, clamped [1,16]) and `CRP_MAX_AGENTS` (total budget).
 
 ## 3 — Phase 0: scope (engine-executed)
 

@@ -12,6 +12,7 @@
 //   angles?: array,       // [{key, name?, charter}] or ['A','B',...] subset/override
 //   maxRounds?: number,   // default 4: initial sweep + gap sweeps; clamped to [1, 5]
 //   maxAgents?: number,   // agent budget; default scales with fan-out width: max(45, 8×angle count). Overflow degrades lenses, then stops gap rounds
+//   concurrency?: number, // max agents in flight at once (whole script); default 4, clamped [1, 16] — set to your provider's rate-limit comfort
 // }
 
 export const meta = {
@@ -132,6 +133,26 @@ const take = n => {
   return true
 }
 
+// ── concurrency cap: at most N agents in flight across the WHOLE script ──
+// The host queues agent() calls beyond its own cap (min(16, CPUs−2)) — still
+// too many for rate-limited providers, and carrier-2 style "everything at
+// once" bursts die wholesale on 429s. This semaphore gates every agent() call
+// through spawn(); finder waves and nested refuter fan-out share the same
+// slots, so the bound is global no matter how the fan-outs compose. Plain
+// promise queue — no timers (Date.now/setTimeout are unavailable here).
+const MAX_CONCURRENT = Math.max(1, Math.min(args?.concurrency ?? 4, 16))
+let inFlight = 0
+const waiters = []
+const acquire = () => {
+  if (inFlight < MAX_CONCURRENT) { inFlight++; return Promise.resolve() }
+  return new Promise(res => waiters.push(() => { inFlight++; res() }))
+}
+const release = () => { inFlight--; const next = waiters.shift(); if (next) next() }
+const spawn = async (prompt, opts) => {
+  await acquire()
+  try { return await agent(prompt, opts) } finally { release() }
+}
+
 // ── pure helpers (workflow-global-free; exercised by tests/test_workflow_script.py) ──
 // Finders mix absolute and repo-relative paths; dedup compares file equality,
 // so every candidate path is normalized to repo-relative first — else the same
@@ -205,7 +226,7 @@ async function refute(c, angleKey) {
     // tag each vote with its lens by construction — the journal must be
     // self-describing even if an agent forgets to echo it
     const results = await parallel(ls.map(([lens, ask]) => () =>
-      agent(refuterPrompt(c, ask, lens), {
+      spawn(refuterPrompt(c, ask, lens), {
         label: `verify:${angleKey}:${c.file.split('/').pop()}:${c.line}:${lens}`,
         phase: 'Verify',
         schema: VERDICT_SCHEMA,
@@ -268,12 +289,21 @@ while (round < maxRounds && (round === 0 || dry < 2)) {
   let roundFresh = 0, roundDropped = 0
   const results = await pipeline(
     roundAngles,
-    a => {
+    async a => {
       // register before spawning (v1.4.1 #10): a finder killed mid-flight must
       // surface as coverage {ran:false}, not vanish from the ledger
       if (!coverage[a.key]) coverage[a.key] = { ran: false, raw: 0, fresh: 0 }
       if (!take(1)) { log(`budget: skipping finder ${a.key}`); return null }
-      return agent(finderPrompt(a), { label: `find:${a.key}-${a.name}`, phase: 'Find', schema: CANDIDATES_SCHEMA })
+      const findOpts = { label: `find:${a.key}-${a.name}`, phase: 'Find', schema: CANDIDATES_SCHEMA }
+      const res = await spawn(finderPrompt(a), findOpts)
+      // One retry for a dead finder: a rate-limited death is a coverage hole —
+      // the worst degradation. The semaphore spacing (a slot only frees after
+      // other in-flight work resolves) is the natural backoff.
+      if (res == null && take(1)) {
+        log(`finder ${a.key} died (rate limit?) — one retry`)
+        return spawn(finderPrompt(a), { ...findOpts, label: `find:${a.key}-retry` })
+      }
+      return res
     },
     async (res, a) => {
       const angleKey = res?.angle || a.key
@@ -320,6 +350,7 @@ return {
   rounds: round,
   agentsSpawned,
   maxAgents,
+  concurrency: MAX_CONCURRENT,
   coverage,
   dupDropped,
   totalSeen: seen.length,

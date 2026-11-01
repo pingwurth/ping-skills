@@ -47,3 +47,27 @@ def test_载体预算随宽度扩展():
     assert config.default_max_agents(1) == 45
     assert config.default_max_agents(12) == 96
     assert config.default_max_agents(13) == 104
+
+
+def test_并发上限默认与环境覆盖(monkeypatch):
+    monkeypatch.delenv(config.CRP_MAX_CONCURRENT_ENV, raising=False)
+    assert config.max_concurrent_agents() == config.DEFAULT_MAX_CONCURRENT == 4
+    monkeypatch.setenv(config.CRP_MAX_CONCURRENT_ENV, "2")
+    assert config.max_concurrent_agents() == 2
+    monkeypatch.setenv(config.CRP_MAX_CONCURRENT_ENV, "99")  # 钳上限
+    assert config.max_concurrent_agents() == config.MAX_CONCURRENT_MAX
+    monkeypatch.setenv(config.CRP_MAX_CONCURRENT_ENV, "0")  # 钳下限
+    assert config.max_concurrent_agents() == config.MAX_CONCURRENT_MIN
+    monkeypatch.setenv(config.CRP_MAX_CONCURRENT_ENV, "abc")  # 非法回退默认
+    assert config.max_concurrent_agents() == 4
+
+
+def test_总量预算环境覆盖(monkeypatch):
+    monkeypatch.delenv(config.CRP_MAX_AGENTS_ENV, raising=False)
+    assert config.agent_budget(12) == config.default_max_agents(12) == 96
+    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "20")
+    assert config.agent_budget(13) == 20
+    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "3")  # 下限 12(对齐 deep-review.js)
+    assert config.agent_budget(1) == config.MAX_AGENTS_MIN
+    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "abc")
+    assert config.agent_budget(12) == 96

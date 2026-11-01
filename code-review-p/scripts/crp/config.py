@@ -25,6 +25,10 @@ OUT_SUBDIR = "out"      # 报告与台账导出
 CRP_HOME_ENV = "CRP_HOME"
 # 轮次上限环境覆盖(钳制 [MAX_ROUNDS_MIN, MAX_ROUNDS_MAX])
 CRP_MAX_ROUNDS_ENV = "CRP_MAX_ROUNDS"
+# 并发上限环境覆盖(钳制 [MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX]) —— 限流保护
+CRP_MAX_CONCURRENT_ENV = "CRP_MAX_CONCURRENT"
+# 载体 1 总量预算环境覆盖(下限 MAX_AGENTS_MIN)
+CRP_MAX_AGENTS_ENV = "CRP_MAX_AGENTS"
 
 RUN_ID_PREFIX = "crp"
 RUN_ID_RANDOM_HEX = 4
@@ -118,6 +122,35 @@ STANDARD_FANOUT_ANGLES = ("B", "C", "E", "L", "T")
 def default_max_agents(n_angles: int) -> int:
     """载体 1 预算默认值: 随 fan-out 宽度扩展(v1.4.1 #12)。"""
     return max(45, 8 * max(1, n_angles))
+
+
+# 并发上限(三载体共用: 载体 1 脚本内信号量 / 载体 2 分波 spawn / 载体 3 天然顺序)
+DEFAULT_MAX_CONCURRENT = 4
+MAX_CONCURRENT_MIN = 1
+MAX_CONCURRENT_MAX = 16
+MAX_AGENTS_MIN = 12  # 与 deep-review.js 的 Math.max(12, ...) 对齐
+
+
+def max_concurrent_agents() -> int:
+    """同时在飞的 agent 数上限; 第三方代理限流环境调低。"""
+    raw = os.environ.get(CRP_MAX_CONCURRENT_ENV)
+    if raw:
+        try:
+            return max(MAX_CONCURRENT_MIN, min(int(raw), MAX_CONCURRENT_MAX))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_MAX_CONCURRENT
+
+
+def agent_budget(n_angles: int) -> int:
+    """扫描计划实际采用的总量预算: CRP_MAX_AGENTS 覆盖 > 宽度启发式默认。"""
+    raw = os.environ.get(CRP_MAX_AGENTS_ENV)
+    if raw:
+        try:
+            return max(MAX_AGENTS_MIN, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return default_max_agents(n_angles)
 
 
 # --------------------------------------------------------------------------- #

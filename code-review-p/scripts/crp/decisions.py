@@ -68,7 +68,8 @@ def build_sweep_plan(mode: str, overlay: dict, scope: dict) -> dict:
         "keep": params["keep"],
         "cap": params["cap"],
         "confidence_floor": config.CONFIDENCE_FLOOR,
-        "max_agents": config.default_max_agents(len(angles)),
+        "max_agents": config.agent_budget(len(angles)),
+        "max_concurrent": config.max_concurrent_agents(),
         "partition": "area" if (scope or {}).get("repo_mode") else "angle",
     }
     if mode == "standard" and fanout:
@@ -119,7 +120,8 @@ SHA_DETAILS = ('{"brief_summary": "≤5 行 brief 摘要(报告头)", '
                '"summary_bullets": ["…", "…", "…"], '
                '"details": [{"id": "c001", "title": "…", "problem": "…", '
                '"failure_scenario": "…", "fix": "…"}]}')
-SHA_CARRIER = '{"carrier": 2, "reason": "Workflow 工具不在本上下文工具集", "max_agents": 60}'
+SHA_CARRIER = ('{"carrier": 2, "reason": "Workflow 工具不在本上下文工具集", '
+               '"max_agents": 60, "max_concurrent": 4}')
 
 
 # --------------------------------------------------------------------------- #
@@ -219,13 +221,16 @@ def gates_question(state: State, ctx: RouteCtx) -> Decision:
 def carrier_work(state: State, ctx: RouteCtx) -> Decision:
     plan = state.sweep_plan or {}
     angles = plan.get("angles") or []
+    # 旧 state.json 的 sweep_plan 无 max_concurrent(2026-11 并发治理新增) —— 缺省回退
+    max_conc = plan.get("max_concurrent") or config.max_concurrent_agents()
     parts = [
         "选择并行载体并留痕(3 选 1, 首个可用者胜):",
         "1. Workflow 脚本(仅主会话有 Workflow 工具) —— scriptPath 调 workflows/deep-review.js;",
         "2. agents/review-finder.md + review-refuter.md 逐角度/逐候选 spawn;",
         "3. 无子代理工具 —— 本上下文顺序执行。",
         f"本次扫描计划: 角度 {'/'.join(angles)} · 轮次上限 {plan.get('max_rounds')} · "
-        f"cap {plan.get('cap')} · keep {plan.get('keep')} · 建议预算 {plan.get('max_agents')}。",
+        f"cap {plan.get('cap')} · keep {plan.get('keep')} · 建议预算 {plan.get('max_agents')} · "
+        f"并发上限 {max_conc}。",
     ]
     if plan.get("fanout_recommended"):
         parts.append(f"**fan-out 建议**: {plan.get('fanout_reason')} —— standard 模式已收敛为热点角度集。")
@@ -233,7 +238,9 @@ def carrier_work(state: State, ctx: RouteCtx) -> Decision:
     return _do_work(
         "carrier", "\n".join(parts), ctx,
         context={"angles": angles, "max_rounds": plan.get("max_rounds"),
-                 "max_agents": plan.get("max_agents"), "keep": plan.get("keep"),
+                 "max_agents": plan.get("max_agents"),
+                 "max_concurrent": max_conc,
+                 "keep": plan.get("keep"),
                  "cap": plan.get("cap")},
         shape=SHA_CARRIER, summary="等待载体选择", seq="03")
 
@@ -284,12 +291,15 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
 
     # 初扫(fix_review 也是一轮全角度 quick 语义扫描)
     angles = pending or plan.get("angles") or []
+    max_conc = plan.get("max_concurrent") or config.max_concurrent_agents()
     common = (
         "逐角度生成候选: 生成自由、不做过滤(置信度/严重度只记录不拦截); "
         "同一行不同机制 = 两条候选; 每角度上限 8 条。\n"
         f"角度章程: {ctx.refs('angles.md')} · brief 已存 {ctx.run_dir / config.IN_SUBDIR}/02-brief.md。\n"
         "候选 file 一律仓库相对路径(正斜杠); cleanup(I)/altitude(J)/conventions(K) 的 "
-        "failure_scenario 写具体成本而非崩溃。"
+        "failure_scenario 写具体成本而非崩溃。\n"
+        f"spawn 子代理(载体 2)必须分波: 同时在飞 ≤ {max_conc}"
+        "(限流保护), 一个完成再补一个 —— 不要一次扇出全部角度。"
     )
     if carrier_no == 1:
         output = str(ctx.in_dir / "04-carrier1-transcript-dir.txt")
@@ -298,7 +308,7 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
             "workflows/deep-review.js, args 携带 "
             "{brief: <02-brief.md 全文>, scope: <scope_command>, cwd: <仓库绝对路径>, "
             f"angles: {angles}, maxRounds: {plan.get('max_rounds')}, "
-            f"maxAgents: {plan.get('max_agents')}}}。\n"
+            f"maxAgents: {plan.get('max_agents')}, concurrency: {max_conc}}}。\n"
             "运行结束后, 把工具结果中的 transcriptDir 路径原样写入 output 文件(单行)。\n"
             "若 journal 不可读, 改写压缩 journal JSON 到同一文件(引擎按内容嗅探)。"
         )
@@ -343,6 +353,7 @@ def verify_work(state: State, ctx: RouteCtx) -> Decision:
             "summary": c.get("summary"), "failure_scenario": c.get("failure_scenario"),
             "severity": c.get("severity"), "lenses": lenses,
         })
+    max_conc = (state.sweep_plan or {}).get("max_concurrent") or config.max_concurrent_agents()
     instructions = (
         "对抗验证: 逐候选逐透镜尝试**反驳**。读真实代码并引证原文; 检查别处守卫"
         "(调用方/包装器/框架默认/类型系统); 能否精确命名触发输入态; 可廉价实证则实证"
@@ -351,6 +362,8 @@ def verify_work(state: State, ctx: RouteCtx) -> Decision:
         '"unverified by gate"。无引证不下裁决。\n'
         f"透镜: correctness=代码是否如 finding 所称 / reproduction=构造具体触发 / "
         f"security=真实信任边界与影响。\n"
+        f"spawn 子代理分波进行: 同时在飞 ≤ {max_conc}"
+        "(限流保护), 一个完成再补一个。\n"
         f"批次 {len(batch)}/{len(pending)}; P0/P1 需全部所列透镜各一票。"
     )
     return _do_work(

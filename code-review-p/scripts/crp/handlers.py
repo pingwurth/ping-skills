@@ -459,6 +459,9 @@ def _validate_carrier(data: object) -> list[str]:
     ma = data.get("max_agents")
     if ma is not None and (not isinstance(ma, int) or ma < 1):
         errs.append("max_agents 必须是正整数或缺省")
+    mc = data.get("max_concurrent")
+    if mc is not None and (not isinstance(mc, int) or mc < 1):
+        errs.append("max_concurrent 必须是正整数或缺省")
     return errs
 
 
@@ -466,6 +469,7 @@ def _apply_carrier(state: State, data: dict) -> str:
     plan = state.sweep_plan or {}
     state.carrier = {"carrier": data.get("carrier"), "reason": data.get("reason"),
                      "max_agents": data.get("max_agents") or plan.get("max_agents"),
+                     "max_concurrent": data.get("max_concurrent") or plan.get("max_concurrent"),
                      "degradations": []}
     state.phase = "sweep"
     state.cursor["round_kind"] = "sweep"

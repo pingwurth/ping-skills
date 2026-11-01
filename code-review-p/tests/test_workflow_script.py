@@ -64,6 +64,18 @@ def test_script_exists_and_contract_markers():
     assert "Math.max(1, Math.min(" in src, "maxRounds 缺少下界钳制（maxRounds:0 会空跑）"
 
 
+def test_concurrency_gate_markers():
+    """限流治理契约：所有 agent() 调用经 spawn() 信号量门控 + args.concurrency 钳位。"""
+    src = script_src()
+    assert "args?.concurrency" in src, "缺少 args.concurrency 并发参数（钳位 [1,16]）"
+    assert "const spawn = async" in src, "缺少 spawn() 信号量门控封装"
+    # agent() 直连只允许出现在 spawn 内部这一个调用点
+    assert src.count("await agent(prompt, opts)") == 1, "agent() 必须只在 spawn() 内被调用"
+    assert "spawn(finderPrompt(" in src, "finder 未走门控"
+    assert "spawn(refuterPrompt(" in src, "refuter 未走门控"
+    assert "find:${a.key}-retry" in src, "finder 死亡（限流）缺少一次性重试"
+
+
 def test_self_describing_schemas_and_journal():
     """v2.0 契约：finder/refuter 返回自描述（angle / file+line+summary+lens），
     返回值携带压缩 journal —— crp.py submit --kind carrier1 的摄取前提。"""
@@ -255,3 +267,71 @@ def test_aggregate_quorum_and_ties():
     for votes, high, expected in cases:
         r = run_case([], {"file": "x", "line": 1, "summary": "s"}, votes, high)
         assert r["verdict"] == expected, f"{[v['verdict'] for v in votes]} high={high} -> {r['verdict']}，期望 {expected}"
+
+
+# ── 限流治理：并发信号量 + finder 一次性重试（v2.1） ─────────────────
+
+STUB_JS = """
+const ANGLES = ['A','B','C','D','E','F'];
+let inFlight = 0, peak = 0; const labels = [];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const agent = async (prompt, opts) => {
+  inFlight++; peak = Math.max(peak, inFlight); labels.push(opts.label);
+  await sleep(3);
+  inFlight--;
+  // 角度 A 的首个 finder 死于限流（返回 null）——触发一次性重试
+  if (opts.label.startsWith('find:A-') && !opts.label.endsWith('-retry')) return null;
+  if (opts.label.startsWith('find:')) {
+    const key = opts.label.slice(5).split('-')[0];
+    const idx = ANGLES.indexOf(key);
+    return { angle: key, candidates: [{ file: 'src/a.ts', line: 10 + idx,
+      summary: 'finding ' + key, failure_scenario: 'scenario ' + key,
+      confidence: 0.9, severity: 'P2', category: 'correctness' }] };
+  }
+  if (opts.label.startsWith('verify:')) {
+    return { file: 'src/a.ts', line: 10, summary: 's', lens: 'correctness',
+             verdict: 'CONFIRMED', evidence: 'quoted line', severity: 'P2' };
+  }
+  return null;
+};
+// 与宿主语义对齐：parallel 是屏障 + 失败为 null；pipeline 逐条流转无栅栏
+const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)));
+const pipeline = (items, ...stages) => Promise.all(items.map((item, i) => (async () => {
+  let r = item;
+  for (const st of stages) {
+    try { r = await st(r, item, i); } catch (e) { return null; }
+  }
+  return r;
+})()));
+const phase = () => {}; const log = () => {};
+const budget = { total: null, spent: () => 0, remaining: () => Infinity };
+const args = { brief: 'b', scope: 'git diff', cwd: '/repo', angles: ANGLES,
+               maxRounds: 1, maxAgents: 60, concurrency: 3 };
+"""
+
+
+@requires_node
+def test_concurrency_semaphore_behavioral():
+    """行为测试（限流治理）：stub 宿主原语跑全脚本 ——
+    1) 峰值在飞 agent 数 == concurrency 钳位（finder 波与 refuter 嵌套扇出共享同一闸门）;
+    2) finder 死亡(null)补发一次 find:<key>-retry, coverage 恢复 ran=true;
+    3) concurrency 透传到返回值。"""
+    body = re.sub(r"export const meta = \{.*?\n\}\n", "", script_src(), flags=re.S)
+    js = (
+        "const run = async (args, agent, parallel, pipeline, phase, log, budget) => {\n"
+        + body + "\n};\n" + STUB_JS + "\n"
+        + "run(args, agent, parallel, pipeline, phase, log, budget).then(out => {\n"
+        + "  console.log(JSON.stringify({peak, labels, rounds: out.rounds, concurrency: out.concurrency,\n"
+        + "    findings: out.findings.length, covA: out.coverage.A.ran}));\n"
+        + "}).catch(e => { console.error('SCRIPT_THREW', e); process.exit(9); });\n"
+    )
+    r = json.loads(run_node(js))
+    assert r["peak"] == 3, f"峰值在飞 {r['peak']} != concurrency 3 —— 信号量未钳住并发"
+    assert r["concurrency"] == 3, "concurrency 未透传到返回值"
+    assert r["rounds"] == 1
+    assert "find:A-retry" in r["labels"], "finder 死亡未触发一次性重试"
+    first_calls = [l for l in r["labels"]
+                   if l.startswith("find:A-") and not l.endswith("-retry")]
+    assert len(first_calls) == 1, f"A 角度应恰好一次失败调用: {first_calls}"
+    assert r["covA"] is True, "重试成功后 coverage.A.ran 应恢复为 true"
+    assert r["findings"] >= 1

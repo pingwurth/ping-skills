@@ -51,11 +51,12 @@ markdown 文本, 六节 `##` 标题(可用审查语言, 节序即契约):
 ## carrier — 载体选择(Phase 2 之前, 强制)
 
 ```json
-{"carrier": 2, "reason": "Workflow 工具不在本上下文工具集", "max_agents": 60}
+{"carrier": 2, "reason": "Workflow 工具不在本上下文工具集", "max_agents": 60, "max_concurrent": 4}
 ```
 
 - `carrier`: 1=Workflow 脚本(仅主会话) / 2=agents spawn / 3=inline 顺序。
-- `reason` 必填 —— 静默降级不可审计; `max_agents` 可缺省(取扫描计划默认)。
+- `reason` 必填 —— 静默降级不可审计; `max_agents` / `max_concurrent` 可缺省
+  (取扫描计划默认; 并发上限 = 同时在飞 agent 数, 限流保护)。
 - 运行中降级(finder 死亡/预算耗尽)通过后续 candidates 提交的
   `degradations` 数组补充留痕。
 

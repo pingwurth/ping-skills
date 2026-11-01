@@ -237,9 +237,13 @@ every targeted check that fails is a candidate.
 
 ## Deep mode — subagent prompt templates
 
-Run one finder per angle as a parallel subagent; pipeline each candidate into
-a refuter subagent as soon as it arrives (no barrier waiting for all finders).
-If subagents are unavailable, run the same prompts sequentially inline.
+Run finders as parallel subagents but **in waves**: at most `max_concurrent`
+agents in flight at any moment (default 4; `CRP_MAX_CONCURRENT` overrides) —
+start the next finder/refuter only as a slot frees, never all angles at once
+(rate-limit protection; a finder killed by rate limiting is a coverage hole).
+Still pipeline each candidate into a refuter subagent as soon as it arrives
+(no barrier waiting for all finders). If subagents are unavailable, run the
+same prompts sequentially inline.
 
 **Every prompt carries the brief** — background, red lines, targeted checks,
 gates. A generic charter alone wastes the targeted plan. Spawn through the

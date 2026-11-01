@@ -17,7 +17,7 @@ def _state(mode="standard", phase="brief", **kw) -> State:
                            "keep": params["keep"], "cap": params["cap"],
                            "dry_required": params["dry_required"],
                            "max_rounds": params["max_rounds"],
-                           "max_agents": 60},
+                           "max_agents": 60, "max_concurrent": 4},
                cursor={"round": 0, "round_kind": "sweep", "awaiting": "brief",
                        "pending_angles": [], "pending_verify": [], "lens_requests": [],
                        "dry_streak": 0},
@@ -151,3 +151,42 @@ def test_quick无gap诉求():
     st.accounting["round_history"] = [{"round": 1, "kind": "sweep", "fresh": 3, "dup": 0,
                                        "kept_after_verify": 3, "dry": False}]
     assert verify.finalize_round(st) == "report"
+
+
+def test_扫描计划_并发与预算接线(monkeypatch):
+    monkeypatch.delenv(config.CRP_MAX_CONCURRENT_ENV, raising=False)
+    monkeypatch.delenv(config.CRP_MAX_AGENTS_ENV, raising=False)
+    plan = decisions.build_sweep_plan("deep", {}, {"stats": {}})
+    assert plan["max_concurrent"] == config.max_concurrent_agents() == 4
+    assert plan["max_agents"] == config.agent_budget(len(plan["angles"]))
+    monkeypatch.setenv(config.CRP_MAX_CONCURRENT_ENV, "2")
+    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "25")
+    plan2 = decisions.build_sweep_plan("standard", {}, {"stats": {}})
+    assert plan2["max_concurrent"] == 2 and plan2["max_agents"] == 25
+
+
+def test_载体指令携带并发上限(monkeypatch):
+    monkeypatch.delenv(config.CRP_MAX_CONCURRENT_ENV, raising=False)
+    st = _state(phase="sweep", carrier={"carrier": 1})
+    d = decisions.sweep_work(st, CTX)
+    assert "concurrency: 4" in d.instructions, "载体 1 args 未携带 concurrency"
+
+    st2 = _state(phase="sweep", carrier={"carrier": 2})
+    st2.cursor["pending_angles"] = ["A"]
+    d2 = decisions.sweep_work(st2, CTX)
+    assert "分波" in d2.instructions and "≤ 4" in d2.instructions
+
+    # 旧 state.json(sweep_plan 无 max_concurrent 键)回退引擎默认, 不出现 None
+    st3 = _state(phase="sweep", carrier={"carrier": 2})
+    st3.sweep_plan.pop("max_concurrent")
+    st3.cursor["pending_angles"] = ["A"]
+    d3 = decisions.sweep_work(st3, CTX)
+    assert "None" not in d3.instructions and "≤ 4" in d3.instructions
+
+    # 验证批次同样携带分波指引
+    stv = _state(phase="verify")
+    stv.candidates = [{"id": "c001", "file": "a.py", "line": 1, "summary": "s",
+                       "failure_scenario": "f", "severity": "P2"}]
+    stv.cursor["pending_verify"] = [{"id": "c001", "lenses": ["correctness"]}]
+    dv = decisions.verify_work(stv, CTX)
+    assert "分波" in dv.instructions and "None" not in dv.instructions

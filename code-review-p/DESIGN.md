@@ -157,7 +157,10 @@ independent reviewer's findings, all verified against source) drove:
    P2/P3 that a refuter upgrades to P0/P1 gets the other two lenses before
    a verdict.
 5. **Cost + visibility.** Agent budget (maxAgents, default 45) with lens
-   degradation before stopping and gap-round reservation; per-angle
+   degradation before stopping and gap-round reservation; a script-level
+   concurrency semaphore caps in-flight agents (default 4, `args.concurrency`
+   / `CRP_MAX_CONCURRENT`, clamped [1,16]) so rate-limited providers don't
+   kill finders wholesale, with one retry for a dead finder; per-angle
    coverage, truncation counts, and skipped finders logged and returned;
    the <0.5 confidence floor applied before the 20-finding cap; ranking
    adds category order.
