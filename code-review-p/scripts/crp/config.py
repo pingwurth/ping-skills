@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 
 SKILL_NAME = "code-review-p"
-ENGINE_NAME = "crp"
 ENTRY_FILENAME = "crp.py"
 
 # --------------------------------------------------------------------------- #
@@ -18,7 +17,6 @@ ENTRY_FILENAME = "crp.py"
 STATE_FILENAME = "state.json"
 LOGS_SUBDIR = "logs"    # 每子命令日志(协议块缺失时读尾部 50 行)
 IN_SUBDIR = "in"        # LLM 提交物(overlay.json / brief.md / candidates-*.json …)
-WORK_SUBDIR = "work"    # 引擎产出给 LLM 的输入(gap digest / 验证批次)
 OUT_SUBDIR = "out"      # 报告与台账导出
 
 # 状态根目录: CRP_HOME > (Windows: %LOCALAPPDATA%) > XDG_STATE_HOME > ~/.local/state
@@ -191,28 +189,12 @@ BRIEF_MIN_SECTIONS = 6    # markdown ## 节数下限(六节; 区域 brief 可更
 BRIEF_SOFT_LINE_LIMIT = 30  # 超限仅警告(advisory)
 
 # --------------------------------------------------------------------------- #
-# 报告
-# --------------------------------------------------------------------------- #
-REPORT_TABLE_COLUMNS = ("#", "Location", "Sev", "Finding")
-
-# --------------------------------------------------------------------------- #
 # state.json schema 版本(顺序迁移; 每次结构变更递增并追加迁移函数)
 # --------------------------------------------------------------------------- #
 STATE_SCHEMA_VERSION = 1
 
-# phase 取值(引擎状态机)
-PHASES = ("scope", "overlay", "gates", "brief", "carrier", "sweep",
-          "verify", "report", "fix", "fix_review", "done", "aborted")
-# cursor.awaiting 取值(提交种类 + answer)
-AWAITING_KINDS = ("overlay", "brief", "candidates", "verdicts", "details",
-                  "carrier", "fix_outcomes", "answer")
-ROUND_KINDS = ("sweep", "gap", "fix_review")
-
 # ask_user key 取值
 QUESTION_KEYS = ("scope", "gates", "drift", "run")
-# resume option 枚举(next-step.schema.json 同步)
-RESUME_OPTIONS = ("approve_all", "skip_all", "choice", "new_scope",
-                  "resume_old_scope", "resume_run", "terminate")
 
 # --------------------------------------------------------------------------- #
 # 日志格式

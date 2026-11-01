@@ -23,6 +23,8 @@
 
 > **第四批(P4 校验/渲染 6 条)同日回修**:①carrier1 内容嗅探移入 try(空文件 IndexError/非 UTF-8 归入「载体 1 journal 摄取失败」执行错误并保留重试引导,不再落 cli 兜底内部错误)②brief 的 strict UTF-8 解码失败改 exit-3 整份拒收(与 JSON 路径一致)③validate_candidates_file 校验 coverage 形状('coverage': null 不再在锁内 AttributeError → exit-2)④findings 表格单元格转义 '|' 与换行(_cell)⑤parity_notes 渲染进报告账目行旁(「分歧记入报告 parity 注记」承诺落地)⑥零发现分支补输出 Open questions / assumptions 节(calibration.md clean-verdict 模板同步加 Open questions 行)。
 
+> **第五批(P5 死代码清理 11 条)同日回修**(纯删除/去重, 验证口径 = 163 全绿含 node 16 例 + 引用清零):删 config 六个零消费常量(ENGINE_NAME/REPORT_TABLE_COLUMNS/PHASES/AWAITING_KINDS/ROUND_KINDS/RESUME_OPTIONS, QUESTION_KEYS 有 argparse 消费者保留)、_KIND_FILE_HINT、State.candidate_by_id、Decision.next_type+Route→type 第二套映射(测试改断言 transitions.build_next_step 真实分发)、cursor.lens_requests 占位(升级真实状态在 pending_verify.lenses)、work/ 只建不读的子目录机制(WORK_SUBDIR/两访问器/布局断言)、候选 'rank': None 与 brief sha256''/sections_ok 恒真占位、IngestResult.errors/VoteOutcome.errors 永不触发通道(后者改 module_logger 告警);测试去重两条:parse_block 入 conftest 共享(补回 END 计数断言)、aggregateVerdict 九例矩阵入 fixtures/aggregate_cases.json 两侧共享断言。
+
 | # | 位置 | 缺陷 |
 |---|---|---|
 | 1 | `scripts/crp/handlers.py:637` | 门禁确认在 brief 之前触发,answer --key gates 无条件把 phase 置 carrier → brief 阶段被整体跳过(keep 阈值回退 KEEP_NONE、angles 空、02-brief.md 永不生成) |

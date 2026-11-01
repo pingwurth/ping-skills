@@ -2,7 +2,7 @@
 
 运行目录位于被审仓库之外(只读纪律 + 不污染 Phase 0 自身依赖的 ?? 检测):
     <state-home>/code-review-p/<repo-slug>/<run-id>/
-        state.json / state.json.lock / in/ / work/ / out/ / logs/
+        state.json / state.json.lock / in/ / out/ / logs/
 
 state home 解析顺序: CRP_HOME > (Windows: %LOCALAPPDATA%) >
 XDG_STATE_HOME > ~/.local/state。~/.cache 语义为"可随时清除", 断点续跑
@@ -109,10 +109,14 @@ def repo_home(cwd: str | Path) -> Path:
 
 
 def create_run_dir(cwd: str | Path, run_id: Optional[str] = None) -> Path:
-    """创建新运行目录(含 in/work/out/logs 子目录), 返回其绝对路径。"""
+    """创建新运行目录(含 in/out/logs 子目录), 返回其绝对路径。
+
+    P5 回修: 删除 work/ 子目录 —— 只建不读(gap digest 与验证批次实际内联在
+    协议 context 里交付), 每次运行白建一个空目录还误导贡献者找 digest 文件。
+    """
     rid = run_id or new_run_id()
     run_dir = repo_home(cwd) / rid
-    for sub in (run_dir, run_dir / config.IN_SUBDIR, run_dir / config.WORK_SUBDIR,
+    for sub in (run_dir, run_dir / config.IN_SUBDIR,
                 run_dir / config.OUT_SUBDIR, run_dir / config.LOGS_SUBDIR):
         sub.mkdir(parents=True, exist_ok=True)
     return run_dir
@@ -215,15 +219,12 @@ class StateStore:
     def in_dir(self) -> Path:
         return self.run_dir / config.IN_SUBDIR
 
-    def work_dir(self) -> Path:
-        return self.run_dir / config.WORK_SUBDIR
-
     def out_dir(self) -> Path:
         return self.run_dir / config.OUT_SUBDIR
 
     def ensure_layout(self) -> None:
-        """确保 in/work/out/logs 子目录存在。"""
-        for sub in (self.in_dir(), self.work_dir(), self.out_dir(),
+        """确保 in/out/logs 子目录存在。"""
+        for sub in (self.in_dir(), self.out_dir(),
                     self.run_dir / config.LOGS_SUBDIR):
             sub.mkdir(parents=True, exist_ok=True)
 

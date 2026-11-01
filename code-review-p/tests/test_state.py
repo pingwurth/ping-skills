@@ -46,8 +46,9 @@ def test_create_run_dir_布局(crp_home, tmp_path):
     repo.mkdir()
     run_dir = create_run_dir(repo)
     assert run_dir.parent.parent == crp_home
-    for sub in ("in", "work", "out", "logs"):
+    for sub in ("in", "out", "logs"):
         assert (run_dir / sub).is_dir()
+    assert not (run_dir / "work").exists(), "work/ 只建不读已删(P5)"
 
 
 def test_save_load_往返与原子性(crp_home, tmp_path):

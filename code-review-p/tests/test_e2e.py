@@ -15,17 +15,11 @@ from pathlib import Path
 import pytest
 
 from crp import config
+from conftest import parse_block
 from gitrepo import RepoBuilder
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 ENTRY = SKILL_ROOT / "scripts" / "crp.py"
-
-
-def parse_block(stdout: str) -> dict:
-    assert stdout.count(config.NEXT_STEP_BEGIN_MARKER) == 1
-    begin = stdout.index(config.NEXT_STEP_BEGIN_MARKER) + len(config.NEXT_STEP_BEGIN_MARKER)
-    end = stdout.index(config.NEXT_STEP_END_MARKER)
-    return json.loads(stdout[begin:end])
 
 
 class Driver:
@@ -454,7 +448,7 @@ def test_c049_验证队列累加语义(tmp_path):
     from crp.models import State
     st = State(mode="standard", cursor={"round": 1, "round_kind": "sweep", "awaiting": "candidates",
                                         "pending_angles": [], "pending_verify": [],
-                                        "lens_requests": [], "dry_streak": 0})
+                                        "dry_streak": 0})
     st.candidates = [
         {"id": "c001", "file": "a.py", "line": 1, "summary": "first submission defect",
          "failure_scenario": "f", "confidence": 0.9, "severity": "P2",

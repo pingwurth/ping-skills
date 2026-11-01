@@ -26,12 +26,7 @@ def run_entry(args: list[str], env: dict | None = None) -> subprocess.CompletedP
     )
 
 
-def parse_block(stdout: str) -> dict:
-    assert stdout.count(config.NEXT_STEP_BEGIN_MARKER) == 1, "必须恰输出一个协议块"
-    assert stdout.count(config.NEXT_STEP_END_MARKER) == 1
-    begin = stdout.index(config.NEXT_STEP_BEGIN_MARKER) + len(config.NEXT_STEP_BEGIN_MARKER)
-    end = stdout.index(config.NEXT_STEP_END_MARKER)
-    return json.loads(stdout[begin:end])
+from conftest import parse_block
 
 
 def test_runs_空仓库输出空状态块(tmp_path):

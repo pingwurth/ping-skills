@@ -189,7 +189,6 @@ class IngestResult:
     fresh_ids: list[str] = field(default_factory=list)
     dup_count: int = 0
     dropped_over_cap: int = 0
-    errors: list[str] = field(default_factory=list)
 
 
 def next_id(state) -> str:
@@ -200,7 +199,7 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
     """把 candidates 提交并入台账(调用方已通过 validate_candidates_file)。
 
     每角度批次: 路径归一 → 超 8 条丢弃计数 → 逐条去重 → 分配 id 入账;
-    coverage/账目随之更新。已通过 candidate_by_id 幂等保护由 submit 处理器负责。
+    coverage/账目随之更新。幂等保护(同轮同字节重投吸收)由 submit 处理器负责。
     """
     result = IngestResult()
     root = (state.repo or {}).get("cwd", "")
@@ -248,7 +247,7 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
                 "status": "fresh", "dup_of": None,
                 "votes": [], "verdict": None, "evidence": "",
                 "severity_final": c.get("severity", "P3"),
-                "kept": False, "drop_reason": None, "stale": False, "rank": None,
+                "kept": False, "drop_reason": None, "stale": False,
             }
             state.candidates.append(entry)
             result.fresh_ids.append(cid)

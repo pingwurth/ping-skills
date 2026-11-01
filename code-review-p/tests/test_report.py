@@ -13,7 +13,7 @@ def _kept(cid, sev, cat, conf, file="a.py", line=1):
             "status": "verified", "dup_of": None, "votes": [],
             "verdict": "CONFIRMED", "evidence": "quoted line",
             "severity_final": sev, "kept": True, "drop_reason": None,
-            "stale": False, "rank": None}
+            "stale": False}
 
 
 def _state(mode="standard", candidates=None, **scope_extra) -> State:

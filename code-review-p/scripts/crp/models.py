@@ -37,20 +37,6 @@ class Route(str, Enum):
     ABORT = "abort"
 
 
-# next_step.type 由 Route 决定
-_ROUTE_TO_NEXT_TYPE = {
-    Route.RESUME: "run_script",
-    Route.DO_WORK: "do_work",
-    Route.FINISH: "finish",
-    Route.ASK_USER: "ask_user",
-    Route.ABORT: "abort",
-}
-
-
-def next_type_of(route: Route) -> str:
-    return _ROUTE_TO_NEXT_TYPE[route]
-
-
 # --------------------------------------------------------------------------- #
 # 决策产物
 # --------------------------------------------------------------------------- #
@@ -113,10 +99,6 @@ class Decision:
     # run_script 路由: 决策自带的完整命令参数(非空时优先于 transitions 默认组装)
     route_params: list[str] = field(default_factory=list)
 
-    @property
-    def next_type(self) -> str:
-        return next_type_of(self.route)
-
 
 # --------------------------------------------------------------------------- #
 # 持久化状态(state.json)
@@ -125,10 +107,9 @@ def _default_cursor() -> dict:
     return {
         "round": 0,               # 已执行扫描轮数(v1.4.1 #11: 只计已执行)
         "round_kind": "sweep",    # sweep | gap | fix_review
-        "awaiting": "",           # 当前期待的提交种类(AWAITING_KINDS 之一或空)
+        "awaiting": "",           # 当前期待的提交种类(overlay/brief/candidates/verdicts/details/carrier/fix-outcomes/answer 或空)
         "pending_angles": [],     # 本轮尚未回报的角度键
-        "pending_verify": [],     # 待验证 [{id, lenses:[...]}]
-        "lens_requests": [],      # 升级为 P0/P1 需补透镜的候选 id
+        "pending_verify": [],     # 待验证 [{id, lenses:[...]}](升级补透镜也存这里)
         "dry_streak": 0,          # 连续零新增轮数
     }
 
@@ -161,14 +142,14 @@ class State:
     fix_requested: bool = False
     target: Optional[str] = None               # 原始 --target(未解析)
     # 状态机
-    phase: str = "scope"                       # PHASES 之一
+    phase: str = "scope"                       # 引擎状态机相位(decide_next 路由)
     cursor: dict = field(default_factory=_default_cursor)
     # Phase 0 产物
     scope: dict = field(default_factory=dict)
     # overlay(project-config)
     overlay: dict = field(default_factory=dict)
     # Phase 1 产物
-    brief: dict = field(default_factory=dict)  # {file, sha256, line_count, sections_ok, warnings}
+    brief: dict = field(default_factory=dict)  # {file, line_count, warnings}
     # 扫描计划
     sweep_plan: dict = field(default_factory=dict)
     # 载体留痕(强制: 任何扫描工作开始前提交)
@@ -232,15 +213,6 @@ class State:
                 kwargs[key] = (list(value) if isinstance(value, list)
                                else dict(value) if isinstance(value, dict) else value)
         return cls(**kwargs)
-
-    # ------------------------------------------------------------------ #
-    # 便捷访问(只读视图; 决策层仍以冻结上下文为准)
-    # ------------------------------------------------------------------ #
-    def candidate_by_id(self, cid: str) -> Optional[dict]:
-        for c in self.candidates:
-            if c.get("id") == cid:
-                return c
-        return None
 
     @property
     def is_done(self) -> bool:

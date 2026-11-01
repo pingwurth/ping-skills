@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from crp import config, decisions, verify
+from crp import config, decisions, transitions, verify
 from crp.models import State
 
 CTX = decisions.RouteCtx(run_dir=Path("/tmp/fake-run"))
+
+
+def built_type(d) -> str:
+    """经生产分发链(transitions.build_next_step)断言 type —— 第二套
+    Route→type 映射(Decision.next_type)已删(P5): 测试断言必须走真实分发。"""
+    return transitions.build_next_step(d, transitions.RouteContext(run_dir=CTX.run_dir))["type"]
 
 
 def _state(mode="standard", phase="brief", **kw) -> State:
@@ -19,7 +25,7 @@ def _state(mode="standard", phase="brief", **kw) -> State:
                            "max_rounds": params["max_rounds"],
                            "max_agents": 60, "max_concurrent": 4},
                cursor={"round": 0, "round_kind": "sweep", "awaiting": "brief",
-                       "pending_angles": [], "pending_verify": [], "lens_requests": [],
+                       "pending_angles": [], "pending_verify": [],
                        "dry_streak": 0},
                **kw)
     return st
@@ -56,17 +62,17 @@ def test_路由矩阵_各phase():
         if phase == "sweep":
             st.cursor["pending_angles"] = ["A"]
         d = decisions.decide_next(st, CTX)
-        assert d.next_type == expected, f"phase={phase} -> {d.next_type}, 期望 {expected}"
+        assert built_type(d) == expected, f"phase={phase} -> {built_type(d)}, 期望 {expected}"
 
 
 def test_verify空批次自愈回路由器():
     d = decisions.decide_next(_state(phase="verify"), CTX)
-    assert d.next_type == "run_script" and d.exit_code == config.EXIT_STATE
+    assert built_type(d) == "run_script" and d.exit_code == config.EXIT_STATE
 
 
 def test_do_work_装配_output与submit():
     d = decisions.decide_next(_state(phase="brief"), CTX)
-    ns = {"type": d.next_type}
+    ns = {"type": built_type(d)}
     assert d.output and "02-brief.md" in d.output
     assert d.submit is not None and d.submit.script == config.ENTRY_FILENAME
     assert d.submit.params[:2] == ["submit", "--kind"]
@@ -79,7 +85,7 @@ def test_gates_无待确认直接过carrier():
     st.overlay = {"gates": [{"command": "make check", "source": "overlay",
                              "semantics": "read_only", "approval": "auto"}]}
     d = decisions.decide_next(st, CTX)
-    assert d.next_type == "do_work"  # 无 unset 门禁 → carrier do_work
+    assert built_type(d) == "do_work"  # 无 unset 门禁 → carrier do_work
 
 
 def test_gates_有待确认发出ask_user():
@@ -89,7 +95,7 @@ def test_gates_有待确认发出ask_user():
         {"command": "make gen", "source": "overlay", "semantics": "write", "approval": "denied"},
     ]}
     d = decisions.decide_next(st, CTX)
-    assert d.next_type == "ask_user"
+    assert built_type(d) == "ask_user"
     assert d.question and "make check" in d.question and "make gen" not in d.question
     options = {o.option for o in d.resume}
     assert options == {"approve_all", "skip_all", "choice"}
@@ -104,7 +110,7 @@ def test_gap_digest取自台账而非记忆():
         {"id": "c003", "file": "c.py", "line": 3, "summary": "s3", "kept": True},
     ]
     d = decisions.decide_next(st, CTX)
-    assert d.next_type == "do_work"
+    assert built_type(d) == "do_work"
     assert "a.py:1 s1" in d.context["digest"]
     assert "b.py:2" not in d.context["digest"]  # 非 kept 不进 digest
     assert "c.py:3 s3" in d.context["digest"]

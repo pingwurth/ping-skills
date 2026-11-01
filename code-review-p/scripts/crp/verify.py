@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from . import config
+from .logutil import module_logger
 from .models import State
 
 
@@ -93,7 +94,6 @@ def validate_votes_file(data: object, state: State) -> list[str]:
 class VoteOutcome:
     finalized: list[str] = field(default_factory=list)   # 本批完成终裁的 id
     upgraded: list[str] = field(default_factory=list)    # 升级补透镜的 id
-    errors: list[str] = field(default_factory=list)
 
 
 def _best_vote(votes: list[dict], verdict: str) -> Optional[dict]:
@@ -155,7 +155,8 @@ def apply_votes(state: State, votes: list[dict]) -> VoteOutcome:
     for v in votes:
         cand = cand_by_id.get(v["id"])
         if cand is None:
-            outcome.errors.append(f"候选 {v['id']} 不在台账")
+            # 校验器保证 pending id 必在台账; 此分支仅为防御 —— 记日志不静默
+            module_logger().warning(f"票候选 {v['id']} 不在台账, 丢弃该票")
             continue
         cand.setdefault("votes", []).append({
             "lens": v.get("lens"), "verdict": v.get("verdict"),

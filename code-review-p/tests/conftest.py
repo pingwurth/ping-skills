@@ -13,3 +13,16 @@ SCRIPTS_DIR = SKILL_ROOT / "scripts"
 for _p in (SCRIPTS_DIR, SKILL_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
+
+
+def parse_block(stdout: str) -> dict:
+    """解析 NEXT_STEP 协议块; 共享实现(P5 回修: test_e2e/test_cli 双份手抄,
+    e2e 副本丢了 '恰一个 END 标记' 断言)。"""
+    import json
+
+    from crp import config
+    assert stdout.count(config.NEXT_STEP_BEGIN_MARKER) == 1, "必须恰输出一个协议块"
+    assert stdout.count(config.NEXT_STEP_END_MARKER) == 1
+    begin = stdout.index(config.NEXT_STEP_BEGIN_MARKER) + len(config.NEXT_STEP_BEGIN_MARKER)
+    end = stdout.index(config.NEXT_STEP_END_MARKER)
+    return json.loads(stdout[begin:end])

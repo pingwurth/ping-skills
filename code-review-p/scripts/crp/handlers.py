@@ -303,17 +303,6 @@ cmd_next = cmd_resume
 # --------------------------------------------------------------------------- #
 # submit
 # --------------------------------------------------------------------------- #
-_KIND_FILE_HINT = {
-    "overlay": "overlay 提取(overlay.json)",
-    "brief": "审查 brief(brief.md)",
-    "candidates": "候选(candidates.json)",
-    "verdicts": "裁决票(verdicts.json)",
-    "details": "报告细节(details.json)",
-    "carrier": "载体选择(carrier.json)",
-    "fix-outcomes": "修复结果(fix-outcomes.json)",
-}
-
-
 def cmd_submit(args) -> tuple[Decision, EmitContext]:
     run_dir, store = _resolve_entry_point(args)
     kind = args.kind
@@ -508,8 +497,10 @@ def _apply_brief(state: State, data: str) -> str:
     warnings = []
     if lines > config.BRIEF_SOFT_LINE_LIMIT:
         warnings.append(f"line_count {lines} > {config.BRIEF_SOFT_LINE_LIMIT} (advisory)")
-    state.brief = {"file": f"{config.IN_SUBDIR}/02-brief.md", "sha256": "",
-                   "line_count": lines, "sections_ok": True, "warnings": warnings}
+    # P5 回修: 删恒空/恒真占位键(sha256 真值在 submissions 幂等账本;
+    # 节校验在 _validate_brief, 应用时必过 —— sections_ok 恒 True 无信息量)
+    state.brief = {"file": f"{config.IN_SUBDIR}/02-brief.md",
+                   "line_count": lines, "warnings": warnings}
     state.sweep_plan = decisions.build_sweep_plan(state.mode, state.overlay, state.scope)
     pending = overlay.pending_gate_question_count(state)
     if pending:

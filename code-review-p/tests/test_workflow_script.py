@@ -248,25 +248,18 @@ def test_dedup_composes_with_normfile():
 
 # ── 裁决聚合：法定票数与平局（B5/B6 回归） ──────────────────────────
 
-V = lambda v: {"verdict": v}  # noqa: E731 — 测试用的最小票对象
+AGG_CASES = json.loads((SKILL_DIR / "tests" / "fixtures" / "aggregate_cases.json")
+                       .read_text(encoding="utf-8"))["cases"]
+
 
 @requires_node
 def test_aggregate_quorum_and_ties():
-    cases = [
-        # (votes, high, expected)
-        ([], True, "PLAUSIBLE"),            # 全部失败——既非赞成也非反对
-        ([V("REFUTED")], True, "PLAUSIBLE"),   # 法定票数不足：单票不能杀 P0/P1
-        ([V("CONFIRMED")], True, "PLAUSIBLE"),  # 单票也不能确认 P0/P1
-        ([V("CONFIRMED"), V("REFUTED"), V("PLAUSIBLE")], True, "PLAUSIBLE"),  # 平局=不确定
-        ([V("REFUTED"), V("REFUTED"), V("CONFIRMED")], True, "REFUTED"),      # 严格多数反驳
-        ([V("CONFIRMED"), V("CONFIRMED"), V("PLAUSIBLE")], True, "CONFIRMED"),  # 多数确认
-        ([V("CONFIRMED"), V("PLAUSIBLE"), V("PLAUSIBLE")], True, "PLAUSIBLE"),  # 少数确认
-        ([V("REFUTED")], False, "REFUTED"),    # 非高危：单 correctness 透镜裁决
-        ([V("CONFIRMED")], False, "CONFIRMED"),
-    ]
-    for votes, high, expected in cases:
-        r = run_case([], {"file": "x", "line": 1, "summary": "s"}, votes, high)
-        assert r["verdict"] == expected, f"{[v['verdict'] for v in votes]} high={high} -> {r['verdict']}，期望 {expected}"
+    """矩阵与 Python 侧(test_aggregate.py)共享 fixtures/aggregate_cases.json
+    (P5 回修: 原双份手抄, 两引擎可带绿色测试漂移)。"""
+    for case in AGG_CASES:
+        votes = [{"verdict": v} for v in case["votes"]]
+        r = run_case([], {"file": "x", "line": 1, "summary": "s"}, votes, case["high"])
+        assert r["verdict"] == case["expected"], f"{case['name']}: -> {r['verdict']}，期望 {case['expected']}"
 
 
 # ── 限流治理：并发信号量 + finder 一次性重试（v2.1） ─────────────────

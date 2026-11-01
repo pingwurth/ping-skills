@@ -28,10 +28,6 @@ class RouteCtx:
     def in_dir(self) -> Path:
         return self.run_dir / config.IN_SUBDIR
 
-    @property
-    def work_dir(self) -> Path:
-        return self.run_dir / config.WORK_SUBDIR
-
     def refs(self, name: str) -> str:
         return str(self.skill_root / "references" / name)
 

@@ -1,28 +1,24 @@
-"""裁决聚合: quorum/严格多数/平局(移植 JS 矩阵)+ 升级补透镜 + keep 阈值/下限。"""
+"""裁决聚合: quorum/严格多数/平局(共享 JS 矩阵)+ 升级补透镜 + keep 阈值/下限。"""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from crp import config, verify
 from crp.models import State
 
-V = lambda verdict, severity="P2": {"verdict": verdict, "severity": severity}  # noqa: E731
+AGG_CASES = json.loads((Path(__file__).parent / "fixtures" / "aggregate_cases.json")
+                       .read_text(encoding="utf-8"))["cases"]
 
 
 def test_票数法矩阵_与js对齐():
-    cases = [
-        ([], True, "PLAUSIBLE"),            # 全部失败 —— 既非赞成也非反对
-        ([V("REFUTED")], True, "PLAUSIBLE"),   # 法定票数不足: 单票不能杀 P0/P1
-        ([V("CONFIRMED")], True, "PLAUSIBLE"),  # 单票也不能确认 P0/P1
-        ([V("CONFIRMED"), V("REFUTED"), V("PLAUSIBLE")], True, "PLAUSIBLE"),  # 平局=不确定
-        ([V("REFUTED"), V("REFUTED"), V("CONFIRMED")], True, "REFUTED"),      # 严格多数反驳
-        ([V("CONFIRMED"), V("CONFIRMED"), V("PLAUSIBLE")], True, "CONFIRMED"),  # 多数确认
-        ([V("CONFIRMED"), V("PLAUSIBLE"), V("PLAUSIBLE")], True, "PLAUSIBLE"),  # 少数确认
-        ([V("REFUTED")], False, "REFUTED"),    # 非高危: 单 correctness 透镜裁决
-        ([V("CONFIRMED")], False, "CONFIRMED"),
-    ]
-    for votes, high, expected in cases:
-        got = verify.aggregate_verdict(votes, high)
-        assert got == expected, f"{[v['verdict'] for v in votes]} high={high} -> {got}, 期望 {expected}"
+    """矩阵来自 fixtures/aggregate_cases.json —— 与 test_workflow_script 的 JS
+    断言共享同一份(P5 回修: 原双份手抄, 一侧加用例另一侧零测试)。"""
+    for case in AGG_CASES:
+        votes = [{"verdict": v} for v in case["votes"]]
+        got = verify.aggregate_verdict(votes, case["high"])
+        assert got == case["expected"], f"{case['name']}: -> {got}, 期望 {case['expected']}"
 
 
 def _state(mode="standard", keep=None) -> State:
@@ -37,7 +33,7 @@ def _cand(cid, severity="P2", confidence=0.9):
             "confidence": confidence, "severity": severity, "category": "correctness",
             "angle": "A", "round": 1, "origin": "sweep", "status": "fresh", "dup_of": None,
             "votes": [], "verdict": None, "evidence": "", "severity_final": severity,
-            "kept": False, "drop_reason": None, "stale": False, "rank": None}
+            "kept": False, "drop_reason": None, "stale": False}
 
 
 def test_标准模式keep阈值_confirmed加高危plausible():
