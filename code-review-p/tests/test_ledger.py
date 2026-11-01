@@ -100,3 +100,15 @@ def test_轮内多提交累计round_history():
     ledger.ingest_candidates(state, batch(2), origin="sweep", round_no=1)
     hist = state.accounting["round_history"]
     assert len(hist) == 1 and hist[0]["fresh"] == 2
+
+
+# ── P4 回修回归: 校验形状(2026-11-02 全面审查) ───────────────────────
+def test_p4_coverage空值整份拒收():
+    """P4 回归: 'coverage': null 过校验后在锁内 AttributeError(NoneType.get)
+    —— exit-2 内部错误, 违反 '任何字段不合法, 整份拒收(exit 3)' 契约。"""
+    data = {"items": [{"angle": "A", "coverage": None, "candidates": [
+        {"file": "a.py", "line": 1, "summary": "coverage null defect shape",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}]}
+    errs = ledger.validate_candidates_file(data)
+    assert any("coverage" in e for e in errs), "coverage 非对象必须在校验层拒收"

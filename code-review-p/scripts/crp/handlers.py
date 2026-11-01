@@ -351,20 +351,22 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
             js_counters: Optional[dict] = None
             if args.transcript_dir:
                 transcript_dir = Path(args.transcript_dir)
-            else:
-                sniff = Path(args.file).read_text(encoding="utf-8").strip()
-                lines = [l for l in sniff.splitlines() if l.strip()]
-                if lines and lines[0].startswith("{"):
-                    compact_file = Path(args.file)  # 压缩 journal 模式
-                else:
-                    transcript_dir = Path(lines[0].strip())
-                    # 可选第二行: workflow 返回值计数 JSON —— parity 对照(分歧上报告)
-                    if len(lines) > 1 and lines[1].strip().startswith("{"):
-                        try:
-                            js_counters = json.loads(lines[1])
-                        except ValueError:
-                            js_counters = None
             try:
+                if transcript_dir is None:
+                    # 内容嗅探(P4 回修: 移入 try —— 空文件 IndexError/不可读/
+                    # 非 UTF-8 原版逃到 cli 兜底 exit-2 内部错误, 丢失重试引导)
+                    sniff = Path(args.file).read_text(encoding="utf-8").strip()
+                    lines = [l for l in sniff.splitlines() if l.strip()]
+                    if lines and lines[0].startswith("{"):
+                        compact_file = Path(args.file)  # 压缩 journal 模式
+                    else:
+                        transcript_dir = Path(lines[0].strip())
+                        # 可选第二行: workflow 返回值计数 JSON —— parity 对照(分歧上报告)
+                        if len(lines) > 1 and lines[1].strip().startswith("{"):
+                            try:
+                                js_counters = json.loads(lines[1])
+                            except ValueError:
+                                js_counters = None
                 # ── 幂等键(P1 回修): 载体 1 同入共享幂等管线 —— 同轮同 journal
                 # 字节重投 = 孤儿结果吸收, 不得双重入账(原版 sha256 恒空绕开) ──
                 if transcript_dir is not None and (transcript_dir / "journal.jsonl").is_file():
@@ -387,7 +389,7 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                 else:
                     compact_file = compact_file or Path(args.file)
                     note = journal.apply_compact(state, journal.load_compact(compact_file))
-            except (ValueError, OSError, KeyError) as exc:
+            except (ValueError, OSError, KeyError, IndexError) as exc:
                 raise StepError.exec_error(
                     f"载体 1 journal 摄取失败: {exc}",
                     question=f"检查 transcript 目录/journal 文件后重试: {exc}")
@@ -421,9 +423,13 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
             store.save(state)
             return decision, EmitContext(run_dir=run_dir, state=state)
 
-        text = raw.decode("utf-8", errors="strict") if kind == "brief" else None
         if kind == "brief":
-            data: object = text
+            # P4 回修: strict 解码原版在 try 之外 —— 非 UTF-8 brief 得 exit-2
+            # 内部错误, 与 JSON 路径同类错误的 exit-3 处理不一致
+            try:
+                data: object = raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise StepError.state_error(f"brief 提交不是合法 UTF-8 文本: {exc}")
         else:
             try:
                 data = json.loads(raw.decode("utf-8"))

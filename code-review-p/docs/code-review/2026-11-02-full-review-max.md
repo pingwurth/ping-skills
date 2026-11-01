@@ -21,6 +21,8 @@
 
 > **第三批(P3 范围/门禁 7 条)同日回修**:①resolve_scope 目标分类在原始调用目录与顶层各试一次,path 目标归一为顶层相对(子目录相对路径不再误判 branch 落逃逸口)②untracked_in_scope 归一 './' 前缀与尾斜杠 ③apply_exclusions 同步过滤 untracked/raw_files(trusted 排除项对未跟踪文件同样 out of scope)④_file_insertions 二进制(NUL 探测)/超 1MB 按 0 计(config.UNTRACKED_INSERTIONS_MAX_BYTES)⑤range 目标三点 '…' 优先拆分(head 不再记成 '.feature')⑥Makefile 门禁正则排除 ':=' 变量赋值 ⑦justfile 配方生成 `just <name>` 而非 `make <name>`。
 
+> **第四批(P4 校验/渲染 6 条)同日回修**:①carrier1 内容嗅探移入 try(空文件 IndexError/非 UTF-8 归入「载体 1 journal 摄取失败」执行错误并保留重试引导,不再落 cli 兜底内部错误)②brief 的 strict UTF-8 解码失败改 exit-3 整份拒收(与 JSON 路径一致)③validate_candidates_file 校验 coverage 形状('coverage': null 不再在锁内 AttributeError → exit-2)④findings 表格单元格转义 '|' 与换行(_cell)⑤parity_notes 渲染进报告账目行旁(「分歧记入报告 parity 注记」承诺落地)⑥零发现分支补输出 Open questions / assumptions 节(calibration.md clean-verdict 模板同步加 Open questions 行)。
+
 | # | 位置 | 缺陷 |
 |---|---|---|
 | 1 | `scripts/crp/handlers.py:637` | 门禁确认在 brief 之前触发,answer --key gates 无条件把 phase 置 carrier → brief 阶段被整体跳过(keep 阈值回退 KEEP_NONE、angles 空、02-brief.md 永不生成) |

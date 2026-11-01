@@ -112,3 +112,39 @@ def test_stale标记可见():
     cands[0]["stale"] = True
     text = report.render(_state(candidates=cands), DETAILS)
     assert "⚠ stale" in text
+
+
+# ── P4 回修回归: 渲染(2026-11-02 全面审查) ───────────────────────────
+def test_p4_表格转义竖线与换行():
+    """P4 回归: summary 原样插进 markdown 表行 —— 'if (a || b) inverted' 使
+    4 列表出现 5 列, 换行直接拆行; 该表是协议要求逐字转述的引擎产物。"""
+    cand = _kept("c1", "P1", "correctness", 0.9)
+    cand["summary"] = "if (a || b) inverted\nguard split across lines"
+    st = _state(candidates=[cand])
+    text = report.render(st, dict(DETAILS, details=[{"id": "c1", "title": "t",
+                                                     "problem": "p", "failure_scenario": "f",
+                                                     "fix": "x"}]))
+    row = next(l for l in text.splitlines() if l.startswith("| 1 |"))
+    # 未转义的竖线恰 5 个(4 列); summary 内的 | 已转义为 \| 不破坏列数
+    assert row.replace("\\|", "").count("|") == 5, "4 列表恰 5 个未转义分隔竖线"
+    assert "inverted" in row and "guard split across lines" in row  # 换行归一为空格
+    assert "\\|" in row, "summary 内的 | 必须转义"
+
+
+def test_p4_parity注记上报告():
+    """P4 回归: parity_notes 只写 state.accounting、渲染从不读 —— '分歧记入
+    报告 parity 注记(可见, 不静默)' 的承诺落空, 只能翻 ledger.json 才看得见。"""
+    st = _state(candidates=[_kept("c1", "P1", "correctness", 0.9)])
+    st.accounting["parity_notes"] = ["原始候选总数不一致: js=8 py=10(人工查 workflow)"]
+    text = report.render(st, dict(DETAILS))
+    assert "parity: 原始候选总数不一致" in text
+    assert text.index("parity:") < text.index("Run:") + 200, "注记应在账目行附近可见"
+
+
+def test_p4_零发现报告含open_questions():
+    """P4 回归: 零发现分支提前返回不输出 Open questions 节 —— 未决疑点恰好在
+    最需要 Caveat 的场景全部丢失(与有发现路径不对称)。"""
+    st = _state(candidates=[])
+    text = report.render(st, dict(DETAILS, open_questions="门禁 make check 被拒, 无法验证 X"))
+    assert "### Open questions / assumptions" in text
+    assert "无法验证 X" in text

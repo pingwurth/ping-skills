@@ -896,3 +896,56 @@ def test_p2_status的kept实时口径(tmp_path, quick_repo):
     assert kept > 0, "前置: 终裁后应有 kept 候选"
     p, _ = d.run_argv(["status", "--run-dir", str(d.run_dir)])
     assert f"kept={kept}" in p["summary"], "status 必须报实时 kept 口径"
+
+
+# ── P4 回修回归: 校验分类(2026-11-02 全面审查) ───────────────────────
+def _drive_to_carrier1(d, payload):
+    """推进到载体 1 的 sweep do_work(在 carrier do_work 提交 carrier=1)。
+
+    kind 判定用 --kind 精确取值 —— 子串匹配会撞上路径里的字样
+    (测试名含 'carrier1' 时 run_dir 路径就带着它)。
+    """
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        params = (ns.get("submit") or {}).get("params", [])
+        kind = params[params.index("--kind") + 1] if "--kind" in params else ""
+        if kind == "carrier":
+            (d.run_dir / "in").mkdir(parents=True, exist_ok=True)
+            (d.run_dir / "in" / "03-carrier.json").write_text(
+                json.dumps({"carrier": 1, "reason": "e2e: workflow"}), encoding="utf-8")
+            payload, _ = d.run_argv(ns["submit"]["params"])
+            return payload
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    raise AssertionError("未到达 carrier do_work")
+
+
+def test_p4_carrier1空文件是执行错误而非内部错误(tmp_path, quick_repo):
+    """P4 回归: 内容嗅探在 try 之外 —— 空文件 IndexError 落 cli 兜底
+    '脚本内部错误', 丢失 '检查 transcript 目录后重试' 的设计引导。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    payload = _drive_to_carrier1(d, payload)
+    assert payload["next_step"]["type"] == "do_work"
+    empty = d.run_dir / "in" / "empty.txt"
+    empty.write_text("", encoding="utf-8")  # 0 字节 → 嗅探 IndexError
+    p, rc = d.run_argv(["submit", "--kind", "carrier1", "--file", str(empty),
+                        "--run-dir", str(d.run_dir)])
+    assert rc == config.EXIT_ERROR
+    assert "载体 1 journal 摄取失败" in p["summary"], "应为可重试执行错误(原版: 脚本内部错误)"
+    assert "重试" in p["next_step"]["question"]
+
+
+def test_p4_非UTF8的brief整份拒收exit3(tmp_path, quick_repo):
+    """P4 回归: brief 的 strict 解码在 try 之外 —— 非 UTF-8 brief 得 exit-2
+    内部错误, 与 JSON 路径同类错误的 exit-3 处理不一致。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    ns = payload["next_step"]  # 首个 do_work 是 brief
+    d._note_run_dir(ns)
+    Path(ns["output"]).write_bytes(b"\xff\xfe# \x00bad brief\n")
+    p, rc = d.run_argv(ns["submit"]["params"])
+    assert rc == config.EXIT_STATE
+    assert "UTF-8" in p["summary"]
+    # 路由不变: resume 仍等待 brief
+    p2, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert p2["next_step"]["type"] == "do_work"

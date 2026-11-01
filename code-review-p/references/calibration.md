@@ -111,6 +111,7 @@ When nothing survives, say so explicitly — vagueness is not humility:
 No significant issues found in <scope>.
 Residual risks: <what could not be checked — runtime behavior, untested paths>.
 Testing gaps: <changed behavior without coverage>.
+Open questions: <assumptions that could not be verified>.
 ```
 
 Never soften a real finding to fill space, and never invent findings to fill

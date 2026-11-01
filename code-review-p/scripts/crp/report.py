@@ -54,6 +54,13 @@ def run_ledger_line(state: State) -> str:
             f"refuted={acc.get('refuted', 0)} · capped-out={acc.get('capped_out', 0)}")
 
 
+def _cell(text: object) -> str:
+    """markdown 表格单元格转义: '|' 破坏列数, 换行拆行(P4 回修 —— 原版把
+    ≤500 字任意内容的 summary 原样插入, 'if (a || b) inverted' 使 4 列表
+    出 5 列, 且该表是协议要求逐字透述的引擎产物)。"""
+    return str(text if text is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
 def _finding_details(c: dict, detail: Optional[dict]) -> list[str]:
     d = detail or {}
     verdict = c.get("verdict") or "UNVERIFIED (quick — no verify pass)"
@@ -85,6 +92,10 @@ def render(state: State, details: dict) -> str:
     out.append(f"Brief: {details.get('brief_summary') or '(见运行目录 in/02-brief.md)'}")
     out.append("")
     out.append(run_ledger_line(state))
+    # P4 回修: 载体内部分歧注记上报告(可见, 不静默)—— 原版只写
+    # state.accounting['parity_notes'], 渲染从不读该键, 承诺落空
+    for note in state.accounting.get("parity_notes") or []:
+        out.append(f"- parity: {note}")
     if state.scope.get("repo_mode") or state.scope.get("whole_file_mode"):
         out.append(f"Coverage: {details.get('coverage') or '(缺失 —— LLM 未声明, 违反契约)'}")
     out.append("")
@@ -94,6 +105,9 @@ def render(state: State, details: dict) -> str:
         out.append(f"Residual risks: {details.get('residual_risks') or '(未声明)'}")
         out.append(f"Testing gaps: {details.get('testing_gaps') or '(未声明)'}")
         out.append("")
+        out.append("### Open questions / assumptions")
+        out.append(details.get("open_questions") or "(无)")
+        out.append("")
         out.append("### Summary")
         out.extend(f"- {b}" for b in details.get("summary_bullets") or [])
         return "\n".join(out)
@@ -101,7 +115,8 @@ def render(state: State, details: dict) -> str:
     out.append("| # | Location | Sev | Finding |")
     out.append("|---|----------|-----|---------|")
     for i, c in enumerate(reportable):
-        out.append(f"| {i + 1} | {c.get('file')}:{c.get('line')} | {c.get('severity_final')} | {c.get('summary')} |")
+        loc = f"{c.get('file')}:{c.get('line')}"
+        out.append(f"| {i + 1} | {_cell(loc)} | {_cell(c.get('severity_final'))} | {_cell(c.get('summary'))} |")
     out.append("")
     out.append("### Details")
     out.append("")

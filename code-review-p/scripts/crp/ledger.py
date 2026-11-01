@@ -163,6 +163,12 @@ def validate_candidates_file(data: object) -> list[str]:
         angle = item.get("angle")
         if not isinstance(angle, str) or not angle.strip():
             errs.append(f"{w}: angle 必须是非空字符串")
+        # P4 回修: coverage 形状校验 —— 'coverage': null 原版过校验后在锁内
+        # AttributeError, exit-2 内部错误而非全有或全无的 exit-3 拒收
+        # (get 分不清缺省与 null, 用 in 判定键存在)
+        if "coverage" in item and not isinstance(item.get("coverage"), dict):
+            errs.append(f"{w}: coverage 必须是对象(如 {{\"ran\": true}}), "
+                        f"得到 {type(item.get('coverage')).__name__}")
         cands = item.get("candidates")
         if not isinstance(cands, list):
             errs.append(f"{w}: candidates 必须是数组")
@@ -206,7 +212,7 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
         angle = item.get("angle", "?")
         cov = state.coverage.setdefault("angles", {}).setdefault(
             angle, {"ran": False, "raw": 0, "fresh": 0, "dropped": 0})
-        cov["ran"] = cov.get("ran") or bool(item.get("coverage", {}).get("ran", True))
+        cov["ran"] = cov.get("ran") or bool((item.get("coverage") or {}).get("ran", True))
         cands = item.get("candidates") or []
         if len(cands) > config.MAX_CANDIDATES_PER_ANGLE:
             result.dropped_over_cap += len(cands) - config.MAX_CANDIDATES_PER_ANGLE
