@@ -15,6 +15,7 @@ ENTRY_FILENAME = "crp.py"
 # 运行目录(被审仓库之外 —— 只读纪律 + 不污染 Phase 0 自身依赖的 ?? 检测)
 # --------------------------------------------------------------------------- #
 STATE_FILENAME = "state.json"
+META_FILENAME = "meta.json"  # 运行列举轻量边车(list_runs 不再全量解析 state.json)
 LOGS_SUBDIR = "logs"    # 每子命令日志(协议块缺失时读尾部 50 行)
 IN_SUBDIR = "in"        # LLM 提交物(overlay.json / brief.md / candidates-*.json …)
 OUT_SUBDIR = "out"      # 报告与台账导出

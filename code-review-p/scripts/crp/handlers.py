@@ -62,9 +62,13 @@ def _touch(state: State) -> None:
     state.updated_at = _now()
 
 
-def _run_ask(run_dir: Path) -> Decision:
-    """存在未完成运行时, start 前的唯一询问(防 429 后重跑覆盖)。"""
-    runs = [r for r in list_runs(Path.cwd()) if not r.get("done") and not r.get("corrupt")]
+def _run_ask(run_dir: Path, unfinished: Optional[list[dict]] = None) -> Decision:
+    """存在未完成运行时, start 前的唯一询问(防 429 后重跑覆盖)。
+
+    unfinished: 调用方已算好的未完成列表(P6 回修: cmd_start 算完一行后
+    原版立刻重算同一 list_runs —— 全量重解析每个 state.json 双倍功)。"""
+    runs = unfinished if unfinished is not None else [
+        r for r in list_runs(Path.cwd()) if not r.get("done") and not r.get("corrupt")]
     listing = "\n".join(f"  - {r['run_id']} [{r.get('mode','?')}/{r.get('phase','?')}]" for r in runs[:5])
     return Decision(
         status="needs_input", exit_code=config.EXIT_CONTINUE,
@@ -217,10 +221,13 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
         unfinished = [r for r in list_runs(cwd) if not r.get("done") and not r.get("corrupt")]
         if unfinished:
             newest = Path(unfinished[0]["run_dir"])
-            return _run_ask(newest), EmitContext(run_dir=newest)
+            return _run_ask(newest, unfinished), EmitContext(run_dir=newest)
 
-    sc = scope_mod.resolve_scope(cwd, target)
-    state = _new_state(cwd, mode, fix_requested, target, sc)
+    # P6 回修: 一份 porcelain 快照贯穿(原版 start 全程跑 2-3 次
+    # git status --porcelain -z -uall: 阶梯入口 / 重导 / 签名)
+    porcelain = gitops.porcelain_z(cwd)
+    sc = scope_mod.resolve_scope(cwd, target, porcelain=porcelain)
+    state = _new_state(cwd, mode, fix_requested, target, sc, porcelain=porcelain)
     if sc.get("escape_hatch"):
         # P2 回修: 逃逸口 ask 落 pending_question(resume 侧据此重问, 见 cmd_resume)
         state.pending_question = {"key": "scope", "at": _now()}
@@ -235,8 +242,9 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
     return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
 
 
-def _new_state(cwd: Path, mode: str, fix_requested: bool, target: Optional[str], sc: dict) -> State:
-    sig = scope_mod.current_signature(cwd)
+def _new_state(cwd: Path, mode: str, fix_requested: bool, target: Optional[str], sc: dict,
+               porcelain: Optional[list[dict]] = None) -> State:
+    sig = scope_mod.current_signature(cwd, porcelain=porcelain)
     return State(
         run_id="",  # 由 _place_state 落定
         created_at=_now(), updated_at=_now(),

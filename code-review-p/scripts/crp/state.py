@@ -123,9 +123,13 @@ def create_run_dir(cwd: str | Path, run_id: Optional[str] = None) -> Path:
 
 
 def list_runs(cwd: str | Path) -> list[dict]:
-    """列出 cwd 所在仓库的全部运行(新->旧), 无独立索引文件, 直接扫 state.json。
+    """列出 cwd 所在仓库的全部运行(新->旧), 优先读轻量 meta 边车。
 
-    损坏的 state.json 以 {run_id(目录名), corrupt: true} 出现, 不中断列举。
+    P6 回修: 原版对每个运行完整 json.load 其多 MB 的 state.json 只为取 5
+    个标量 —— 被 runs 命令 / start 未完成检查 / 每次裸 submit 的
+    resolve_run_dir 反复调用(10 个 deep 运行后一条 `crp.py runs` 要解析
+    30-50MB JSON)。save() 现同步落 meta.json; 旧运行无 meta 回退 state.json。
+    损坏以 {run_id(目录名), corrupt: true} 出现, 不中断列举。
     """
     home = repo_home(cwd)
     runs: list[dict] = []
@@ -134,18 +138,25 @@ def list_runs(cwd: str | Path) -> list[dict]:
     for run_dir in sorted(home.iterdir(), reverse=True):
         if not run_dir.is_dir():
             continue
+        meta_file = run_dir / config.META_FILENAME
         state_file = run_dir / config.STATE_FILENAME
-        if not state_file.is_file():
+        if not meta_file.is_file() and not state_file.is_file():
             continue
         entry: dict = {"run_id": run_dir.name, "run_dir": str(run_dir)}
+        src = meta_file if meta_file.is_file() else state_file
         try:
-            with open(state_file, encoding="utf-8") as fp:
+            with open(src, encoding="utf-8") as fp:
                 data = json.load(fp)
+            if not isinstance(data, dict):
+                raise ValueError("非对象")
+            done = data.get("done")
+            if not isinstance(done, bool):
+                done = data.get("phase") in ("done", "aborted")
             entry.update({
                 "mode": data.get("mode", "?"),
                 "phase": data.get("phase", "?"),
                 "target": data.get("target"),
-                "done": data.get("phase") in ("done", "aborted"),
+                "done": done,
                 "updated_at": data.get("updated_at", ""),
             })
         except (OSError, ValueError):
@@ -299,3 +310,14 @@ class StateStore:
             fp.flush()
             os.fsync(fp.fileno())
         os.replace(tmp, path)
+        # 轻量 meta 边车(P6): list_runs 只读这份小文件, 不再解析多 MB state.json
+        meta = {"run_id": state.run_id, "mode": state.mode, "phase": state.phase,
+                "target": state.target, "done": state.is_done,
+                "updated_at": state.updated_at}
+        meta_tmp = path.with_name(config.META_FILENAME + ".tmp")
+        try:
+            with open(meta_tmp, "w", encoding="utf-8") as fp:
+                json.dump(meta, fp, ensure_ascii=False)
+            os.replace(meta_tmp, path.with_name(config.META_FILENAME))
+        except OSError:
+            pass  # 边车失败不影响状态写入(list_runs 回退 state.json)

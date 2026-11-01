@@ -114,3 +114,29 @@ def test_跨进程锁互斥(crp_home, tmp_path):
     store = StateStore(run_dir)
     with store.locked():
         pass
+
+
+# ── P6 回修回归: meta 边车(2026-11-02 全面审查) ─────────────────────
+def test_p6_list_runs优先读meta边车(crp_home, tmp_path):
+    """P6 回修: list_runs 原版对每个运行完整 json.load 多 MB state.json 只为
+    取 5 个标量 —— save() 现落轻量 meta.json, state.json 损坏也能照常列举。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_dir = create_run_dir(repo)
+    store = StateStore(run_dir)
+    store.save(State(run_id=run_dir.name, mode="deep", phase="verify",
+                     updated_at="2026-11-02T00:00:00"))
+    assert (run_dir / config.META_FILENAME).is_file(), "save 应同步落 meta 边车"
+    # state.json 损坏(模拟多 MB 解析失败的场景)→ meta 仍可服务列举
+    (run_dir / config.STATE_FILENAME).write_text("{broken", encoding="utf-8")
+    runs = list_runs(repo)
+    assert len(runs) == 1
+    assert runs[0]["mode"] == "deep" and runs[0]["phase"] == "verify"
+    assert runs[0]["done"] is False and not runs[0].get("corrupt")
+    # 旧式运行(无 meta)回退 state.json
+    run2 = create_run_dir(repo)
+    StateStore(run2).save(State(run_id=run2.name, mode="quick", phase="done"))
+    (run2 / config.META_FILENAME).unlink()
+    runs2 = list_runs(repo)
+    by_id = {r["run_id"]: r for r in runs2}
+    assert by_id[run2.name]["mode"] == "quick" and by_id[run2.name]["done"] is True

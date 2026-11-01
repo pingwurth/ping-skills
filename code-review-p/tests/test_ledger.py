@@ -112,3 +112,36 @@ def test_p4_coverage空值整份拒收():
          "category": "correctness"}]}]}
     errs = ledger.validate_candidates_file(data)
     assert any("coverage" in e for e in errs), "coverage 非对象必须在校验层拒收"
+
+
+# ── P6 回修回归: journal 票据回配索引(2026-11-02 全面审查) ───────────
+def test_p6_回配索引与无索引结果一致(tmp_path):
+    """P6 回修: _match_candidate 加文件索引 + token 缓存只是加速 ——
+    匹配语义逐字不变(JS isDup 是 parity 锁定孪生, 不得漂移)。"""
+    from crp import journal
+    st = State(mode="deep", repo={"cwd": str(tmp_path)})
+    st.candidates = [
+        {"id": "c001", "file": "a.py", "line": 5, "summary": "missing await on fetch call",
+         "status": "fresh", "severity": "P2"},
+        {"id": "c002", "file": "a.py", "line": 40, "summary": "unrelated defect far away",
+         "status": "fresh", "severity": "P2"},
+        {"id": "c003", "file": "a.py", "line": 5, "summary": "missing await on fetch call",
+         "status": "dup", "severity": "P2"},
+        {"id": "c004", "file": "b.py", "line": 7, "summary": "other file same defect text",
+         "status": "fresh", "severity": "P2"},
+    ]
+    file_index = {}
+    for c in st.candidates:
+        if c.get("status") != "dup":
+            file_index.setdefault(c.get("file"), []).append(c)
+    token_cache: dict = {}
+    for line, summary in [(7, "missing await on fetch call"),   # 带内漂移 ±2
+                          (5, "missing await on fetch call"),   # 精确
+                          (5, "totally different summary")]:    # 无重叠
+        a = journal._match_candidate(st, "a.py", line, summary)
+        b = journal._match_candidate(st, "a.py", line, summary,
+                                     file_index=file_index, token_cache=token_cache)
+        assert a is b, f"索引路径必须与线性扫描同结果(line={line})"
+        b2 = journal._match_candidate(st, "a.py", line, summary,
+                                      file_index=file_index, token_cache=token_cache)
+        assert b2 is b, "缓存二次调用结果稳定"

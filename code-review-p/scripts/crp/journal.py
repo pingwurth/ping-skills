@@ -72,28 +72,46 @@ def _classify(result) -> str:
     return "unknown"
 
 
-def _match_candidate(state: State, file, line, summary) -> Optional[dict]:
+def _match_candidate(state: State, file, line, summary,
+                      file_index: Optional[dict] = None,
+                      token_cache: Optional[dict] = None) -> Optional[dict]:
     """把 refuter 自描述返回匹配回台账候选。
 
     回修 c051: echo 的 file:line 可能与台账条目有小漂移(多 finder 对同一缺陷
     的行号取点不同), 只做精确匹配会让票据落在 dup 副本或完全丢失 —— 与
     find_dup 同语义: 同 file + 行号 ±DEDUP_LINE_BAND + 摘要重叠; 精确命中
     优先, 带内命中唯一才算。
+
+    P6 回修: file_index/token_cache 由调用方预建(按归一文件索引 + 摘要
+    token 缓存)—— 原版每条记录线性走全部候选并对每个同文件条目重算
+    tokens_of(≤500 字摘要), 200-finding 审查约 24 万次字典探测加数千次
+    重复分词。匹配语义逐字不变(JS isDup 是 parity 锁定孪生)。
     """
     from . import config as _config
     nf = ledger.norm_file(file, (state.repo or {}).get("cwd", ""))
     exact = None
     banded = []
     toks = ledger.tokens_of(summary or "")
-    for c in state.candidates:
-        if c.get("file") != nf or c.get("status") == "dup":
+    pool = file_index.get(nf) if file_index is not None else None
+    if pool is None:
+        pool = [c for c in state.candidates
+                if c.get("file") == nf and c.get("status") != "dup"]
+    for c in pool:
+        if c.get("status") == "dup":
             continue
         if (c.get("line") or 0) == (line or 0) and c.get("summary") == summary:
             exact = c
             break
-        if abs((c.get("line") or 0) - (line or 0)) <= _config.DEDUP_LINE_BAND and \
-                ledger.overlap_toks(toks, ledger.tokens_of(c.get("summary", ""))):
-            banded.append(c)
+        if abs((c.get("line") or 0) - (line or 0)) <= _config.DEDUP_LINE_BAND:
+            if token_cache is not None:
+                ctoks = token_cache.get(c.get("id"))
+                if ctoks is None:
+                    ctoks = ledger.tokens_of(c.get("summary", ""))
+                    token_cache[c.get("id")] = ctoks
+            else:
+                ctoks = ledger.tokens_of(c.get("summary", ""))
+            if ledger.overlap_toks(toks, ctoks):
+                banded.append(c)
     if exact is not None:
         return exact
     return banded[0] if len(banded) == 1 else None
@@ -112,6 +130,10 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
     finder_count = 0
     gap_seen = 0
     root = (state.repo or {}).get("cwd", "")
+    # P6: 回配索引(按归一文件)+ 摘要 token 缓存; 有新候选入账后置脏重建
+    file_index: dict = {}
+    token_cache: dict = {}
+    index_dirty = True
     for _label, result in records:
         kind = _classify(result)
         if kind == "finder":
@@ -140,9 +162,17 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
                                 "candidates": valid}]}
             if valid:
                 ledger.ingest_candidates(state, items, origin=origin, round_no=round_no)
+                index_dirty = True  # 新候选入账 → 回配索引下次 refuter 记录前重建
         elif kind == "refuter":
+            if index_dirty:
+                file_index = {}
+                for c in state.candidates:
+                    if c.get("status") != "dup":
+                        file_index.setdefault(c.get("file"), []).append(c)
+                index_dirty = False
             cand = _match_candidate(state, result.get("file"), result.get("line"),
-                                    result.get("summary"))
+                                    result.get("summary"),
+                                    file_index=file_index, token_cache=token_cache)
             if cand is None:
                 module_logger().warning(
                     f"journal: refuter 返回无法匹配候选: {result.get('file')}:{result.get('line')}")

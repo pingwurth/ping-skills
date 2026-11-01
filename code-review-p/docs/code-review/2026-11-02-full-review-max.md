@@ -25,6 +25,8 @@
 
 > **第五批(P5 死代码清理 11 条)同日回修**(纯删除/去重, 验证口径 = 163 全绿含 node 16 例 + 引用清零):删 config 六个零消费常量(ENGINE_NAME/REPORT_TABLE_COLUMNS/PHASES/AWAITING_KINDS/ROUND_KINDS/RESUME_OPTIONS, QUESTION_KEYS 有 argparse 消费者保留)、_KIND_FILE_HINT、State.candidate_by_id、Decision.next_type+Route→type 第二套映射(测试改断言 transitions.build_next_step 真实分发)、cursor.lens_requests 占位(升级真实状态在 pending_verify.lenses)、work/ 只建不读的子目录机制(WORK_SUBDIR/两访问器/布局断言)、候选 'rank': None 与 brief sha256''/sections_ok 恒真占位、IngestResult.errors/VoteOutcome.errors 永不触发通道(后者改 module_logger 告警);测试去重两条:parse_block 入 conftest 共享(补回 END 计数断言)、aggregateVerdict 九例矩阵入 fixtures/aggregate_cases.json 两侧共享断言。
 
+> **第六批(P6 性能/复用 8 条)同日回修**(168 全绿, 红灯验证 4/5 + 1 条语义等价守护):①命中 rung 的 git diff 由两条(--name-only + --numstat 同参)并为一条 `_diff_stat`(路径受限 rung 3/4 的统计同时补上漏掉的 -- target 口径)②单次 start 的 `git status --porcelain -z -uall` 由 2-3 次并为一份快照贯穿(阶梯/重导/签名), accumulate_working_tree 同时改用 porcelain_z 结构化解析(消除手解 R/C orig_path 误读)③classify_target 用 `ls-files --error-unmatch` 直接回答, 不再物化 30 万文件全量索引④list_runs 优先读 save() 同步落的轻量 meta.json 边车(旧运行回退 state.json), runs/start 检查/裸 submit 不再反复全量解析多 MB 状态⑤journal _match_candidate 加按文件索引 + 摘要 token 缓存(脏标记在有新候选后重建; 匹配语义不变, JS parity 不受影响)⑥_run_ask 复用 cmd_start 已算的未完成列表⑦gh 探测复用 gitops.run_argv(手抄子进程封装删除, c012 类修复单点生效)⑧scope 移除仅剩的 subprocess 直用。
+
 | # | 位置 | 缺陷 |
 |---|---|---|
 | 1 | `scripts/crp/handlers.py:637` | 门禁确认在 brief 之前触发,answer --key gates 无条件把 phase 置 carrier → brief 阶段被整体跳过(keep 阈值回退 KEEP_NONE、angles 空、02-brief.md 永不生成) |

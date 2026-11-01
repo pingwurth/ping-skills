@@ -16,21 +16,31 @@ from . import config
 from .logutil import module_logger
 
 
+def run_argv(argv: list[str], cwd: str | Path) -> tuple[bool, str]:
+    """执行任意只读子命令(git/gh 共用封装), 返回 (退出码是否为 0, stdout 去尾空白)。
+
+    P6 回修: gh 探测原在 scope 手抄一份逐字相同的子进程封装 —— gitops.run
+    的修复(如 c012 显式 utf-8/replace 防非 UTF-8 locale 崩)到不了副本;
+    参数化 argv 后单一实现。
+    """
+    try:
+        proc = subprocess.run(  # c012: 显式 utf-8/replace —— locale 编码在非 UTF-8 环境会 strict 崩
+            argv, cwd=str(cwd), capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=config.GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        module_logger().debug(f"{argv[0]} 执行失败({exc}) cwd={cwd}")
+        return False, ""
+    return proc.returncode == 0, proc.stdout.strip()
+
+
 def run(args: list[str], cwd: str | Path) -> tuple[bool, str]:
     """执行 git 子命令, 返回 (退出码是否为 0, stdout 去尾空白)。
 
     超时/可执行缺失一律视为失败(ok=False), 不抛异常。
     """
-    try:
-        proc = subprocess.run(  # c012: 显式 utf-8/replace —— locale 编码在非 UTF-8 环境会 strict 崩
-            ["git", *args], cwd=str(cwd), capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=config.GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        module_logger().debug(f"git {args[0]} 执行失败({exc}) cwd={cwd}")
-        return False, ""
-    return proc.returncode == 0, proc.stdout.strip()
+    return run_argv(["git", *args], cwd)
 
 
 def is_git_repo(cwd: str | Path) -> bool:

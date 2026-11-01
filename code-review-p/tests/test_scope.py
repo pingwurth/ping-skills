@@ -266,3 +266,69 @@ def test_p3_区间三点目标base_head拆分(tmp_path):
     assert sc["base"] == "HEAD~1" and sc["head"] == "HEAD"
     sc2 = scope_mod.resolve_scope(repo.root, "HEAD~1..HEAD")
     assert sc2["base"] == "HEAD~1" and sc2["head"] == "HEAD"
+
+
+# ── P6 回修回归: Phase 0 子进程开销(2026-11-02 全面审查) ────────────
+def test_p6_命中rung只跑一次git_diff(tmp_path, monkeypatch):
+    """P6 回归: 每个命中 rung 把同一 git diff 跑两遍(--name-only 取文件 +
+    --numstat 取统计, 完全相同参数)—— 大树上最贵的 Phase 0 操作纯双倍功。"""
+    from crp import gitops as gitops_mod
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    calls: list[tuple] = []
+    orig = gitops_mod.run
+
+    def counting(args, cwd):
+        if args and args[0] == "diff":
+            calls.append(tuple(args))
+        return orig(args, cwd)
+
+    monkeypatch.setattr(scope_mod.gitops, "run", counting)
+    sc = scope_mod.resolve_scope(repo.root)
+    assert sc["kind"] == "worktree" and sc["stats"]["files"] == 1
+    # rung3 探测 + rung4 探测 + rung5 命中, 每级恰一条(原版命中级 = name-only+numstat 两条)
+    assert len(calls) == 3, f"三级各一条(实际 {calls})"
+    assert len(set(calls)) == len(calls), "同参数 git diff 不得重复执行"
+    assert all(c[:2] == ("diff", "--numstat") for c in calls)
+
+    # 路径受限同样一次(且 numstat 带 -- target, 统计口径不再漏限制)
+    calls.clear()
+    sc2 = scope_mod.resolve_scope(repo.root, "src/a.py")
+    assert sc2["kind"] == "worktree"
+    assert len(calls) == 1 and "--" in calls[0], "路径受限的统计必须带 -- target"
+
+
+def test_p6_start全流程一份porcelain快照(tmp_path, monkeypatch):
+    """P6 回修: 单次 start 把同一 git status --porcelain -z -uall 跑 2-3 次
+    (阶梯入口 untracked / 重导 / 签名)—— 10 万文件 monorepo 每次 1-3 秒。"""
+    import argparse
+    from crp import gitops as gitops_mod
+    from crp import handlers
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    calls: list[str] = []
+    orig = gitops_mod.porcelain_z
+
+    def counting(cwd):
+        calls.append(str(cwd))
+        return orig(cwd)
+
+    monkeypatch.setattr(gitops_mod, "porcelain_z", counting)
+    monkeypatch.chdir(repo.root)
+    monkeypatch.setenv("CRP_HOME", str(tmp_path / "home"))
+    args = argparse.Namespace(run_dir=None, mode="quick", target=None,
+                              fix=False, force=True)
+    handlers.cmd_start(args)
+    assert len(calls) == 1, f"start 全程应恰一次 porcelain(实际 {len(calls)})"
+
+
+def test_p6_已删除tracked文件仍判为path(tmp_path):
+    """P6 回修: classify_target 改 --error-unmatch 后语义保持 —— 已删除
+    未暂存的 tracked 文件(exists() False)仍应判 path(whole-file/diff 可见)。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "README.md": "r\n"}, "init")
+    (repo.root / "src" / "a.py").unlink()
+    assert scope_mod.classify_target(repo.root, "src/a.py") == "path"
+    assert scope_mod.classify_target(repo.root, "no-such-ref") == "branch"
