@@ -629,3 +629,142 @@ def test_退出码契约_一二三各可证(tmp_path, quick_repo):
                            "--run-dir", str(d2.run_dir)])
     assert p3["exit_code"] == config.EXIT_ERROR and rc3 == config.EXIT_ERROR
     assert p3["next_step"]["type"] == "ask_user"
+
+
+# ── P1 回修回归(2026-11-02 /code-review max 全面审查) ────────────────
+def test_p1_门禁仓库brief阶段不被跳过(tmp_path):
+    """P1 回归: 有启发式门禁的仓库, gates 答复不得越过 brief。
+
+    原版: overlay 应用有待确认门禁即先跳 gates, gates 答复又无条件转
+    carrier → state.brief/sweep_plan 恒空, keep 阈值回退 KEEP_NONE、
+    02-brief.md 永不生成(被 test_c057 的 fabricate 兜底掩盖)。
+    """
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    final = d.drive(payload)  # gates ask 由 Driver 自动批准
+    assert final["next_step"]["type"] == "finish"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["brief"].get("line_count", 0) >= 1, "brief 必须真实经过"
+    assert state["sweep_plan"].get("angles"), "扫描计划必须在 brief 后固化"
+    assert (d.run_dir / "in" / "02-brief.md").is_file()
+    assert "make check" in json.dumps(state["overlay"]["gates"])
+
+
+def test_p1_fix复审轮载体1不再死循环(tmp_path, quick_repo):
+    """P1 回归: fix_review 阶段不得向载体 1 下发 carrier1 do_work ——
+    submit 的种类核对只认 phase=='sweep', 逐字执行协议即无限 exit-3。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick", extra=["--fix"])
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        if "carrier" in str(ns.get("submit", {}).get("params", [])):
+            (d.run_dir / "in").mkdir(parents=True, exist_ok=True)
+            (d.run_dir / "in" / "03-carrier.json").write_text(
+                json.dumps({"carrier": 1, "reason": "e2e: workflow"}), encoding="utf-8")
+            payload, _ = d.run_argv(ns["submit"]["params"])
+            break
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    # 初扫载体 1: 压缩 journal(1 条 P2 候选, quick 无验证)
+    compact = d.run_dir / "in" / "04-j.json"
+    compact.parent.mkdir(parents=True, exist_ok=True)
+    compact.write_text(json.dumps({
+        "finders": [{"angle": "A", "candidates": [
+            {"file": "src/a.py", "line": 3, "summary": "fix round defect alpha",
+             "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+             "category": "correctness"}]}],
+        "verdicts": [], "counters": {}}, ensure_ascii=False), encoding="utf-8")
+    payload, _ = d.run_argv(["submit", "--kind", "carrier1", "--file", str(compact),
+                             "--run-dir", str(d.run_dir)])
+    review_rounds = []
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        kind = ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1]
+        if kind == "candidates" and "复审" in (ns.get("instructions") or ""):
+            review_rounds.append(ns)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "finish"
+    assert review_rounds, "必须到达 fix 复审轮"
+    assert all("Workflow" not in (ns.get("instructions") or "") for ns in review_rounds), \
+        "fix_review 轮不得下发载体 1(会无限错序循环)"
+
+
+def test_p1_陈旧gates答复重放被拒(tmp_path):
+    """P1 回归: answer 不校验待决问题 → 429 中断后重贴旧 ask_user 答复可把
+    状态机瞬间传送到别的相位。错序答复必须 exit-3 并交回路由器自愈。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    while payload["next_step"]["type"] in ("do_work", "ask_user"):
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        if ns["type"] == "ask_user":  # gates 询问(在 brief 之后)自动批准
+            approve = next((o for o in ns.get("resume", [])
+                            if o.get("option") == "approve_all" and o.get("script")), None)
+            assert approve is not None, "此处应为 gates 询问"
+            payload, _ = d.run_argv(approve["params"])
+            continue
+        kind = ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1]
+        if kind == "candidates":
+            break
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "sweep"
+    payload2, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir),
+                               "--key", "gates", "--choice", "approve_all"])
+    assert rc == config.EXIT_STATE and "错序答复" in payload2["summary"]
+    assert payload2["next_step"]["type"] == "run_script"
+    assert payload2["next_step"]["params"][0] == "resume"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "sweep", "重放不得传送相位"
+    payload3, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert payload3["next_step"]["type"] == "do_work", "路由器照常恢复"
+
+
+def test_p1_drift重导范围后重评overlay信任(tmp_path):
+    """P1 回归: drift 答复 new_scope 重导范围后必须重评 overlay 信任 ——
+    被新 diff 触及的 overlay 不得沿用 trusted(A3/A4 信任边界)。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "gen/g.py": "1\n",
+                 ".claude/code-review-p.md": "# overlay\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "standard")
+    ns = payload["next_step"]  # trusted overlay → overlay 提取(带排除项+只读门禁)
+    d._note_run_dir(ns)
+    Path(ns["output"]).write_text(json.dumps({
+        "red_lines": [], "gates": [{"command": "make check", "semantics": "read_only"}],
+        "exclusions": ["gen/"], "invariants": []}, ensure_ascii=False), encoding="utf-8")
+    payload, _ = d.run_argv(ns["submit"]["params"])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["overlay"]["trust"] == "trusted"
+    assert state["overlay"]["gates"][0]["approval"] == "auto"
+    while payload["next_step"]["type"] == "do_work":  # 推进到 candidates 提交后停
+        ns2 = payload["next_step"]
+        d._note_run_dir(ns2)
+        d.fabricate(ns2)
+        payload, _ = d.run_argv(ns2["submit"]["params"])
+        if "candidates" in str(ns2.get("submit", {}).get("params", [])):
+            break
+    # 中断期间: HEAD 前移(新提交) + 第三方改写 overlay 留在工作树
+    # (commit 走 add -A, 必须先提交后改写, overlay 改动才不被一并带走)
+    repo.commit({"src/b.py": "b = 1\n"}, "moved on")
+    repo.edit({".claude/code-review-p.md": "# overlay tampered\n"})
+    payload, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert payload["next_step"]["type"] == "ask_user"
+    payload, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
+                             "--choice", "new_scope"])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    ov = state["overlay"]
+    assert ov["trust"] == "untrusted", "新 diff 触及 overlay → 必须降级"
+    assert ov["exclusions_applied"] == [] and ov["exclusions_suspended"] == ["gen/"]
+    assert all(g["approval"] != "auto" for g in ov["gates"]), "auto 批复必须回落(fail-closed)"
+    # 陈旧 drift 答复重放同样被拒
+    payload2, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
+                               "--choice", "new_scope"])
+    assert rc == config.EXIT_STATE and "错序答复" in payload2["summary"]

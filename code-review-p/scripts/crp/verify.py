@@ -45,6 +45,14 @@ def validate_votes_file(data: object, state: State) -> list[str]:
     if len(votes) > config.MAX_VOTES_PER_FILE:
         return [f"votes 数 {len(votes)} 超单文件上限 {config.MAX_VOTES_PER_FILE}"]
     pending = {p["id"]: p for p in (state.cursor.get("pending_verify") or [])}
+    # P1 回修: (id, lens) 唯一性 —— 重复透镜票会在法定人数里双计, 把 REFUTED
+    # 翻成 CONFIRMED。既查文件内重复, 也查候选已入账的票(跨文件重复投票)。
+    voted: dict[str, set[str]] = {}
+    for c in state.candidates:
+        lenses = {v.get("lens") for v in (c.get("votes") or [])}
+        if lenses:
+            voted[c.get("id")] = lenses
+    seen: set[tuple[str, str]] = set()
     errs: list[str] = []
     for i, v in enumerate(votes):
         w = f"votes[{i}]"
@@ -69,6 +77,15 @@ def validate_votes_file(data: object, state: State) -> list[str]:
             errs.append(f"{w}: severity 必须是 {'/'.join(config.SEVERITIES)}")
         if v.get("source") not in ("agent", "inline"):
             errs.append(f"{w}: source 必须是 agent|inline")
+        if (isinstance(cid, str) and cid
+                and v.get("lens") in config.LENSES and cid in pending):
+            lens = v.get("lens")
+            if (cid, lens) in seen:
+                errs.append(f"{w}: 重复票 (id={cid}, lens={lens}) —— 每候选每透镜恰一票")
+            elif lens in voted.get(cid, set()):
+                errs.append(f"{w}: 候选 {cid} 的 {lens} 透镜已有票(不得重复投票)")
+            else:
+                seen.add((cid, lens))
     return errs
 
 

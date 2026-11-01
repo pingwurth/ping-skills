@@ -18,6 +18,7 @@ from typing import Optional
 
 from . import config, decisions, gitops, ledger, overlay, report, scope as scope_mod, verify
 from .cli import EmitContext, load_state_or_error
+from .logutil import setup_logger
 from .models import Decision, NextCommand, ResumeOption, Route, State
 from .state import StateStore, create_run_dir, list_runs, repo_slug, resolve_run_dir
 
@@ -224,6 +225,11 @@ def _place_state(args, state: State) -> Path:
     state.run_id = run_dir.name
     _touch(state)
     StateStore(run_dir).save(state)
+    # P1 回修: start 的目录在 handler 内才存在 —— 落定即接上 run-dir 日志
+    try:
+        setup_logger("start", run_dir)
+    except OSError:
+        pass
     return run_dir
 
 
@@ -316,6 +322,22 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                         except ValueError:
                             js_counters = None
             try:
+                # ── 幂等键(P1 回修): 载体 1 同入共享幂等管线 —— 同轮同 journal
+                # 字节重投 = 孤儿结果吸收, 不得双重入账(原版 sha256 恒空绕开) ──
+                if transcript_dir is not None and (transcript_dir / "journal.jsonl").is_file():
+                    digest_src = transcript_dir / "journal.jsonl"
+                else:
+                    digest_src = compact_file if compact_file is not None else Path(args.file)
+                digest = hashlib.sha256(digest_src.read_bytes()).hexdigest()
+                idem = f"carrier1|{state.cursor.get('round', 0)}|{digest}"
+                dup = next((s for s in state.submissions
+                            if s.get("idem") == idem and s.get("applied")), None)
+                if dup is not None:
+                    decision = decisions.decide_next(state, _ctx(state, run_dir))
+                    decision.summary = f"重复提交已吸收(carrier1, sha256 相同) —— {decision.summary}"
+                    store.save(state)
+                    return decision, EmitContext(run_dir=run_dir, state=state)
+
                 if transcript_dir is not None and (transcript_dir / "journal.jsonl").is_file():
                     note = journal.ingest_transcript(state, transcript_dir,
                                                      js_counters=js_counters)
@@ -328,8 +350,8 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                     question=f"检查 transcript 目录/journal 文件后重试: {exc}")
             state.submissions.append({
                 "seq": len(state.submissions) + 1, "kind": "carrier1",
-                "file": str(args.transcript_dir or args.file), "sha256": "",
-                "applied": True, "note": note,
+                "file": str(args.transcript_dir or args.file), "sha256": digest,
+                "idem": idem, "applied": True, "note": note,
             })
             _touch(state)
             store.save(state)
@@ -387,11 +409,11 @@ def _validate_kind(state: State, kind: str, data: object):
 
         def _apply_overlay(st: State, rd: Path) -> str:
             summary = json.dumps(overlay.apply_overlay(st, data), ensure_ascii=False)
-            # phase 推进(回修 c057 第二半): 有待确认门禁 → gates; 否则直达 brief
-            if overlay.pending_gate_question_count(st):
-                st.phase, st.cursor["awaiting"] = "gates", "answer"
-            else:
-                st.phase, st.cursor["awaiting"] = "brief", "brief"
+            # phase 推进(P1 回修): 一律先 brief —— 门禁确认是 brief 之后的一次
+            # 批量 ask_user(SKILL.md §4 / gates_question 契约); 有待确认门禁时
+            # 由 _apply_brief 进 gates。原版有待确认门禁即先跳 gates, 而 gates
+            # 答复又无条件转 carrier —— brief 阶段被整体跳过。
+            st.phase, st.cursor["awaiting"] = "brief", "brief"
             return summary
         return errs, _apply_overlay
 
@@ -590,6 +612,29 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             return err, EmitContext(run_dir=run_dir)
         key, choice = args.key, args.choice
 
+        # ── 错序守卫(P1 回修): 陈旧 ask_user 答复不得重放传送状态机 ──
+        # 每类答复只在对应待决问题存活时合法; 与 submit 的错序自愈对齐,
+        # 拒绝时交回路由器(429 中断后重贴旧命令是最常见的触发方式)。
+        if key == "scope":
+            stale = not state.scope.get("escape_hatch")
+        elif key == "gates":
+            stale = state.phase != "gates"
+        elif key == "drift":
+            stale = (state.pending_question or {}).get("key") != "drift"
+        elif key == "run":
+            stale = False  # run 答复仅交回路由器(resume 幂等), 无状态可传送
+        else:
+            raise StepError.state_error(f"未知 answer key: {key}")
+        if stale:
+            # return 而非 raise: raise 会丢掉 EmitContext, RESUME 路由解析不了 run_dir
+            store.save(state)
+            return Decision(
+                status="failed", exit_code=config.EXIT_STATE,
+                summary=f"错序答复: key={key} 已无对应待决问题(当前 phase={state.phase})",
+                route=Route.RESUME, reason="陈旧答复重放 —— 交回路由器自愈",
+                route_params=["resume", "--run-dir", str(run_dir)]
+            ), EmitContext(run_dir=run_dir, state=state)
+
         if key == "scope":
             if choice == "terminate":
                 state.phase = "aborted"
@@ -634,7 +679,13 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             else:
                 raise StepError.state_error("gates 答复需要 approve_all/skip_all/choice+--value")
             state.pending_question = None
-            state.phase, state.cursor["awaiting"] = "carrier", "carrier"
+            # P1 回修: gates 答复不得越过 brief —— brief 未建时回 brief 阶段。
+            # 正常流程(overlay→brief→gates)此处 brief 必已建好; 该分支同时兜住
+            # 修复前遗留的旧 state(phase=gates 且 brief 为空的中断运行)。
+            if state.brief.get("line_count"):
+                state.phase, state.cursor["awaiting"] = "carrier", "carrier"
+            else:
+                state.phase, state.cursor["awaiting"] = "brief", "brief"
             _touch(state); store.save(state)
             return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
 
@@ -649,6 +700,28 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             if choice == "new_scope":
                 sc = scope_mod.resolve_scope(cwd, state.target)
                 state.scope = sc
+                # P1 回修: 重导范围后必须重评 overlay 信任 —— 被新 diff 触及的
+                # overlay 不得沿用 trusted(A3/A4 信任边界不得被 drift 分支绕开)。
+                root = gitops.repo_root(Path(cwd)) or Path(cwd)
+                path_now = overlay.discover(root)
+                trust_now, basis_now = overlay.trust_of(state.scope, path_now)
+                ov = state.overlay or {}
+                ov["path"], ov["trust"], ov["trust_basis"] = path_now, trust_now, basis_now
+                excl = ((ov.get("content") or {}).get("exclusions")) or []
+                if trust_now == "trusted" and excl:
+                    # 仍可信: 排除项对新范围照常应用(新 scope 尚未应用过)
+                    scope_mod.apply_exclusions(state.scope, excl, "overlay")
+                    ov["exclusions_applied"] = excl
+                    ov["exclusions_suspended"] = []
+                else:
+                    # 降级/无 overlay: 排除项一律挂起(新 scope 本就未应用), 已有
+                    # auto 批复回落待确认 —— fail-closed, 未确认门禁一律不跑
+                    ov["exclusions_applied"] = []
+                    if excl:
+                        ov["exclusions_suspended"] = excl
+                    for g in ov.get("gates") or []:
+                        if g.get("approval") == "auto":
+                            g["approval"] = "unset"
             elif choice == "resume_old_scope":
                 for c in state.candidates:
                     c["stale"] = True

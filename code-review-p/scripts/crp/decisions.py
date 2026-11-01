@@ -301,7 +301,10 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
         f"spawn 子代理(载体 2)必须分波: 同时在飞 ≤ {max_conc}"
         "(限流保护), 一个完成再补一个 —— 不要一次扇出全部角度。"
     )
-    if carrier_no == 1:
+    # P1 回修: 载体 1 只服务初扫轮 —— fix_review 轮下发 carrier1 会因 submit
+    # 的种类核对只认 phase=='sweep' 而无限错序 exit-3 循环(LLM 逐字执行协议
+    # 永远无法满足引擎); 复审轮(quick 语义单轮)固定走常规 candidates 提交。
+    if carrier_no == 1 and round_kind != "fix_review":
         output = str(ctx.in_dir / "04-carrier1-transcript-dir.txt")
         instructions = (
             "载体 1(Workflow 工具, 仅主会话): 以 scriptPath 调用已安装的 "

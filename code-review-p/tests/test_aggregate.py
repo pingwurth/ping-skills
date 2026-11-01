@@ -104,6 +104,38 @@ def test_票据校验_未知id与空evidence拒收():
     assert any("evidence" in e for e in errs)
 
 
+def test_p1_重复透镜票拒收_不翻转裁决():
+    """P1 回归(2026-11-02 审查): (id, lens) 唯一性 —— 重复透镜票在法定人数里
+    双计, 可把 REFUTED 翻成 CONFIRMED; 文件内与跨文件重复都必须整份拒收。"""
+    state = _state("standard")
+    state.candidates = [_cand("c1", "P1")]
+    state.cursor["pending_verify"] = [
+        {"id": "c1", "lenses": ["correctness", "reproduction", "security"]}]
+
+    def v(lens, verdict):
+        return {"id": "c1", "lens": lens, "verdict": verdict,
+                "evidence": "q", "severity": "P1", "source": "inline"}
+
+    # 文件内重复(correctness ×2 双计可翻裁决)
+    dup = {"votes": [v("correctness", "CONFIRMED"), v("correctness", "CONFIRMED"),
+                     v("reproduction", "REFUTED")]}
+    errs = verify.validate_votes_file(dup, state)
+    assert any("重复票" in e for e in errs)
+    # 合法前两票入账(差 security 透镜, 候选仍 pending)
+    ok = {"votes": [v("correctness", "CONFIRMED"), v("reproduction", "REFUTED")]}
+    assert verify.validate_votes_file(ok, state) == []
+    verify.apply_votes(state, ok["votes"])
+    assert state.cursor["pending_verify"], "三透镜未齐, 候选应仍待验证"
+    # 跨文件重复: 已入账的 correctness 透镜再投 → 拒收
+    errs2 = verify.validate_votes_file({"votes": [v("correctness", "REFUTED")]}, state)
+    assert any("已有票" in e for e in errs2)
+    # 补齐第三透镜: 真实三透镜 1C+2R → REFUTED(重复票被拒后不可能再被翻成 CONFIRMED)
+    last = {"votes": [v("security", "REFUTED")]}
+    assert verify.validate_votes_file(last, state) == []
+    verify.apply_votes(state, last["votes"])
+    assert state.candidates[0]["verdict"] == "REFUTED"
+
+
 def test_quick无验证终判_only_floor():
     state = _state("quick")
     state.candidates = [_cand("c1", confidence=0.6), _cand("c2", confidence=0.3), _cand("c3", confidence=0.9)]

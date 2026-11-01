@@ -101,6 +101,8 @@ markdown 文本, 六节 `##` 标题(可用审查语言, 节序即契约):
 
 - `id` 必须来自协议块 context 的 batch; `lens` ∈ correctness/reproduction/security,
   高危候选(P0/P1)需要全部所列透镜各一票(单票升级的候选会被引擎退回补票)。
+  **每候选每透镜恰一票**: 同文件内或与已入账票重复的 (id, lens) 会使整份提交
+  被拒(重复透镜票会在法定人数里双计)。
 - `verdict` ∈ CONFIRMED/PLAUSIBLE/REFUTED; **无引证不下裁决**(evidence 必填)。
 - `source`: agent(子代理)/inline(本上下文独立复核)。
 - 已获批的只读门禁输出引用进 evidence; 未批准的门禁写 "unverified by gate"。

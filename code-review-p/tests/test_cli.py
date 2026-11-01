@@ -101,3 +101,38 @@ def test_损坏state恰出一块exit3(tmp_path):
     p2 = parse_block(proc2.stdout)
     assert proc2.returncode == p2["exit_code"] == config.EXIT_STATE
     assert p2["next_step"]["type"] == "ask_user" and "损坏" in p2["next_step"]["question"]
+
+
+def test_p1_处理期间告警落入rundir日志(tmp_path):
+    """P1 回归(2026-11-02 审查): setup_logger 原在 handler 执行之后才调用,
+    <run-dir>/logs/<cmd>.log 恒为空文件 —— 协议块缺失恢复步骤(SKILL.md)读尾部
+    永远读到 0 字节。处理期间(如损坏 state 加载)的 module_logger 告警必须
+    已在 handler 执行前接好的 run-dir 日志里。"""
+    import subprocess, os
+    home = tmp_path / "home"
+    repo = tmp_path / "r2"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "a.py").write_text("x=1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "init"], check=True)
+    (repo / "a.py").write_text("x=2\n")
+    env = {**os.environ, config.CRP_HOME_ENV: str(home)}
+    proc = subprocess.run(
+        [sys.executable, str(ENTRY), "start", "--mode", "quick"],
+        cwd=str(repo), capture_output=True, text=True, timeout=60, env=env)
+    payload = parse_block(proc.stdout)
+    run_dir = payload["next_step"]["submit"]["params"][
+        payload["next_step"]["submit"]["params"].index("--run-dir") + 1]
+    # start 自身的 run-dir 日志也已接上(_place_state 内 setup)
+    start_log = Path(run_dir) / "logs" / "start.log"
+    assert start_log.is_file(), "start 落定运行目录后应立即建立本命令日志"
+    (Path(run_dir) / "state.json").write_text("{broken", encoding="utf-8")
+    proc2 = subprocess.run(
+        [sys.executable, str(ENTRY), "resume", "--run-dir", run_dir],
+        cwd=str(repo), capture_output=True, text=True, timeout=60, env=env)
+    assert proc2.returncode == config.EXIT_STATE
+    log = Path(run_dir) / "logs" / "resume.log"
+    content = log.read_text(encoding="utf-8")
+    assert "state.json 读取失败" in content, "handler 执行期的告警必须落入本命令日志(原版恒空)"

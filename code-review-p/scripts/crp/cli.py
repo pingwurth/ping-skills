@@ -19,7 +19,7 @@ from typing import Optional
 from . import config, protocol, transitions
 from .logutil import setup_logger
 from .models import Decision, Route, State
-from .state import StateStore
+from .state import StateStore, resolve_run_dir
 
 # handlers 反向依赖本模块(EmitContext/load_state_or_error), 延迟到 main 内导入以断环
 
@@ -103,6 +103,24 @@ def _internal_error_decision(exc: Exception) -> Decision:
                     reason="内部错误", question=f"脚本内部错误: {exc}")
 
 
+def _prehandler_run_dir(cmd: str, args) -> Optional[Path]:
+    """handler 执行前可确定的运行目录(仅供日志前置捕获, 不作为路由依据)。
+
+    与各 handler 的入口解析同源: 显式 --run-dir 优先; resume/submit/report/
+    status 的裸形式按 resolve_run_dir 取最新未完成运行。start 的目录在
+    handler 内创建(_place_state 内自行 setup_logger)。
+    """
+    rd = getattr(args, "run_dir", None)
+    if rd:
+        return Path(rd).resolve()
+    if cmd in ("resume", "submit", "report", "status"):
+        try:
+            return resolve_run_dir(None, Path.cwd())
+        except OSError:
+            return None
+    return None
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     """入口统一执行框架, 返回进程退出码。"""
     parser = build_parser()
@@ -129,6 +147,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     if handler is None:
         parser.error(f"未知子命令: {cmd}")
 
+    # P1 回修(2026-11-02 审查): 日志初始化必须在 handler 执行**之前** ——
+    # 处理期间的 module_logger 告警要落进 <run-dir>/logs/<cmd>.log(协议块
+    # 缺失时的恢复步骤读它的尾部; 原版 setup 在 handler 之后, 日志恒空)。
+    pre_rd = _prehandler_run_dir(cmd, args)
+    if pre_rd is not None:
+        try:
+            setup_logger(cmd, pre_rd)
+        except OSError:
+            pass
+
     ectx = EmitContext()
     try:
         decision, ectx = handler(args)
@@ -137,7 +165,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001 - 兜底: 任何未捕获异常都转协议块
         decision = _internal_error_decision(exc)
 
-    # 尽力初始化 logger(失败不影响协议输出)
+    # 兜底: 前置解析失败但 handler 产出了 run-dir(如 start)时仍建日志
     if ectx.run_dir is not None:
         try:
             setup_logger(cmd, ectx.run_dir)

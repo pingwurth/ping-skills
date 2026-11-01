@@ -76,6 +76,11 @@ python3 scripts/crp.py answer --run-dir D --key <scope|gates|drift|run> --choice
 python3 scripts/crp.py status | runs | report
 ```
 
+An answer is only legal while its question is pending: replaying a stale
+ask_user answer (e.g. re-pasting it after a 429 interruption) is rejected with
+exit 3 and routed back through `resume` — it can never teleport the state
+machine.
+
 (On hosts where the interpreter is named differently use `python`/`py -3`.)
 
 | Mode | Angles | Rounds (sweep+gap) | Keep | Cap | Verify |
@@ -225,7 +230,8 @@ Only with the explicit flag — the reviewer is read-only until then:
    follows.
 3. Re-run the checks covering each fix before counting it fixed.
 4. Submit outcomes (`fixed` / `skipped` + why / `no_change_needed`); the
-   engine then runs one quick-effort re-review round of the fix diff and the
+   engine then runs one quick-effort re-review round of the fix diff (a regular
+   candidates submission — the workflow carrier is not re-invoked) and the
    final report carries per-finding outcomes.
 
 ## 10 — Fallback: no python3
