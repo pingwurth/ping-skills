@@ -17,6 +17,8 @@
 > 5. validate_votes_file 查 (id,lens) 唯一性(文件内 + 与已入账票跨文件)
 > 6. cli.main 在 handler 之前解析 run-dir 并 setup_logger;setup_logger 把 FileHandler 挂到命名空间根,module_logger 告警落 run-dir;start 在 _place_state 内接日志
 
+> **第二批(P2 状态机/生命周期 8 条)同日回修**:①逃逸口 ask 落 pending_question,resume 遇 escape_hatch 重问(不再静默空审)②start --run-dir 指向已有运行防覆盖询问(--force 逃生)③drift new_scope 重导全空走逃逸口重问 ④resolve_run_dir 增加 include_done 回落,done 后裸 report/status/resume 可达(resume 重发 finish 块)⑤cmd_report 拒绝 phase=report(details 未提交时不再空渲染终结审查)⑥status 的 kept 改实时台账口径 ⑦carrier 的 max_agents/max_concurrent 真正生效(decisions.effective_limits,与计划取 min 只收紧)⑧_validate_carrier 排除 bool。
+
 | # | 位置 | 缺陷 |
 |---|---|---|
 | 1 | `scripts/crp/handlers.py:637` | 门禁确认在 brief 之前触发,answer --key gates 无条件把 phase 置 carrier → brief 阶段被整体跳过(keep 阈值回退 KEEP_NONE、angles 空、02-brief.md 永不生成) |

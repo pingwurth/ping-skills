@@ -56,7 +56,8 @@ markdown 文本, 六节 `##` 标题(可用审查语言, 节序即契约):
 
 - `carrier`: 1=Workflow 脚本(仅主会话) / 2=agents spawn / 3=inline 顺序。
 - `reason` 必填 —— 静默降级不可审计; `max_agents` / `max_concurrent` 可缺省
-  (取扫描计划默认; 并发上限 = 同时在飞 agent 数, 限流保护)。
+  (取扫描计划默认; 并发上限 = 同时在飞 agent 数, 限流保护)。提交时与扫描计划
+  取 **min**(只收紧不放宽)后生效于扫描/验证指令与载体 1 workflow 参数。
 - 运行中降级(finder 死亡/预算耗尽)通过后续 candidates 提交的
   `degradations` 数组补充留痕。
 

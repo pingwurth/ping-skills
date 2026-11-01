@@ -113,7 +113,12 @@ def _prehandler_run_dir(cmd: str, args) -> Optional[Path]:
     rd = getattr(args, "run_dir", None)
     if rd:
         return Path(rd).resolve()
-    if cmd in ("resume", "submit", "report", "status"):
+    if cmd in ("resume", "report", "status"):
+        try:  # 与对应 handler 的入口解析同口径(含已完成运行回落)
+            return resolve_run_dir(None, Path.cwd(), include_done=True)
+        except OSError:
+            return None
+    if cmd == "submit":
         try:
             return resolve_run_dir(None, Path.cwd())
         except OSError:

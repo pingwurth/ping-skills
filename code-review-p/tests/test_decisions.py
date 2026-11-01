@@ -190,3 +190,39 @@ def test_载体指令携带并发上限(monkeypatch):
     stv.cursor["pending_verify"] = [{"id": "c001", "lenses": ["correctness"]}]
     dv = decisions.verify_work(stv, CTX)
     assert "分波" in dv.instructions and "None" not in dv.instructions
+
+
+# ── P2 回修回归: 载体级并发/预算覆盖(2026-11-02 全面审查) ────────────
+def test_p2_carrier覆盖收紧生效():
+    """P2 回归: carrier 提交的 max_agents/max_concurrent 原版校验入库后零消费
+    (死旋钮)—— 现在与计划取 min(只收紧不放宽), 扫描/验证/载体1 参数一致消费。"""
+    st = _state(phase="sweep", carrier={"carrier": 2, "reason": "429 storm",
+                                        "max_agents": 20, "max_concurrent": 1})
+    assert decisions.effective_limits(st) == (20, 1)
+    st.cursor["pending_angles"] = ["A"]
+    d = decisions.sweep_work(st, CTX)
+    assert "≤ 1" in d.instructions, "扫描指令必须消费载体覆盖"
+    stv = _state(phase="verify", carrier={"carrier": 2, "reason": "r", "max_concurrent": 1})
+    stv.candidates = [{"id": "c001", "file": "a.py", "line": 1, "summary": "s",
+                       "failure_scenario": "f", "severity": "P2"}]
+    stv.cursor["pending_verify"] = [{"id": "c001", "lenses": ["correctness"]}]
+    assert "≤ 1" in decisions.verify_work(stv, CTX).instructions
+    st1 = _state(phase="sweep", carrier={"carrier": 1, "reason": "wf", "max_concurrent": 2})
+    assert "concurrency: 2" in decisions.sweep_work(st1, CTX).instructions
+
+    # 放宽无效(只收紧): 覆盖值大于计划值时仍用计划值
+    st2 = _state(phase="sweep", carrier={"carrier": 2, "reason": "r", "max_concurrent": 9})
+    assert decisions.effective_limits(st2)[1] == 4
+    # 未提交覆盖 → 计划值
+    assert decisions.effective_limits(_state(phase="sweep")) == (60, 4)
+
+
+def test_p2_carrier布尔值拒收():
+    """P2 回归: isinstance(True, int) 为真 —— {'max_concurrent': true} 原版
+    过校验入库, 与 ledger 对 line/confidence 的 bool 排除双重标准。"""
+    from crp import handlers
+    errs = handlers._validate_carrier({"carrier": 1, "reason": "x",
+                                        "max_concurrent": True, "max_agents": True})
+    assert any("max_concurrent" in e for e in errs)
+    assert any("max_agents" in e for e in errs)
+    assert handlers._validate_carrier({"carrier": 2, "reason": "x"}) == []

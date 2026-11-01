@@ -151,13 +151,25 @@ def list_runs(cwd: str | Path) -> list[dict]:
     return runs
 
 
-def resolve_run_dir(explicit: Optional[str], cwd: str | Path) -> Optional[Path]:
-    """运行目录解析: 显式 --run-dir 优先; 否则取 cwd 最新未完成运行。"""
+def resolve_run_dir(explicit: Optional[str], cwd: str | Path,
+                    include_done: bool = False) -> Optional[Path]:
+    """运行目录解析: 显式 --run-dir 优先; 否则取 cwd 最新未完成运行。
+
+    include_done=True 时无未完成运行则回落最新已完成运行 —— report/status/
+    resume 的裸形式在唯一运行完成后仍可解析(P2 回修: 原版 done 后裸命令全部
+    不可达, 'done 后幂等重渲染'面不传 --run-dir 无法触达, 用户被要求重新
+    start 才能看到已完成的报告)。
+    """
     if explicit:
         return Path(explicit).resolve()
-    for entry in list_runs(cwd):
+    runs = list_runs(cwd)
+    for entry in runs:
         if not entry.get("done") and not entry.get("corrupt"):
             return Path(entry["run_dir"])
+    if include_done:
+        for entry in runs:
+            if not entry.get("corrupt"):
+                return Path(entry["run_dir"])
     return None
 
 

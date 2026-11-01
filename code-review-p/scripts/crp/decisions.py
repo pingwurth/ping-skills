@@ -248,6 +248,28 @@ def carrier_work(state: State, ctx: RouteCtx) -> Decision:
 # --------------------------------------------------------------------------- #
 # 扫描与验证 do_work
 # --------------------------------------------------------------------------- #
+def _cap(plan_val, override):
+    """override 为合法正整数时取 min(只收紧不放宽), 否则用 plan 值。"""
+    if isinstance(override, int) and not isinstance(override, bool) and override >= 1:
+        return min(plan_val, override) if isinstance(plan_val, int) else override
+    return plan_val
+
+
+def effective_limits(state: State) -> tuple[Optional[int], int]:
+    """生效的 (max_agents, max_concurrent)。
+
+    P2 回修: carrier 提交的 max_agents/max_concurrent 原版校验入库后无任何
+    消费(死旋钮 —— 限流环境按 submissions.md 提交 {"max_concurrent": 1} 后
+    扫描/验证指令与载体 1 workflow 参数照读计划值)。现在与扫描计划取 min,
+    只收紧不放宽; 载体未提交覆盖时即计划值。
+    """
+    plan = state.sweep_plan or {}
+    carrier = state.carrier or {}
+    mc_plan = plan.get("max_concurrent") or config.max_concurrent_agents()
+    return (_cap(plan.get("max_agents"), carrier.get("max_agents")),
+            _cap(mc_plan, carrier.get("max_concurrent")))
+
+
 def _gap_digest(state: State) -> str:
     """gap 轮的 already-found digest: kept 逐条(≤50), 之后按文件卷展。
 
@@ -291,7 +313,7 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
 
     # 初扫(fix_review 也是一轮全角度 quick 语义扫描)
     angles = pending or plan.get("angles") or []
-    max_conc = plan.get("max_concurrent") or config.max_concurrent_agents()
+    max_agents_eff, max_conc = effective_limits(state)
     common = (
         "逐角度生成候选: 生成自由、不做过滤(置信度/严重度只记录不拦截); "
         "同一行不同机制 = 两条候选; 每角度上限 8 条。\n"
@@ -311,7 +333,7 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
             "workflows/deep-review.js, args 携带 "
             "{brief: <02-brief.md 全文>, scope: <scope_command>, cwd: <仓库绝对路径>, "
             f"angles: {angles}, maxRounds: {plan.get('max_rounds')}, "
-            f"maxAgents: {plan.get('max_agents')}, concurrency: {max_conc}}}。\n"
+            f"maxAgents: {max_agents_eff}, concurrency: {max_conc}}}。\n"
             "运行结束后, 把工具结果中的 transcriptDir 路径原样写入 output 文件(单行)。\n"
             "若 journal 不可读, 改写压缩 journal JSON 到同一文件(引擎按内容嗅探)。"
         )
@@ -356,7 +378,7 @@ def verify_work(state: State, ctx: RouteCtx) -> Decision:
             "summary": c.get("summary"), "failure_scenario": c.get("failure_scenario"),
             "severity": c.get("severity"), "lenses": lenses,
         })
-    max_conc = (state.sweep_plan or {}).get("max_concurrent") or config.max_concurrent_agents()
+    max_conc = effective_limits(state)[1]
     instructions = (
         "对抗验证: 逐候选逐透镜尝试**反驳**。读真实代码并引证原文; 检查别处守卫"
         "(调用方/包装器/框架默认/类型系统); 能否精确命名触发输入态; 可廉价实证则实证"

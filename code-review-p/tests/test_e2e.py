@@ -768,3 +768,131 @@ def test_p1_drift重导范围后重评overlay信任(tmp_path):
     payload2, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
                                "--choice", "new_scope"])
     assert rc == config.EXIT_STATE and "错序答复" in payload2["summary"]
+
+
+# ── P2 回修回归: 状态机/生命周期(2026-11-02 全面审查) ─────────────────
+def test_p2_逃逸口后resume重问而非静默空审(tmp_path):
+    """P2 回归: 逃逸口 ask 不落 pending_question、phase 停在 overlay ——
+    原版一条普通 resume 即绕过 '禁止静默空审' 门禁在空范围上跑完审查。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n"}, "init")  # 干净树+单分支 → 全梯级空
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    assert payload["next_step"]["type"] == "ask_user"
+    assert "所有 diff 源都为空" in payload["next_step"]["question"]
+    choice_opt = next(o for o in payload["next_step"]["resume"] if o["option"] == "choice")
+    run_dir = choice_opt["params"][choice_opt["params"].index("--run-dir") + 1]
+    # 模拟崩溃后新会话裸 resume: 必须重问逃逸口, 不得进入 do_work
+    payload2, rc = d.run_argv(["resume", "--run-dir", run_dir])
+    assert payload2["next_step"]["type"] == "ask_user"
+    assert "所有 diff 源都为空" in payload2["next_step"]["question"]
+    # 给出目标后照常推进
+    repo.edit({"src/a.py": "x = 2\n"})
+    payload3, _ = d.run_argv(["answer", "--run-dir", run_dir, "--key", "scope",
+                              "--choice", "choice", "--value", "src/a.py"])
+    assert payload3["next_step"]["type"] == "do_work"
+    d._note_run_dir(payload3["next_step"])
+    final = d.drive(payload3)
+    assert final["next_step"]["type"] == "finish"
+
+
+def test_p2_start指向已有运行不覆写(tmp_path, quick_repo):
+    """P2 回归: 防覆盖守卫原版仅在无 --run-dir 时生效 —— 显式传入即用全新
+    state 无提示覆写中断运行/已完成运行的 state.json。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick")
+    d._note_run_dir(payload["next_step"])
+    before = (d.run_dir / "state.json").read_text(encoding="utf-8")
+    p2, rc = d.run_argv(["start", "--run-dir", str(d.run_dir), "--mode", "standard"])
+    assert rc == config.EXIT_CONTINUE and p2["next_step"]["type"] == "ask_user"
+    assert "已有 state.json" in p2["next_step"]["question"]
+    assert (d.run_dir / "state.json").read_text(encoding="utf-8") == before, \
+        "未确认前不得覆写既有运行状态"
+    # --force 保留逃生门(确需覆盖)
+    p3, rc = d.run_argv(["start", "--run-dir", str(d.run_dir), "--mode", "quick", "--force"])
+    assert p3["next_step"]["type"] == "do_work"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["mode"] == "quick"
+
+
+def test_p2_drift重导全空不再静默空审(tmp_path):
+    """P2 回归: drift new_scope 重导后全空时不检查 escape_hatch —— 原版在
+    零文件范围上继续扫描(scope-answer 分支有逃逸口重问, 此分支没有)。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "standard")
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+        if "candidates" in str(ns.get("submit", {}).get("params", [])):
+            break
+    repo.commit({"src/a.py": "x = 2\n"}, "moved on")  # 提交全部改动 → 树干净
+    payload, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert payload["next_step"]["type"] == "ask_user"  # drift 询问
+    payload, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
+                             "--choice", "new_scope"])
+    assert payload["next_step"]["type"] == "ask_user", "重导全空 → 逃逸口重问"
+    assert "所有 diff 源都为空" in payload["next_step"]["question"]
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["scope"].get("escape_hatch"), "逃逸口必须落盘"
+    assert state["pending_question"]["key"] == "scope"
+
+
+def test_p2_done后裸report_status_resume可达(tmp_path, quick_repo):
+    """P2 回归: resolve_run_dir 只认未完成运行 —— 唯一运行完成后, 裸形式
+    report/status/resume 全部不可达(文档展示的 done 后幂等重渲染面失效)。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "quick")
+    final = d.drive(payload)
+    assert final["next_step"]["type"] == "finish"
+    p, rc = d.run_argv(["report"])  # 裸 report: done 后幂等重渲染
+    assert rc == config.EXIT_OK and p["next_step"]["type"] == "finish"
+    assert p["next_step"].get("report") and "rounds=1" in p["next_step"]["report"]
+    p2, _ = d.run_argv(["status"])  # 裸 status: 仍能解析该运行
+    assert p2["status"] == "success" and "phase=done" in p2["summary"]
+    p3, rc3 = d.run_argv(["resume"])  # 裸 resume: 重发 finish 块与逐字报告
+    assert rc3 == config.EXIT_OK and p3["next_step"]["type"] == "finish"
+    assert p3["next_step"].get("report")
+
+
+def test_p2_report阶段提前渲染被拒(tmp_path, quick_repo):
+    """P2 回归: cmd_report 原版放行 phase=report(details 未提交)—— 提前调用
+    用空 details 渲染占位报告并以 finish/exit-0 终结整个审查。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    while payload["next_step"]["type"] == "do_work":  # 推进到 details do_work
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        kind = ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1]
+        if kind == "details":
+            break
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "do_work"
+    p, rc = d.run_argv(["report"])
+    assert rc == config.EXIT_STATE
+    assert "报告完成后可用" in p["summary"]
+    assert "details 尚未提交" in p["next_step"]["question"]
+    # 审查未被终结: 路由器恢复仍等待 details
+    p2, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert p2["next_step"]["type"] == "do_work"
+    final = d.drive(p2)
+    assert final["next_step"]["type"] == "finish"
+
+
+def test_p2_status的kept实时口径(tmp_path, quick_repo):
+    """P2 回归: status 的 kept 原版读 kept_after_thresholds(唯一写入点在
+    report.render)—— verify 终裁后、details 前查询恒报 kept=0。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    while payload["next_step"]["type"] == "do_work":  # 推进到 phase=report
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        kind = ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1]
+        if kind == "details":
+            break
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    kept = sum(1 for c in state["candidates"] if c.get("kept"))
+    assert kept > 0, "前置: 终裁后应有 kept 候选"
+    p, _ = d.run_argv(["status", "--run-dir", str(d.run_dir)])
+    assert f"kept={kept}" in p["summary"], "status 必须报实时 kept 口径"

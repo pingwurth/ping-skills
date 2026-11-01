@@ -99,6 +99,26 @@ def _scope_escape_ask(sc: dict, run_dir: Path) -> Decision:
         ])
 
 
+def _overwrite_ask(run_dir: Path) -> Decision:
+    """start --run-dir 指向已有运行时的防覆盖询问(P2 回修)。
+
+    原版防覆盖守卫仅在无 --run-dir 时生效 —— 显式传入即跳过, 中断运行的
+    台账/选票/已完成运行的报告状态被全新 state 无提示覆写。
+    """
+    return Decision(
+        status="needs_input", exit_code=config.EXIT_CONTINUE,
+        summary="start --run-dir 指向已有运行", route=Route.ASK_USER,
+        reason="防止既有运行被新跑覆盖",
+        question=(f"--run-dir {run_dir} 下已有 state.json。\n"
+                  "续跑该运行, 还是放弃本次 start?(确需覆盖用 start --force)"),
+        resume=[
+            ResumeOption("resume_run", "续跑该运行",
+                         script=config.ENTRY_FILENAME,
+                         params=["resume", "--run-dir", str(run_dir)]),
+            ResumeOption("terminate", "放弃本次 start"),
+        ])
+
+
 def _drift_ask(recorded_head: Optional[str], current_head: Optional[str], run_dir: Path) -> Decision:
     return Decision(
         status="needs_input", exit_code=config.EXIT_CONTINUE,
@@ -132,8 +152,9 @@ def _drift_gate(state: State, run_dir: Path) -> Optional[Decision]:
     return None
 
 
-def _resolve_entry_point(args) -> tuple[Path, StateStore]:
-    run_dir = resolve_run_dir(getattr(args, "run_dir", None), Path.cwd())
+def _resolve_entry_point(args, include_done: bool = False) -> tuple[Path, StateStore]:
+    run_dir = resolve_run_dir(getattr(args, "run_dir", None), Path.cwd(),
+                              include_done=include_done)
     if run_dir is None:
         raise StepError.state_error(
             "未找到可续跑运行", "当前仓库无运行记录 —— 先执行 crp.py start")
@@ -176,10 +197,18 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
     target = args.target
     fix_requested = bool(args.fix)
 
+    # P2 回修: start --run-dir 指向已有运行 → 防覆盖(原版守卫仅在无 --run-dir
+    # 时生效, 显式传入即无提示覆写中断运行/已完成运行的 state.json)
+    if args.run_dir and not args.force:
+        existing = Path(args.run_dir).resolve()
+        if (existing / config.STATE_FILENAME).is_file():
+            return _overwrite_ask(existing), EmitContext(run_dir=existing)
+
     if not gitops.is_git_repo(cwd):
         sc = {"escape_hatch": {"probes": [
             {"cmd": "git rev-parse --is-inside-work-tree", "rc": 1, "empty": True}]}}
         state = _new_state(cwd, mode, fix_requested, target, sc)
+        state.pending_question = {"key": "scope", "at": _now()}
         run_dir = _place_state(args, state)
         return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
 
@@ -192,6 +221,9 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
 
     sc = scope_mod.resolve_scope(cwd, target)
     state = _new_state(cwd, mode, fix_requested, target, sc)
+    if sc.get("escape_hatch"):
+        # P2 回修: 逃逸口 ask 落 pending_question(resume 侧据此重问, 见 cmd_resume)
+        state.pending_question = {"key": "scope", "at": _now()}
     run_dir = _place_state(args, state)
 
     if sc.get("escape_hatch"):
@@ -237,11 +269,22 @@ def _place_state(args, state: State) -> Path:
 # resume / next
 # --------------------------------------------------------------------------- #
 def cmd_resume(args) -> tuple[Decision, EmitContext]:
-    run_dir, store = _resolve_entry_point(args)
+    # include_done(P2 回修): 唯一运行已完成时, 裸 resume 重发 finish 块与逐字
+    # 报告(原版报错要求重新 start, done 后幂等面不传 --run-dir 不可达)
+    run_dir, store = _resolve_entry_point(args, include_done=True)
     with store.locked():
         state, err = load_state_or_error(store, "resume 失败")
         if err is not None:
             return err, EmitContext(run_dir=run_dir)
+        if state.is_done:
+            return decisions.decide_next(state, _ctx(state, run_dir)), \
+                EmitContext(run_dir=run_dir, state=state)
+        # P2 回修: 范围逃逸口存活时不得继续 —— 原版 resume 只看 phase, 一条普通
+        # resume 即绕过 '禁止静默空审' 门禁在空范围上跑完整场审查
+        if state.scope.get("escape_hatch"):
+            state.pending_question = {"key": "scope", "at": _now()}
+            _touch(state); store.save(state)
+            return _scope_escape_ask(state.scope, run_dir), EmitContext(run_dir=run_dir, state=state)
         drift = _drift_gate(state, run_dir)
         if drift is not None:
             store.save(state)
@@ -478,11 +521,13 @@ def _validate_carrier(data: object) -> list[str]:
         errs.append("carrier 必须是 1|2|3")
     if not str(data.get("reason") or "").strip():
         errs.append("reason 必须非空(载体留痕 —— 静默降级不可审计)")
+    # P2 回修: 显式排除 bool —— isinstance(True, int) 为真, 原版 {'max_concurrent': true}
+    # 过校验入库(对照 ledger.py 对 line/confidence 的同类处理)
     ma = data.get("max_agents")
-    if ma is not None and (not isinstance(ma, int) or ma < 1):
+    if ma is not None and (isinstance(ma, bool) or not isinstance(ma, int) or ma < 1):
         errs.append("max_agents 必须是正整数或缺省")
     mc = data.get("max_concurrent")
-    if mc is not None and (not isinstance(mc, int) or mc < 1):
+    if mc is not None and (isinstance(mc, bool) or not isinstance(mc, int) or mc < 1):
         errs.append("max_concurrent 必须是正整数或缺省")
     return errs
 
@@ -699,6 +744,13 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                                 reason="用户选择终止", question="已按用户指示终止本次审查。"), EmitContext(run_dir=run_dir, state=state)
             if choice == "new_scope":
                 sc = scope_mod.resolve_scope(cwd, state.target)
+                if sc.get("escape_hatch"):
+                    # P2 回修: 重导后全空 → 逃逸口重问(scope-answer 分支同款),
+                    # 不得在零文件范围上静默空审
+                    state.scope = sc
+                    state.pending_question = {"key": "scope", "at": _now()}
+                    _touch(state); store.save(state)
+                    return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
                 state.scope = sc
                 # P1 回修: 重导范围后必须重评 overlay 信任 —— 被新 diff 触及的
                 # overlay 不得沿用 trusted(A3/A4 信任边界不得被 drift 分支绕开)。
@@ -748,15 +800,18 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
 # report(幂等重渲染)
 # --------------------------------------------------------------------------- #
 def cmd_report(args) -> tuple[Decision, EmitContext]:
-    run_dir, store = _resolve_entry_point(args)
+    # include_done(P2 回修): done 后裸形式可解析(原版唯一运行完成后不可达)
+    run_dir, store = _resolve_entry_point(args, include_done=True)
     with store.locked():
         state, err = load_state_or_error(store, "report 失败")
         if err is not None:
             return err, EmitContext(run_dir=run_dir)
-        if state.phase not in ("report", "fix", "done"):
+        # P2 回修: phase=report 表示 details 尚未提交 —— 原版放行此相位, 提前
+        # 调用会用空 details 渲染占位报告并以 finish/exit-0 终结整个审查
+        if state.phase not in ("fix", "done"):
             raise StepError.state_error(
-                f"report 仅在报告阶段可用(当前 phase={state.phase})",
-                "details 提交后报告由引擎渲染; 此命令用于 done 后幂等重渲染。")
+                f"report 仅在报告完成后可用(当前 phase={state.phase})",
+                "details 尚未提交 —— 先完成 05-details 提交; 此命令用于 done 后幂等重渲染。")
         details = state.report.get("details") or {}
         text = report.render(state, details)
         out = store.out_dir() / "report.md"
@@ -788,14 +843,18 @@ def _state_metrics(state) -> dict:
         "candidates_seen": acc.get("total_seen", 0),
         "dup_dropped": acc.get("dup_dropped", 0),
         "refuted": acc.get("refuted", 0),
-        "kept": acc.get("kept_after_thresholds", 0),
+        # P2 回修: kept 实时取台账(原版读 kept_after_thresholds, 唯一写入点在
+        # report.render —— verify 阶段候选已 kept=True 时 status 仍报 kept=0)
+        "kept": sum(1 for c in state.candidates if c.get("kept")),
         "carrier": state.carrier.get("carrier"),
         "pending_question": (state.pending_question or {}).get("key"),
     }
 
 
 def cmd_status(args) -> tuple[Decision, EmitContext]:
-    run_dir = resolve_run_dir(getattr(args, "run_dir", None), Path.cwd())
+    # include_done(P2 回修): 唯一运行完成后裸 status 仍能解析它
+    run_dir = resolve_run_dir(getattr(args, "run_dir", None), Path.cwd(),
+                              include_done=True)
     if run_dir is None:
         return Decision(
             status="empty", exit_code=config.EXIT_OK, summary="当前仓库无运行记录",
