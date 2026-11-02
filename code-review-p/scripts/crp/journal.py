@@ -210,6 +210,14 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
                 state.accounting["invalid_votes"] = \
                     state.accounting.get("invalid_votes", 0) + 1
                 continue
+            # P10 回修(c021): (id,lens) 唯一性 —— 与 validate_votes_file 对齐,
+            # 重复透镜票在法定人数里双计可翻转裁决(实证 [C,C,R,R*]→PLAUSIBLE)
+            if lens in {v.get("lens") for v in (cand.get("votes") or [])}:
+                state.accounting["dup_lens_votes"] = \
+                    state.accounting.get("dup_lens_votes", 0) + 1
+                module_logger().warning(
+                    f"journal 重复透镜票丢弃: {cand.get('id')} lens={lens}")
+                continue
             cand.setdefault("votes", []).append({
                 "lens": lens,
                 "verdict": result.get("verdict"),

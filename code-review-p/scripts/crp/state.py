@@ -358,10 +358,20 @@ class StateStore:
         meta = {"run_id": state.run_id, "mode": state.mode, "phase": state.phase,
                 "target": state.target, "done": state.is_done,
                 "updated_at": state.updated_at}
+        meta_path = path.with_name(config.META_FILENAME)
         meta_tmp = path.with_name(config.META_FILENAME + ".tmp")
         try:
             with open(meta_tmp, "w", encoding="utf-8") as fp:
                 json.dump(meta, fp, ensure_ascii=False)
-            os.replace(meta_tmp, path.with_name(config.META_FILENAME))
+                fp.flush()
+                os.fsync(fp.fileno())  # P10(c017): 无 fsync 的 replace 掉电可留零字节 meta
+            os.replace(meta_tmp, meta_path)
         except OSError:
-            pass  # 边车失败不影响状态写入(list_runs 回退 state.json)
+            # P10 回修(c017): 边车写失败必须删除 —— 陈旧 meta(done=false)会让
+            # list_runs 永远把 done 运行当未完成(start 循环追问唯 --force 逃),
+            # 删掉即回退 state.json(真相源); done 运行不再 save, 无自愈机会
+            try:
+                meta_path.unlink(missing_ok=True)
+                meta_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass

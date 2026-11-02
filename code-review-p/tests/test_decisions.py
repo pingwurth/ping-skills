@@ -263,3 +263,19 @@ def test_p8_kept上下文单一形状():
     expected = [{"id": "c001", "severity": "P1", "location": "a.py:9",
                  "summary": "kept context shape defect"}]
     assert rep.context["kept"] == fix.context["kept"] == expected
+
+
+def test_p10_载体23指令携带总预算(monkeypatch):
+    """P10 回修(c025): effective max_agents 原只在载体 1 args 消费 —— 载体
+    2/3 的扫描/验证指令只提并发, submissions.md 的"生效于扫描/验证指令"半句
+    未兑现(死旋钮)。"""
+    st = _state(phase="sweep", carrier={"carrier": 2, "reason": "429", "max_agents": 30})
+    st.cursor["pending_angles"] = ["A"]
+    d = decisions.sweep_work(st, CTX)
+    assert f"总 spawn 预算 ≤ 30" in d.instructions, "扫描指令必须携带生效总预算"
+    stv = _state(phase="verify", carrier={"carrier": 2, "reason": "r", "max_agents": 30})
+    stv.candidates = [{"id": "c001", "file": "a.py", "line": 1, "summary": "s",
+                       "failure_scenario": "f", "severity": "P2"}]
+    stv.cursor["pending_verify"] = [{"id": "c001", "lenses": ["correctness"]}]
+    dv = decisions.verify_work(stv, CTX)
+    assert "总预算 ≤ 30" in dv.instructions, "验证指令必须携带生效总预算"

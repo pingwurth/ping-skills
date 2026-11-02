@@ -761,13 +761,28 @@ def test_p1_drift重导范围后重评overlay信任(tmp_path):
                              "--choice", "new_scope"])
     state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
     ov = state["overlay"]
+    # P10(c009)语义升级: 重导范围后一律回 overlay 阶段重新提取(替代挂起旧
+    # content)—— 信任降级即时可见, 内容/门禁/排除待重提取后按新信任处理
+    assert state["phase"] == "overlay" and state["cursor"]["awaiting"] == "overlay"
     assert ov["trust"] == "untrusted", "新 diff 触及 overlay → 必须降级"
-    assert ov["exclusions_applied"] == [] and ov["exclusions_suspended"] == ["gen/"]
-    assert all(g["approval"] != "auto" for g in ov["gates"]), "auto 批复必须回落(fail-closed)"
+    assert not ov.get("content"), "陈旧 content 不得沿用(待重提取)"
+    assert ov["gates"] == [], "旧门禁/批复不随行(重提取后 A4 重问)"
     # 陈旧 drift 答复重放同样被拒
     payload2, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
                                "--choice", "new_scope"])
     assert rc == config.EXIT_STATE and "错序答复" in payload2["summary"]
+    # 重提取闭环: 提交 overlay(带旧排除项) → untrusted 挂起 + 门禁待确认
+    ns = payload["next_step"]
+    assert ns["type"] == "do_work"
+    Path(ns["output"]).write_text(json.dumps({
+        "red_lines": [], "gates": [{"command": "make check", "semantics": "read_only"}],
+        "exclusions": ["gen/"], "invariants": []}, ensure_ascii=False), encoding="utf-8")
+    payload, _ = d.run_argv(ns["submit"]["params"])
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    ov = state["overlay"]
+    assert ov["exclusions_suspended"] == ["gen/"] and ov["exclusions_applied"] == []
+    assert ov["gates"][0]["approval"] == "unset", "untrusted 门禁必须待确认(A4)"
+    assert state["phase"] == "brief", "重提取完成 → brief(无待确认门禁时)"
 
 
 # ── P2 回修回归: 状态机/生命周期(2026-11-02 全面审查) ─────────────────
@@ -1185,3 +1200,63 @@ def test_p9_journal多票升级按高危quorum(tmp_path):
     assert c1["verdict"] == "CONFIRMED", "2C/3 高危严格多数 → CONFIRMED(原版 votes[0]=REFUTED 误杀)"
     c2 = run([("correctness", "CONFIRMED"), ("reproduction", "REFUTED"), ("security", "REFUTED")])
     assert c2["verdict"] == "REFUTED", "2R/3 → REFUTED(原版 votes[0]=CONFIRMED 误留)"
+
+
+# ── P10 回修回归: 自食验收 P2(2026-11-02 下午) ───────────────────────
+def test_p10_drift在途时gates答复被拒且不抹待决(tmp_path):
+    """P10 回归(c015/c033): gates 守卫原只查相位 —— drift 待决在途时重放的
+    gates 答复被放行并抹掉漂移标记, 载体 1 整场工作在下次 submit 被弹回。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    while payload["next_step"]["type"] in ("do_work", "ask_user"):  # 到 gates 询问
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        if ns["type"] == "ask_user":
+            break
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "ask_user"  # gates 询问(overlay→brief 后)
+    repo.commit({"src/b.py": "b = 1\n"}, "moved on")  # 装配 drift 待决
+    payload, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert payload["next_step"]["type"] == "ask_user"  # drift 询问, 相位仍 gates
+    # 重放 gates 答复: 必须被拒(drift 在途), 且不得抹掉 drift 标记
+    p, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "gates",
+                        "--choice", "approve_all"])
+    assert rc == config.EXIT_STATE and "错序答复" in p["summary"]
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["pending_question"] == {"key": "drift", "at": state["pending_question"]["at"]}
+    # 答 drift 后 gates 询问重新可达(相位未推进)
+    payload, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
+                             "--choice", "resume_old_scope"])
+    assert payload["next_step"]["type"] == "ask_user"
+
+
+def test_p10_journal重复透镜票丢弃(tmp_path):
+    """P10 回归(c021): journal 摄取缺 (id,lens) 唯一性 —— 重复透镜票在法定
+    人数里双计, [C,C,R,R*] 聚合 PLAUSIBLE 而干净三透镜 [C,C,R] 得 CONFIRMED。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 5, "summary": "dup lens vote defect one",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P1",
+         "category": "correctness"}]}],
+        "verdicts": [
+            {"file": "a.py", "line": 5, "summary": "dup lens vote defect one",
+             "lens": "correctness", "verdict": "CONFIRMED", "evidence": "q", "severity": "P1"},
+            {"file": "a.py", "line": 5, "summary": "dup lens vote defect one",
+             "lens": "correctness", "verdict": "REFUTED", "evidence": "q", "severity": "P1"},  # 重复透镜
+            {"file": "a.py", "line": 5, "summary": "dup lens vote defect one",
+             "lens": "reproduction", "verdict": "CONFIRMED", "evidence": "q", "severity": "P1"},
+            {"file": "a.py", "line": 5, "summary": "dup lens vote defect one",
+             "lens": "security", "verdict": "CONFIRMED", "evidence": "q", "severity": "P1"},
+        ], "counters": {}}
+    journal_mod.apply_compact(st, data)
+    c = next(c for c in st.candidates if c["status"] != "dup")
+    lenses = [v["lens"] for v in c["votes"]]
+    assert lenses == ["correctness", "reproduction", "security"], "重复透镜票必须丢弃"
+    assert st.accounting.get("dup_lens_votes") == 1
+    assert c["verdict"] == "CONFIRMED", "干净三透镜 2C/3 → CONFIRMED(原双计得 PLAUSIBLE)"

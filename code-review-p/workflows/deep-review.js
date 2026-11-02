@@ -134,7 +134,10 @@ const JOURNAL_EVIDENCE_CHARS = 4000
 // ── agent budget: overflow degrades before it stops ──
 // Default scales with fan-out width (v1.4.1 #12): a 12-angle whole-file sweep
 // easily yields 40+ candidates — a flat 45 strangles verification mid-flight.
-const maxAgents = Math.max(12, args?.maxAgents ?? Math.max(45, angles.length * 8))
+// args.maxAgents is honored as-is when present (engine sends min(plan, carrier
+// override) — a rate-limited user's tightening of 1-11 must not be silently
+// floored back up; only the DEFAULT scales with fan-out width.
+const maxAgents = Math.max(1, args?.maxAgents ?? Math.max(45, angles.length * 8))
 let agentsSpawned = 0
 const take = n => {
   if (agentsSpawned + n > maxAgents) return false

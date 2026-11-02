@@ -317,7 +317,8 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
         "候选 file 一律仓库相对路径(正斜杠); cleanup(I)/altitude(J)/conventions(K) 的 "
         "failure_scenario 写具体成本而非崩溃。\n"
         f"spawn 子代理(载体 2)必须分波: 同时在飞 ≤ {max_conc}"
-        "(限流保护), 一个完成再补一个 —— 不要一次扇出全部角度。"
+        "(限流保护), 一个完成再补一个 —— 不要一次扇出全部角度; "
+        f"总 spawn 预算 ≤ {max_agents_eff} 个 agent(含 refuter)。"
     )
     # P1 回修: 载体 1 只服务初扫轮 —— fix_review 轮下发 carrier1 会因 submit
     # 的种类核对只认 phase=='sweep' 而无限错序 exit-3 循环(LLM 逐字执行协议
@@ -381,7 +382,7 @@ def verify_work(state: State, ctx: RouteCtx) -> Decision:
             "summary": c.get("summary"), "failure_scenario": c.get("failure_scenario"),
             "severity": c.get("severity"), "lenses": lenses,
         })
-    max_conc = effective_limits(state)[1]
+    max_agents_eff, max_conc = effective_limits(state)
     instructions = (
         "对抗验证: 逐候选逐透镜尝试**反驳**。读真实代码并引证原文; 检查别处守卫"
         "(调用方/包装器/框架默认/类型系统); 能否精确命名触发输入态; 可廉价实证则实证"
@@ -391,7 +392,7 @@ def verify_work(state: State, ctx: RouteCtx) -> Decision:
         f"透镜: correctness=代码是否如 finding 所称 / reproduction=构造具体触发 / "
         f"security=真实信任边界与影响。\n"
         f"spawn 子代理分波进行: 同时在飞 ≤ {max_conc}"
-        "(限流保护), 一个完成再补一个。\n"
+        f"(限流保护), 总预算 ≤ {max_agents_eff} 个 agent, 一个完成再补一个。\n"
         f"批次 {len(batch)}/{len(pending)}; P0/P1 需全部所列透镜各一票。"
     )
     return _do_work(

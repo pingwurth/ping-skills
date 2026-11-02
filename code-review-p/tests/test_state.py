@@ -190,3 +190,34 @@ def test_p8_同进程嵌套加锁不自锁(tmp_path):
     proc = subprocess.run([sys.executable, "-c", code],
                           capture_output=True, text=True, timeout=15)
     assert proc.returncode == 0 and "NESTED_OK" in proc.stdout
+
+
+def test_p10_meta写失败删边车回退state(crp_home, tmp_path):
+    """P10 回修(c017): meta 边车写失败被吞掉且留下陈旧 done=false —— done
+    运行不再 save, list_runs 永远把它当未完成(裸 start 循环追问)。写失败必须
+    删除边车让列举回退 state.json(真相源)。"""
+    import json
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rd = create_run_dir(repo)
+    store = StateStore(rd)
+    store.save(State(run_id=rd.name, mode="quick", phase="done"))
+    assert (rd / config.META_FILENAME).is_file()
+    # 模拟终写崩溃: 对 meta 目标的 os.replace 抛 ENOSPC
+    import os as _os
+    real_replace = _os.replace
+    def failing_replace(src, dst, *a, **kw):
+        if str(dst).endswith(config.META_FILENAME):
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst, *a, **kw)
+    import crp.state as state_mod
+    orig = state_mod.os.replace
+    state_mod.os.replace = failing_replace
+    try:
+        store.save(State(run_id=rd.name, mode="quick", phase="sweep", updated_at="t2"))
+    finally:
+        state_mod.os.replace = orig
+    # 边车必须被删(回退 state.json), 而非留 stale done=true
+    assert not (rd / config.META_FILENAME).exists(), "写失败的陈旧 meta 必须删除"
+    runs = list_runs(repo)
+    assert len(runs) == 1 and runs[0]["phase"] == "sweep" and runs[0]["done"] is False

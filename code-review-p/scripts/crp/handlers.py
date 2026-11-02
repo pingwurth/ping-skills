@@ -146,6 +146,10 @@ def _drift_ask(recorded_head: Optional[str], current_head: Optional[str], run_di
 def _drift_gate(state: State, run_dir: Path) -> Optional[Decision]:
     """漂移探测: HEAD 移动 → ask_user; 工作树变化 → 仅警告(由调用方并入 summary)。"""
     cwd = (state.repo or {}).get("cwd") or str(Path.cwd())
+    if state.scope.get("escape_hatch"):
+        # P10 回修: 范围逃逸期不装配 drift 待决 —— 范围未定谈不上漂移,
+        # 且覆写 pending_question 会丢掉 scope 待决(互踩主源)
+        return None
     current = scope_mod.current_signature(cwd)
     drift = scope_mod.drift_between(scope_mod.signature_of(state.repo), current)
     if drift == "head_moved":
@@ -670,9 +674,13 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
         # 每类答复只在对应待决问题存活时合法; 与 submit 的错序自愈对齐,
         # 拒绝时交回路由器(429 中断后重贴旧命令是最常见的触发方式)。
         if key == "scope":
-            stale = not state.scope.get("escape_hatch")
+            stale = (not state.scope.get("escape_hatch")
+                     or (state.pending_question or {}).get("key") == "drift")
         elif key == "gates":
-            stale = state.phase != "gates"
+            # P10 回修(c015/c033): gates 问题不入 pending_question, 守卫原只查
+            # 相位 —— drift 待决在途时重放的 gates 答复被放行并抹掉漂移标记
+            stale = (state.phase != "gates"
+                     or (state.pending_question or {}).get("key") == "drift")
         elif key == "drift":
             stale = (state.pending_question or {}).get("key") != "drift"
         elif key == "run":
@@ -706,7 +714,9 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                     _touch(state); store.save(state)
                     return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
                 _init_overlay_state(state, cwd_a)
-                state.pending_question = None
+                # P10 回修(c015): 不抹在途 drift 待决
+                if (state.pending_question or {}).get("key") != "drift":
+                    state.pending_question = None
                 _touch(state); store.save(state)
                 d = decisions.decide_next(state, _ctx(state, run_dir))
                 return d, EmitContext(run_dir=run_dir, state=state)
@@ -738,7 +748,9 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                     g["approval"] = "approved" if b == "1" else "denied"
             else:
                 raise StepError.state_error("gates 答复需要 approve_all/skip_all/choice+--value")
-            state.pending_question = None
+            # P10 回修(c015): 不抹在途 drift 待决(下次 submit/resume 会重问)
+            if (state.pending_question or {}).get("key") != "drift":
+                state.pending_question = None
             # P1 回修: gates 答复不得越过 brief —— brief 未建时回 brief 阶段。
             # 正常流程(overlay→brief→gates)此处 brief 必已建好; 该分支同时兜住
             # 修复前遗留的旧 state(phase=gates 且 brief 为空的中断运行)。
@@ -767,28 +779,12 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                     _touch(state); store.save(state)
                     return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
                 state.scope = sc
-                # P1 回修: 重导范围后必须重评 overlay 信任 —— 被新 diff 触及的
-                # overlay 不得沿用 trusted(A3/A4 信任边界不得被 drift 分支绕开)。
-                root = gitops.repo_root(Path(cwd)) or Path(cwd)
-                path_now = overlay.discover(root)
-                trust_now, basis_now = overlay.trust_of(state.scope, path_now)
-                ov = state.overlay or {}
-                ov["path"], ov["trust"], ov["trust_basis"] = path_now, trust_now, basis_now
-                excl = ((ov.get("content") or {}).get("exclusions")) or []
-                if trust_now == "trusted" and excl:
-                    # 仍可信: 排除项对新范围照常应用(新 scope 尚未应用过)
-                    scope_mod.apply_exclusions(state.scope, excl, "overlay")
-                    ov["exclusions_applied"] = excl
-                    ov["exclusions_suspended"] = []
-                else:
-                    # 降级/无 overlay: 排除项一律挂起(新 scope 本就未应用), 已有
-                    # auto 批复回落待确认 —— fail-closed, 未确认门禁一律不跑
-                    ov["exclusions_applied"] = []
-                    if excl:
-                        ov["exclusions_suspended"] = excl
-                    for g in ov.get("gates") or []:
-                        if g.get("approval") == "auto":
-                            g["approval"] = "unset"
+                # P10 回修(c009, 吸收 P1-4 手写重评块): 重导范围后一律回 overlay
+                # 阶段重新发现/提取 —— 信任判定、内容、门禁、排除全部以当前
+                # 文件为准。原版沿用中断前的 ov['content']: 旧排除施加于新
+                # 范围、已删 overlay 的用户已批门禁存活(A4 边界被绕)。
+                # _init_overlay_state(P9 起)会同时置 phase='overlay'。
+                _init_overlay_state(state, Path(cwd))
             elif choice == "resume_old_scope":
                 for c in state.candidates:
                     c["stale"] = True

@@ -405,3 +405,23 @@ def test_p7_dryRequired_单轮dry即收口():
     r = json.loads(run_node(js))
     assert r["rounds"] == 1, f"dryRequired=1 首轮 dry 即收口(实际 {r['rounds']} 轮)"
     assert r["gapRounds"] == 0, "不应再开 gap 轮"
+
+
+@requires_node
+def test_p10_js尊重下传maxAgents():
+    """P10 回修(c010): JS 原 'Math.max(12, args?.maxAgents ?? …)' 把载体收紧的
+    1-11 静默抬回 12 —— 返回值上报 12 而 state.carrier 记用户的 5, 行为与
+    审计留痕不一致; override 现原样生效(仅缺省才用扇出默认)。"""
+    body = re.sub(r"export const meta = \{.*?\n\}\n", "", script_src(), flags=re.S)
+    stub = STUB_JS.replace(
+        "maxRounds: 1, maxAgents: 60, concurrency: 3 }",
+        "maxRounds: 1, maxAgents: 5, concurrency: 3 }")
+    js = (
+        "const run = async (args, agent, parallel, pipeline, phase, log, budget) => {\n"
+        + body + "\n};\n" + stub + "\n"
+        + "run(args, agent, parallel, pipeline, phase, log, budget).then(out => {\n"
+        + "  console.log(JSON.stringify({maxAgents: out.maxAgents}));\n"
+        + "}).catch(e => { console.error('SCRIPT_THREW', e); process.exit(9); });\n"
+    )
+    r = json.loads(run_node(js))
+    assert r["maxAgents"] == 5, f"下传 5 必须生效(原版被 Math.max(12,…) 抬到 12): {r}"
