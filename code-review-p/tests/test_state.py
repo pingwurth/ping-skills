@@ -221,3 +221,51 @@ def test_p10_meta写失败删边车回退state(crp_home, tmp_path):
     assert not (rd / config.META_FILENAME).exists(), "写失败的陈旧 meta 必须删除"
     runs = list_runs(repo)
     assert len(runs) == 1 and runs[0]["phase"] == "sweep" and runs[0]["done"] is False
+
+
+# ── P11 回修回归: 自食验收 P3(2026-11-02 下午) ───────────────────────
+def test_p11_迁移畸形dict返回None(crp_home, tmp_path):
+    """P11 回修(c032): {mode:["quick"]} / {sweep_plan:{angles:5}} 抛 TypeError
+    逃出 ValueError 捕获 → exit-2 内部错误; 现按损坏处理返回 None。"""
+    import json
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for bad, fixed_mode in (({"schema_version": 1, "mode": ["quick"]}, config.DEFAULT_MODE),
+                            ({"schema_version": 1, "sweep_plan": {"angles": 5},
+                              "mode": "deep"}, "deep")):
+        rd = create_run_dir(repo)
+        (rd / config.STATE_FILENAME).write_text(json.dumps(bad), encoding="utf-8")
+        st = StateStore(rd).load()  # 原版在此抛 TypeError 逃出 ValueError 捕获
+        assert st is not None, "防御归一后应可加载(而非按损坏丢弃)"
+        assert st.mode == fixed_mode and st.sweep_plan["angles"] == [] \
+            or isinstance(st.sweep_plan["angles"], list), "畸形字段归一为合法值"
+
+
+def test_p11_锁键异常清理与线程独立(tmp_path):
+    """P11 回修(c018/c014): utime 窗口 BaseException 不泄漏键(泄漏后本进程
+    永假持锁); _held 集合线程作用域(进程级会把'别处持锁'当'本线程持锁')。"""
+    import threading
+    from crp import state as state_mod
+    rd = tmp_path / "run"
+    rd.mkdir()
+    s = StateStore(rd)
+    real_utime = state_mod.os.utime
+
+    def boom(path, times=None):
+        raise KeyboardInterrupt
+
+    state_mod.os.utime = boom
+    try:
+        import pytest as _pytest
+        with _pytest.raises(KeyboardInterrupt):
+            with s.locked():
+                pass
+    finally:
+        state_mod.os.utime = real_utime
+    assert not state_mod._held_keys(), "异常窗口不得泄漏持锁键"
+    # 线程作用域: 另一线程的集合独立且为空
+    seen: dict = {}
+    th = threading.Thread(target=lambda: seen.update(keys=state_mod._held_keys()))
+    th.start()
+    th.join()
+    assert seen["keys"] == set(), "其它线程不得看见本线程的持锁键"

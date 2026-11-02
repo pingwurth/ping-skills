@@ -26,8 +26,8 @@ def _logger_name(script_name: str) -> str:
     return f"{config.LOGGER_NAMESPACE}.{script_name}"
 
 
-def _attach_root_runlog(script_name: str, run_dir: str | Path) -> None:
-    """把 run-dir FileHandler 挂到命名空间根(换目录时摘旧挂新)。
+def _attach_root_runlog(script_name: str, run_dir: str | Path) -> logging.Handler:
+    """把 run-dir FileHandler 挂到命名空间根(换目录时摘旧挂新), 返回该 handler。
 
     module_logger() 返回命名空间根 —— 根上挂了本 handler 后, 处理期间的
     模块告警同时落入 run-dir 日志(/tmp 兜底 handler 若已存在则继续保留)。
@@ -36,11 +36,16 @@ def _attach_root_runlog(script_name: str, run_dir: str | Path) -> None:
     global _root_runlog
     key = (script_name, str(run_dir))
     if _root_runlog is not None and (_root_runlog[1], _root_runlog[2]) == key:
-        return
+        return _root_runlog[0]
     root_logger = logging.getLogger(config.LOGGER_NAMESPACE)
     if _root_runlog is not None:
         old = _root_runlog[0]
         root_logger.removeHandler(old)
+        # P11(c020): 旧 handler 从所有借用它的子 logger 摘除 —— 借用者
+        # (setup_logger)与根共享同一实例, 换目录必须统一换新
+        for lg in _logger_cache.values():
+            if old in lg.handlers:
+                lg.removeHandler(old)
         old.close()
     log_dir = Path(run_dir) / config.LOGS_SUBDIR
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -54,13 +59,17 @@ def _attach_root_runlog(script_name: str, run_dir: str | Path) -> None:
     root_logger.setLevel(logging.DEBUG)
     root_logger.propagate = False
     _root_runlog = (handler, script_name, str(run_dir))
+    return handler
 
 
 def setup_logger(script_name: str, run_dir: str | Path) -> logging.Logger:
     """创建/复用子命令专属文件 logger(每次以 "w" 覆盖, 只留最近一次运行)。
 
-    同一 FileHandler 亦挂到命名空间根: handler 执行期间的 module_logger()
-    告警因此进入 <run-dir>/logs/<script>.log(P1 回修; 见 _attach_root_runlog)。
+    P11(c020)回修: 本 logger 与命名空间根挂**同一个** FileHandler 实例 ——
+    原版各开一个 mode='w' handler 指向同一文件, 两个独立偏移互踩: 经返回
+    logger 写一条记录会覆写 root handler 已写告警的首字节(实测), 恢复日志
+    (协议块缺失时读尾部)被毁; 同一实例偏移共享, 切换 run 时由
+    _attach_root_runlog 统一换新并从借用者摘旧。
     """
     name = _logger_name(script_name)
     cache_key = (script_name, str(run_dir))
@@ -70,18 +79,10 @@ def setup_logger(script_name: str, run_dir: str | Path) -> logging.Logger:
     logger = logging.getLogger(f"{name}.{run_dir}")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # 禁止传播到根 logger, 确保 stdout 仅用于 NEXT_STEP 协议块
-    if not logger.handlers:
-        log_dir = Path(run_dir) / config.LOGS_SUBDIR
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(
-            log_dir / f"{script_name}.log", mode="w", encoding="utf-8"
-        )
-        handler.setFormatter(
-            logging.Formatter(config.LOG_FORMAT, config.LOG_DATE_FORMAT)
-        )
+    handler = _attach_root_runlog(script_name, run_dir)
+    if handler not in logger.handlers:
         logger.addHandler(handler)
     _logger_cache[cache_key] = logger
-    _attach_root_runlog(script_name, run_dir)
     return logger
 
 

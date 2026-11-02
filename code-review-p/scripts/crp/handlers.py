@@ -379,7 +379,11 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                 else:
                     digest_src = compact_file if compact_file is not None else Path(args.file)
                 digest = hashlib.sha256(digest_src.read_bytes()).hexdigest()
-                idem = f"carrier1|{state.cursor.get('round', 0)}|{digest}"
+                # P11(c004): carrier1 幂等键不含 round —— 常规种类含 round 防
+                # 连续空 gap 轮误吞, 但 carrier1 的同一 journal 字节无论在哪个
+                # 轮次重贴都是同一份工作; 含 round 使引擎侧重开 gap 轮后的
+                # 陈旧重贴绕开吸收分支而双重入账(实证)
+                idem = f"carrier1|{digest}"
                 dup = next((s for s in state.submissions
                             if s.get("idem") == idem and s.get("applied")), None)
                 if dup is not None:
@@ -603,6 +607,13 @@ def _apply_verdicts(state: State, data: dict) -> str:
         return (f"{len(outcome.finalized)} 终裁 / {len(outcome.upgraded)} 升级补透镜; "
                 f"剩 {len(state.cursor['pending_verify'])} 条待验证")
     nxt = verify.finalize_round(state)
+    if nxt == "gap" and (state.carrier or {}).get("carrier") == 1:
+        # P11(c023/c006): 载体 1 的 gap 循环在 workflow 内部完成(契约)——
+        # 升级补透镜后不重开引擎侧 gap 轮(state.carrier 仍记 1 且
+        # degradations 空, 审计会错误归属扫描位置); 注记上报告留痕
+        state.accounting.setdefault("parity_notes", []).append(
+            "升级补透镜后按载体 1 契约直接收口(未重开引擎 gap 轮)")
+        nxt = "report"
     if nxt == "gap":
         state.phase, state.cursor["round_kind"] = "sweep", "gap"
         state.cursor["pending_angles"] = [config.GAP_ANGLE_KEY]
@@ -714,6 +725,12 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                     _touch(state); store.save(state)
                     return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
                 _init_overlay_state(state, cwd_a)
+                # P11(c037): 刷新 head/wt 签名(与 drift 分支对齐)—— 原版不刷,
+                # 下一次 submit 对用户刚裁决过的移动再发漂移询问, 误答
+                # resume_old_scope 会把全部候选标 stale(反转 new_scope 意图)
+                sig = scope_mod.current_signature(cwd_a)
+                state.repo["head"] = sig.get("head")
+                state.repo["wt_signature"] = sig.get("wt")
                 # P10 回修(c015): 不抹在途 drift 待决
                 if (state.pending_question or {}).get("key") != "drift":
                     state.pending_question = None
@@ -788,6 +805,11 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             elif choice == "resume_old_scope":
                 for c in state.candidates:
                     c["stale"] = True
+            else:
+                # P11(c028): 未知 choice 原版静默落进共尾(重置 head+清 pending+
+                # 路由)—— 用户裁决被无声丢弃且漂移永不再问(实证)
+                raise StepError.state_error(
+                    f"drift 答复需要 new_scope/resume_old_scope/terminate, 收到 {choice!r}")
             sig = scope_mod.current_signature(cwd)
             state.repo["head"] = sig.get("head")
             state.repo["wt_signature"] = sig.get("wt")

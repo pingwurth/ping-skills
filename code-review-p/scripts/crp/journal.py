@@ -286,7 +286,11 @@ def _account_rounds(state: State, to_report: bool = True) -> None:
     if hist:
         last = max(hist, key=lambda x: x.get("round", 0))
         last["kept_after_verify"] = sum(1 for c in state.candidates if c.get("kept"))
-    state.cursor["dry_streak"] = dry
+    if to_report:
+        # P11(c024/c031): 有升级候选时(to_report=False)不预置 dry_streak ——
+        # 补透镜后的 verify.finalize_round 会对同末轮再计, 原版双计使 deep
+        # 提前一轮误读收敛(实证); 直接收口路径才写全史 streak
+        state.cursor["dry_streak"] = dry
     state.accounting["rounds"] = state.cursor["round"]
     if to_report:
         state.cursor["pending_verify"] = []
@@ -335,9 +339,12 @@ def _parity_notes(state: State, js: dict) -> None:
     if diff == 0:
         return
     if diff <= py_invalid:
+        # P11(c038): 分桶差与 invalid 数在 raw 门下恒相等 —— 无法从观测区分
+        # "invalid 全解释"与"invalid+去重语义分歧并存", 原版断言"完全解释/
+        # 以后不再发生"会掩盖真实跨引擎分歧(实证); 一律引导人工对照
         notes.append(f"分桶分歧 fresh(JS={js_fresh}/Py={py_fresh}) dup(JS={js_dup}/Py={py_dup}) "
-                     f"由 {py_invalid} 条 invalid 丢弃完全解释(JS schema 未限长全收; "
-                     "生成端已补 maxLength, 以后不再发生)")
+                     f"与 {py_invalid} 条 invalid 丢弃并存 —— 无法排除去重语义分歧, "
+                     "人工对照 journal 与 coverage")
     else:
         notes.append(f"分桶分歧 fresh(JS={js_fresh}/Py={py_fresh}) dup(JS={js_dup}/Py={py_dup}) "
                      "超出 invalid 丢弃可解释范围 —— 去重语义需人工对照")

@@ -131,3 +131,43 @@ def test_p1_处理期间告警落入rundir日志(tmp_path):
     log = Path(run_dir) / "logs" / "resume.log"
     content = log.read_text(encoding="utf-8")
     assert "state.json 读取失败" in content, "handler 执行期的告警必须落入本命令日志(原版恒空)"
+
+
+def test_p11_共享handler无偏移互踩(tmp_path):
+    """P11 回修(c020): setup_logger 与根原各开一个 mode='w' handler 指向同
+    一文件 —— 经返回 logger 写一条即覆写 root 已写告警首字节(实测); 现共享
+    同一实例, 偏移一致。"""
+    from crp import logutil
+    rd = tmp_path / "run"
+    (rd / "logs").mkdir(parents=True)
+    lg = logutil.setup_logger("submit", rd)
+    logutil.module_logger().warning("W1 root warning line")
+    lg.warning("W2 via returned logger line")
+    text = (rd / "logs" / "submit.log").read_text(encoding="utf-8")
+    assert "W1 root warning line" in text, "root 告警不得被返回 logger 的写入覆写"
+    assert "W2 via returned logger line" in text
+
+
+def test_p11_next别名进日志前置名单(tmp_path):
+    """P11 回修(c013): 'next' 是独立子命令(args.cmd=='next'), 原不在
+    _prehandler_run_dir 名单 —— 裸 next 的 run-dir 日志恒空(P1 症状复现)。"""
+    import argparse
+    import os
+    from crp import cli
+    from crp import state as state_mod
+    home = tmp_path / "home"
+    os.environ[config.CRP_HOME_ENV] = str(home)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rd = state_mod.create_run_dir(repo)
+    state_mod.StateStore(rd).save(
+        state_mod.State(run_id=rd.name, mode="quick", phase="sweep"))
+    cwd = os.getcwd()
+    os.chdir(repo)
+    try:
+        ns = argparse.Namespace(run_dir=None)
+        assert cli._prehandler_run_dir("next", ns) is not None, \
+            "裸 next 必须命中前置 run-dir 解析(别名与 resume 同源)"
+        assert cli._prehandler_run_dir("resume", ns) is not None
+    finally:
+        os.chdir(cwd)

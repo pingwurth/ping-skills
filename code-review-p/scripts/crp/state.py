@@ -54,9 +54,26 @@ else:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
-# 本进程已持有的运行锁(P8: 重入守卫 —— 每次获锁新开 fd, 对自身已持的
-# flock 会永久阻塞, c009 当年正是锁内再调 cmd_resume 才死的)
-_HELD_LOCKS: set[str] = set()
+# 本线程已持有的运行锁(P8 重入守卫; P11/c014 改线程作用域 —— 进程级集合
+# 会把"进程内某处持锁"误当"本线程持锁", 嵌入式多线程宿主下静默失去互斥)。
+# 键用锁文件 inode(P11/c014: 路径拼写不影互斥), 取不到时回退规范化路径。
+import threading
+
+_HELD = threading.local()
+
+
+def _held_keys() -> set:
+    if not hasattr(_HELD, "keys"):
+        _HELD.keys = set()
+    return _HELD.keys
+
+
+def _lock_key(lock_path: Path, run_dir: Path):
+    try:
+        st = lock_path.stat()
+        return ("ino", st.st_dev, st.st_ino)
+    except OSError:
+        return ("path", str(run_dir.resolve()))
 
 
 def _lock_held(lock_path: Path) -> bool:
@@ -211,21 +228,34 @@ def _migrate_v1_to_v2(data: dict) -> None:
     _MIGRATIONS 注册表一直空置, 机制被绕开。加载时回填后, decisions/handlers
     读点的 or-回退仅作为内存态 State(未经 load)的防御层。
     """
+    # P11(c032): 畸形但合法 JSON 的类型防御 —— 原版 MODE_PARAMS.get(不可哈希
+    # mode)/len(非列表 angles) 抛 TypeError 逃出 load 的 ValueError 捕获,
+    # "损坏→None→exit-3 自愈"契约退化为 exit-2 内部错误(实证)
     mode = data.get("mode")
-    params = config.MODE_PARAMS.get(mode) if mode else None
-    plan = data.setdefault("sweep_plan", {})
-    if isinstance(plan, dict) and params:
+    if not isinstance(mode, str):
+        mode = config.DEFAULT_MODE
+        data["mode"] = mode
+    params = config.MODE_PARAMS.get(mode)
+    plan = data.get("sweep_plan")
+    if not isinstance(plan, dict):
+        plan = {}
+        data["sweep_plan"] = plan
+    if params:
         for key in ("max_rounds", "dry_required", "keep", "cap"):
             plan.setdefault(key, params[key])
-    if isinstance(plan, dict):
-        plan.setdefault("confidence_floor", config.CONFIDENCE_FLOOR)
-        angles = plan.get("angles") or []
-        plan.setdefault("max_agents", config.agent_budget(len(angles)))
-        plan.setdefault("max_concurrent", config.max_concurrent_agents())
-    repo = data.setdefault("repo", {})
-    if isinstance(repo, dict):
-        # v1 无 root(子目录启动的旧运行只能降级回 cwd —— 新运行由 _new_state 落真值)
-        repo.setdefault("root", repo.get("cwd", ""))
+    plan.setdefault("confidence_floor", config.CONFIDENCE_FLOOR)
+    angles = plan.get("angles")
+    if not isinstance(angles, list):
+        angles = []
+        plan["angles"] = angles
+    plan.setdefault("max_agents", config.agent_budget(len(angles)))
+    plan.setdefault("max_concurrent", config.max_concurrent_agents())
+    repo = data.get("repo")
+    if not isinstance(repo, dict):
+        repo = {}
+        data["repo"] = repo
+    # v1 无 root(子目录启动的旧运行只能降级回 cwd —— 新运行由 _new_state 落真值)
+    repo.setdefault("root", repo.get("cwd", ""))
 
 
 _MIGRATIONS: dict[int, callable] = {
@@ -281,13 +311,19 @@ class StateStore:
         POSIX 使用 fcntl.flock, Windows 使用 msvcrt.locking。
         锁文件常驻不删(unlink 与后来者 open 新 inode 存在竞态, 会破坏互斥);
         仅当超 24 小时未刷新且仍被进程持有时提示疑似挂起。
-        同进程重入(P8 回修): 已持本运行锁时重入变 no-op —— 原版对自身
-        flock 阻塞挂死, 防死锁只靠调用点约定注释。
+        同线程重入(P8 回修, P11 收紧为线程作用域): 已持本运行锁时重入变
+        no-op —— 原版对自身 flock 阻塞挂死, 防死锁只靠调用点约定注释。
         """
         lock_path = self.path.with_name(config.STATE_FILENAME + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        key = str(self.run_dir.resolve())
-        if key in _HELD_LOCKS:
+        fp = open(lock_path, "a", encoding="utf-8")
+        # 键在 open 之后取(P11): open 前锁文件可能不存在(回退 path 键)而
+        # 嵌套调用时已存在(ino 键)—— 两层键形不一致会让重入守卫漏判,
+        # 内层对自身 flock 永久阻塞(实测)
+        key = _lock_key(lock_path, self.run_dir)
+        keys = _held_keys()
+        if key in keys:
+            fp.close()  # 未获锁, 只释放 fd
             yield
             return
 
@@ -302,18 +338,19 @@ class StateStore:
             except OSError:
                 pass
 
-        fp = open(lock_path, "a", encoding="utf-8")
         try:
             _lock_file(fp)
-            _HELD_LOCKS.add(key)
+            keys.add(key)
             try:
-                os.utime(lock_path)
-            except OSError:
-                pass
-            try:
+                # P11(c018): discard 覆盖 add 之后的整段(含 utime 的
+                # BaseException 窗口)—— 原版键残留后本进程永假持锁
+                try:
+                    os.utime(lock_path)
+                except OSError:
+                    pass
                 yield
             finally:
-                _HELD_LOCKS.discard(key)
+                keys.discard(key)
         finally:
             try:
                 _unlock_file(fp)
@@ -339,7 +376,7 @@ class StateStore:
             return None
         try:
             data = _migrate(data)
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             module_logger().warning(f"state.json 迁移失败: {exc}")
             return None
         return State.from_dict(data)

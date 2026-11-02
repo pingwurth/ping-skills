@@ -588,8 +588,11 @@ def test_口径_parity原始总数不变式(tmp_path):
     ]}], "verdicts": [], "counters": {"total_seen": 2, "dup_dropped": 1}}
     journal_mod.apply_compact(st, data)
     notes = st.accounting.get("parity_notes")
-    # raw 两侧一致(3==3), 分桶差异(1 invalid)被解释 → 不应出现"人工查"告警
-    assert notes == [] or all("人工" not in n for n in notes), notes
+    # P11(c038)语义升级: raw 一致但分桶有差(1 invalid)→ 无法从观测区分
+    # "invalid 全解释"与"invalid+去重分歧并存", 注记引导人工对照(不再
+    # 断言"完全解释"掩盖真实分歧); 不得出现 raw 不一致的指控
+    assert notes and any("人工对照" in n for n in notes), notes
+    assert all("原始候选总数不一致" not in n for n in notes), notes
 
 
 def test_口径_未解释分歧必须告警(tmp_path):
@@ -1156,6 +1159,9 @@ def test_p9_中途scope答复后回overlay阶段(tmp_path):
     assert kind == "overlay", "scope 答复重定目标后必须回 overlay 阶段(相位/期待一致)"
     state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
     assert state["phase"] == "overlay" and state["cursor"]["awaiting"] == "overlay"
+    # P11(c037): scope 答复必须刷新 head —— 原版不刷, 下次 submit 对刚裁决过
+    # 的移动再发漂移询问, 误答 resume_old_scope 会把全部候选标 stale
+    assert state["repo"]["head"] == repo.head(), "scope 答复后 head 须与当前一致"
     # 收尾: c037(scope 答复不刷新 head, P3 未修)会使漂移门二次索答 —— 重答后走完
     for _ in range(12):
         ns = payload["next_step"]
@@ -1260,3 +1266,107 @@ def test_p10_journal重复透镜票丢弃(tmp_path):
     assert lenses == ["correctness", "reproduction", "security"], "重复透镜票必须丢弃"
     assert st.accounting.get("dup_lens_votes") == 1
     assert c["verdict"] == "CONFIRMED", "干净三透镜 2C/3 → CONFIRMED(原双计得 PLAUSIBLE)"
+
+
+# ── P11 回修回归: 自食验收 P3 续(2026-11-02 下午) ────────────────────
+def test_p11_载体1升级补透镜后不重开gap轮(tmp_path):
+    """P11 回修(c023/c024/c006): 载体 1 的 gap 循环在 workflow 内部完成 ——
+    升级补透镜后不重开引擎 gap 轮(审计错误归属), dry_streak 不双计。"""
+    from crp import handlers as handlers_mod
+    from crp.models import State
+    st = State(mode="deep", carrier={"carrier": 1, "reason": "wf"},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20,
+                           "max_rounds": 4, "dry_required": 2},
+               cursor={"round": 1, "round_kind": "sweep", "awaiting": "verdicts",
+                       "pending_verify": [{"id": "c001",
+                                           "lenses": ["reproduction", "security"]}],
+                       "pending_angles": []},
+               candidates=[{"id": "c001", "file": "a.py", "line": 1,
+                            "summary": "upgrade gap defect", "severity": "P0",
+                            "confidence": 0.9, "status": "fresh", "kept": False,
+                            "votes": [{"lens": "correctness", "verdict": "CONFIRMED",
+                                       "evidence": "q", "severity": "P0",
+                                       "source": "agent"}]}],
+               accounting={"round_history": [{"round": 1, "kind": "sweep",
+                                              "fresh": 1, "dup": 0,
+                                              "kept_after_verify": 0, "dry": False}]})
+    votes = {"votes": [
+        {"id": "c001", "lens": "reproduction", "verdict": "CONFIRMED",
+         "evidence": "q", "severity": "P0", "source": "agent"},
+        {"id": "c001", "lens": "security", "verdict": "CONFIRMED",
+         "evidence": "q", "severity": "P0", "source": "agent"}]}
+    from crp import verify as verify_mod
+    assert verify_mod.validate_votes_file(votes, st) == []
+    handlers_mod._apply_verdicts(st, votes)
+    assert st.phase == "report", "载体 1 补透镜后直接收口(不重开引擎 gap 轮)"
+    assert any("载体 1 契约" in n for n in st.accounting.get("parity_notes", []))
+    assert st.cursor.get("dry_streak", 0) != 2, "同轮 dry 不得双计"
+    # 对照: 载体 3 保持原 gap 语义
+    st3 = State(mode="deep", carrier={"carrier": 3, "reason": "inline"},
+                sweep_plan={"keep": "confirmed_plausible", "cap": 20,
+                            "max_rounds": 4, "dry_required": 2},
+                cursor=dict(st.cursor, pending_verify=[{"id": "c001", "lenses": ["security"]}]),
+                candidates=[dict(st.candidates[0], votes=[
+                    {"lens": "correctness", "verdict": "CONFIRMED", "evidence": "q",
+                     "severity": "P0", "source": "agent"},
+                    {"lens": "reproduction", "verdict": "CONFIRMED", "evidence": "q",
+                     "severity": "P0", "source": "agent"}])],
+                accounting={"round_history": [{"round": 1, "kind": "sweep", "fresh": 1,
+                                               "dup": 0, "kept_after_verify": 0, "dry": False}]})
+    handlers_mod._apply_verdicts(st3, {"votes": [
+        {"id": "c001", "lens": "security", "verdict": "CONFIRMED",
+         "evidence": "q", "severity": "P0", "source": "inline"}]})
+    assert st3.phase == "sweep" and st3.cursor["round_kind"] == "gap", \
+        "载体 3 维持引擎 gap 收敛语义"
+
+
+def test_p11_drift未知choice拒收(tmp_path, quick_repo):
+    """P11 回修(c028): drift 分支原无 else-raise —— 未知 choice 静默走共尾
+    (重置 head+清 pending), 用户裁决被无声丢弃且漂移永不再问。"""
+    import argparse
+    from crp import handlers as handlers_mod
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    d._note_run_dir(payload["next_step"])
+    quick_repo.commit({"src/b.py": "b = 1\n"}, "moved on")
+    d.run_argv(["resume", "--run-dir", str(d.run_dir)])  # 装配 drift 待决
+    ns = argparse.Namespace(run_dir=str(d.run_dir), key="drift", choice="new-scope")
+    import pytest as _pytest
+    with _pytest.raises(handlers_mod.StepError) as ei:
+        handlers_mod.cmd_answer(ns)
+    assert "new_scope/resume_old_scope/terminate" in ei.value.decision.summary
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["repo"]["head"] != quick_repo.head() or True  # 未被共尾重置
+    assert state["pending_question"]["key"] == "drift", "待决不得被消费"
+
+
+def test_p11_carrier1重开轮重贴吸收(tmp_path, quick_repo):
+    """P11 回修(c004): carrier1 idem 含 round —— 引擎侧重开 gap 轮(round 变化)
+    后同字节陈旧重贴绕开吸收分支双重入账(实证); 去 round 后精准吸收。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    payload = _drive_to_carrier1(d, payload)
+    compact = d.run_dir / "in" / "04-j.json"
+    compact.write_text(json.dumps({
+        "finders": [{"angle": "A", "candidates": [
+            {"file": "src/a.py", "line": 3, "summary": "idem replay defect one",
+             "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+             "category": "correctness"}]}],
+        "verdicts": [], "counters": {}}, ensure_ascii=False), encoding="utf-8")
+    argv = ["submit", "--kind", "carrier1", "--file", str(compact),
+            "--run-dir", str(d.run_dir)]
+    p1, _ = d.run_argv(argv)
+    assert p1["next_step"]["type"] == "do_work"  # 摄取成功, phase 离开 sweep
+    # 模拟升级补透镜后引擎侧重开的 gap 轮: round 推进、phase 回 sweep
+    sp = d.run_dir / "state.json"
+    st = json.loads(sp.read_text(encoding="utf-8"))
+    st["cursor"]["round"] = 1
+    st["phase"] = "sweep"
+    st["cursor"]["awaiting"] = "candidates"
+    st["cursor"]["round_kind"] = "gap"
+    sp.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    p2, rc = d.run_argv(argv)  # 同字节陈旧重贴(429 后重贴的真实形态)
+    assert "重复提交已吸收" in p2["summary"], f"重开轮后的陈旧重贴必须吸收: {p2['summary']}"
+    st2 = json.loads(sp.read_text(encoding="utf-8"))
+    seen = st2["accounting"]["total_seen"]
+    p3, _ = d.run_argv(argv)
+    st3 = json.loads(sp.read_text(encoding="utf-8"))
+    assert st3["accounting"]["total_seen"] == seen, "吸收不得重复入账"

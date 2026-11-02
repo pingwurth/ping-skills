@@ -113,7 +113,7 @@ def _prehandler_run_dir(cmd: str, args) -> Optional[Path]:
     rd = getattr(args, "run_dir", None)
     if rd:
         return Path(rd).resolve()
-    if cmd in ("resume", "report", "status"):
+    if cmd in ("resume", "next", "report", "status"):  # P11(c013): next 是 resume 的别名子命令
         try:  # 与对应 handler 的入口解析同口径(含已完成运行回落)
             return resolve_run_dir(None, Path.cwd(), include_done=True)
         except OSError:

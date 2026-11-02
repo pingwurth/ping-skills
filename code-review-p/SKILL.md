@@ -81,7 +81,8 @@ python3 scripts/crp.py status | runs | report
 An answer is only legal while its question is pending: replaying a stale
 ask_user answer (e.g. re-pasting it after a 429 interruption) is rejected with
 exit 3 and routed back through `resume` — it can never teleport the state
-machine.
+machine. (Exception: the `start` reroute question's `run` answer is idempotent
+— a replay just routes to `resume` again and exits 0.)
 
 (On hosts where the interpreter is named differently use `python`/`py -3`.)
 
