@@ -93,6 +93,24 @@ def _pr_diff_files(cwd: str | Path, pr_number: Optional[int] = None) -> Optional
     return [f for f in out.splitlines() if f and not f.startswith(("Draft:", "Title:"))]
 
 
+def _numstat_new_path(raw: str) -> str:
+    """numstat 第三列 → 真实新路径(重命名形归一)。
+
+    P9 回修(自食验收 P1): diff.renames 默认开, numstat 的重命名行打
+    '{old => new}' / 'old => new' 伪路径 —— 原样入库使 brief 拿到打不开的
+    路径、apply_exclusions 失配、trust_of 精确成员判定失配(改名进
+    .claude/code-review-p.md 逃过 untrusted, A3 绕过, 已实证)。
+    """
+    if "{" in raw and "}" in raw and "=>" in raw:
+        pre, rest = raw.split("{", 1)
+        mid, post = rest.split("}", 1)
+        new = mid.split("=>", 1)[1].strip() if "=>" in mid else ""
+        return (pre + new + post).strip()
+    if "=>" in raw:
+        return raw.split("=>", 1)[1].strip()
+    return raw
+
+
 def _diff_stat(cwd: str | Path, diff_args: list[str]) -> tuple[Optional[list[str]], int, int]:
     """`git diff --numstat <args>` 一条命令同时取文件清单与增删行数。
 
@@ -113,7 +131,7 @@ def _diff_stat(cwd: str | Path, diff_args: list[str]) -> tuple[Optional[list[str
         if len(parts) < 3:
             continue
         a, d, path = parts
-        files.append(path)
+        files.append(_numstat_new_path(path))  # P9: 重命名形归一为新路径
         if a.isdigit():
             ins += int(a)
         if d.isdigit():

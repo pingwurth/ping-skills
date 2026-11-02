@@ -189,10 +189,13 @@ def _init_overlay_state(state: State, cwd: Path) -> None:
             state.phase, state.cursor["awaiting"] = "brief", "brief"
         else:
             # 有启发式候选 → 走 overlay 提取(LLM 查看实际执行内容并标注语义)
-            state.cursor["awaiting"] = "overlay"
+            # P9 回修(自食验收 P1): 同时置 phase —— 原版只置 awaiting, 中途
+            # 调用(scope 答复重定目标)后相位/期待永久失谐, 路由器按相位发
+            # candidates 而 submit 按 awaiting 拒收 → 逐字执行器 exit-3 活锁
+            state.phase, state.cursor["awaiting"] = "overlay", "overlay"
     else:
         state.overlay["heuristic_gates"] = []
-        state.cursor["awaiting"] = "overlay"
+        state.phase, state.cursor["awaiting"] = "overlay", "overlay"
 
 
 def cmd_start(args) -> tuple[Decision, EmitContext]:

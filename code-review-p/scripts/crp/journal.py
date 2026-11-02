@@ -242,15 +242,22 @@ def _finalize_all(state: State) -> list[dict]:
         if not votes:
             c["evidence"] = ("workflow 预算耗尽前未经反驳(deep 保留 PLAUSIBLE) —— "
                              "无引证可用, 见 journal")
-        elif not verify.is_high(c.get("severity")) and len(votes) == 1:
+        elif not verify.is_high(c.get("severity")):
             highs = [v for v in votes if verify.is_high(v.get("severity"))]
             if highs:
-                # 升级: 改写 severity, 补其余透镜再终裁(不在此聚合)
+                # 升级: finder 的 severity 猜测让位于 refuter 判定
                 c["severity"] = highs[0].get("severity")
-                rest = [l for l in config.LENSES
-                        if l not in {v.get("lens") for v in votes}]
-                pending.append({"id": c["id"], "lenses": rest})
-                continue
+                if len(votes) == 1:
+                    # 单票: 退回复核补其余透镜再终裁(P0/P1 永不躺在单票上)
+                    rest = [l for l in config.LENSES
+                            if l not in {v.get("lens") for v in votes}]
+                    pending.append({"id": c["id"], "lenses": rest})
+                    continue
+                # P9 回修(自食验收 P1): 多票(JS 升级路径已补齐 2-3 透镜,
+                # 或带内回配附加)不再被 len(votes)==1 守卫跳过 —— 原版对
+                # 这类候选按非高危单票语义聚合(votes[0] 一票定生死), JS 侧
+                # 三透镜 quorum 与 Python 双向分歧(实证回归); 改写后按高危
+                # quorum 直接终裁, 与 deep-review.js aggregateVerdict 对齐。
         verify.finalize_candidate(state, c)
     return pending
 

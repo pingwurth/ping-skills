@@ -1105,3 +1105,83 @@ def test_p8_超帽丢弃不再触发parity假警报(tmp_path):
     notes = st.accounting.get("parity_notes", [])
     assert not any("不一致" in n or "人工" in n for n in notes), \
         f"帽后基数两侧相等(8==8), 不得告警: {notes}"
+
+
+# ── P9 回修回归: 自食验收 P1(2026-11-02 下午) ───────────────────────
+def test_p9_中途scope答复后回overlay阶段(tmp_path):
+    """P9 回归(P1): _init_overlay_state 原版只置 awaiting 不置 phase ——
+    drift→new_scope→逃逸口→scope 答复后 phase='sweep'+awaiting='overlay'
+    永久失谐: 路由器发 candidates do_work 而 submit 拒收 exit-3, 逐字执行器
+    无限循环(全链路实证)。修复: 需要工作时同时置 phase='overlay'。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", ".claude/code-review-p.md": "# o\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    # 推进到 candidates do_work(sweep 中途)
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+        if "candidates" in str((ns.get("submit") or {}).get("params", [])):
+            break
+    repo.commit({"src/a.py": "x = 2\n"}, "moved on")  # 树净+无 upstream → 重导全空
+    payload, _ = d.run_argv(ns["submit"]["params"])  # candidates 重投: 先撞漂移门? 不——重投同字节被吸收, 改用 resume
+    payload, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert payload["next_step"]["type"] == "ask_user"  # drift
+    payload, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
+                             "--choice", "new_scope"])
+    assert payload["next_step"]["type"] == "ask_user"  # 逃逸口(全空)
+    payload, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "scope",
+                             "--choice", "choice", "--value", "HEAD~1..HEAD"])
+    # 修复后: 必须回到 overlay 提取(而非 candidates do_work → exit-3 循环)
+    ns = payload["next_step"]
+    assert ns["type"] == "do_work"
+    kind = ns["submit"]["params"][ns["submit"]["params"].index("--kind") + 1]
+    assert kind == "overlay", "scope 答复重定目标后必须回 overlay 阶段(相位/期待一致)"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "overlay" and state["cursor"]["awaiting"] == "overlay"
+    # 收尾: c037(scope 答复不刷新 head, P3 未修)会使漂移门二次索答 —— 重答后走完
+    for _ in range(12):
+        ns = payload["next_step"]
+        if ns["type"] == "finish":
+            break
+        if ns["type"] == "ask_user":
+            assert "new_scope" in {o["option"] for o in ns.get("resume", [])}, \
+                f"意外询问: {(ns.get('question') or '')[:60]}"
+            payload, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir),
+                                     "--key", "drift", "--choice", "new_scope"])
+            continue
+        assert ns["type"] == "do_work", f"意外步骤: {ns['type']}"
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "finish"
+
+
+def test_p9_journal多票升级按高危quorum(tmp_path):
+    """P9 回归(P1): len(votes)==1 守卫误伤 JS 升级路径补齐 2-3 透镜的候选 ——
+    原版跳过 severity 改写按非高危单票语义聚合(votes[0] 一票定生死), 与
+    2aa2313 对照为实证回归、与 JS aggregateVerdict 双向分歧。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+
+    def run(order):
+        st = State(mode="deep", repo={"cwd": str(tmp_path)},
+                   sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+        data = {"finders": [{"angle": "A", "candidates": [
+            {"file": "a.py", "line": 5, "summary": "multivote upgrade defect one",
+             "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+             "category": "correctness"}]}],
+            "verdicts": [
+                {"file": "a.py", "line": 5, "summary": "multivote upgrade defect one",
+                 "lens": lens, "verdict": v, "evidence": "q", "severity": "P0"}
+                for lens, v in order],
+            "counters": {}}
+        journal_mod.apply_compact(st, data)
+        return next(c for c in st.candidates if c["status"] != "dup")
+
+    c1 = run([("correctness", "REFUTED"), ("reproduction", "CONFIRMED"), ("security", "CONFIRMED")])
+    assert c1["severity"] == "P0", "存在高危票即升级(finder 猜测让位)"
+    assert c1["verdict"] == "CONFIRMED", "2C/3 高危严格多数 → CONFIRMED(原版 votes[0]=REFUTED 误杀)"
+    c2 = run([("correctness", "CONFIRMED"), ("reproduction", "REFUTED"), ("security", "REFUTED")])
+    assert c2["verdict"] == "REFUTED", "2R/3 → REFUTED(原版 votes[0]=CONFIRMED 误留)"

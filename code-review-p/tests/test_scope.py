@@ -332,3 +332,37 @@ def test_p6_已删除tracked文件仍判为path(tmp_path):
     (repo.root / "src" / "a.py").unlink()
     assert scope_mod.classify_target(repo.root, "src/a.py") == "path"
     assert scope_mod.classify_target(repo.root, "no-such-ref") == "branch"
+
+
+# ── P9 回修回归: 自食验收 3×P1(2026-11-02 下午) ─────────────────────
+def test_p9_重命名伪路径归一为新路径(tmp_path):
+    """P9 回归(P1): diff.renames 默认开, numstat 重命名行是 '{old => new}'/
+    'old => new' 伪路径 —— 原样进 diff_files 使 brief 打不开、排除项失配、
+    trust 精确成员失配(A3 绕过面, 实证)。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "src/old_name.txt": "old\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    (repo.root / "src" / "old_name.txt").rename(repo.root / "src" / "new_name.txt")
+    repo.stage("src/old_name.txt"); repo.stage("src/new_name.txt")
+    sc = scope_mod.resolve_scope(repo.root)
+    assert sc["diff_files"] == ["src/a.py", "src/new_name.txt"], \
+        "重命名必须归一为新路径, 不得出现 '=> ' 伪路径"
+    assert sc["stats"]["files"] == 2
+    assert all("=>" not in f and "{" not in f for f in sc["raw_files"])
+
+
+def test_p9_改名进overlay路径被判untrusted(tmp_path):
+    """P9 回归(P1 security 面): 把普通文件改名为 overlay 路径进被审 diff ——
+    伪路径形使 trust_of 精确成员匹配失配, diff 引入的 overlay 被当 trusted
+    (A3 挂起被绕过, 实证); 归一后必须判 untrusted。"""
+    from crp import overlay
+    repo = RepoBuilder.init(tmp_path)
+    # 同目录纯改名(内容随行)—— git 配对为 rename, numstat 打花括号伪路径
+    repo.commit({"src/a.py": "x = 1\n", ".claude/attacker.md": "evil overlay\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    (repo.root / ".claude" / "attacker.md").rename(repo.root / ".claude" / "code-review-p.md")
+    repo.stage(".claude/attacker.md"); repo.stage(".claude/code-review-p.md")
+    sc = scope_mod.resolve_scope(repo.root)
+    assert ".claude/code-review-p.md" in sc["diff_files"], "改名目标即真实新路径"
+    trust, _ = overlay.trust_of(sc, ".claude/code-review-p.md")
+    assert trust == "untrusted", "被审 diff 引入/触及 overlay 必须 untrusted"
