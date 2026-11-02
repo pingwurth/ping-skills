@@ -30,6 +30,15 @@ def norm_file(f: object, root: str = "") -> str:
     return p
 
 
+def norm_root(state) -> str:
+    """路径归一根: 仓库顶层(repo.root)—— 子目录启动时 finder 回显的绝对路径
+    剥前缀不再错误(P8 回修: 原版取 repo.cwd=启动目录, 子目录启动同一缺陷以
+    两种拼写入账); 旧 state 无 root 回退 cwd(降级同旧版行为)。
+    """
+    repo = getattr(state, "repo", None) or {}
+    return repo.get("root") or repo.get("cwd", "")
+
+
 # --------------------------------------------------------------------------- #
 # 摘要归一与 token 化(与 JS normSummary/tokensOf 对齐)
 # --------------------------------------------------------------------------- #
@@ -215,7 +224,7 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
     coverage/账目随之更新。幂等保护(同轮同字节重投吸收)由 submit 处理器负责。
     """
     result = IngestResult()
-    root = (state.repo or {}).get("cwd", "")
+    root = norm_root(state)
     acc = state.accounting
     fresh_for_round = 0
     dup_for_round = 0

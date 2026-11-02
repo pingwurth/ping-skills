@@ -455,6 +455,17 @@ def decide_next(state: State, ctx: RouteCtx) -> Decision:
                     reason="状态机异常", question=f"未知 phase {phase}")
 
 
+def kept_context(kept: list[dict]) -> list[dict]:
+    """kept 候选的 LLM 上下文形状 —— report_work 与 fix_work 共用。
+
+    P8 回修: 原两处逐字重建的 comprehension, 加字段只改一份时 --fix 阶段
+    会对着与 details 阶段不同的候选视图编造 outcomes。
+    """
+    return [{"id": c["id"], "severity": c.get("severity_final"),
+             "location": f"{c['file']}:{c['line']}", "summary": c["summary"]}
+            for c in kept]
+
+
 def report_work(state: State, ctx: RouteCtx) -> Decision:
     """报告细节 do_work: 台账已定(kept 名单), LLM 补散文。"""
     kept = [c for c in state.candidates if c.get("kept")]
@@ -472,9 +483,7 @@ def report_work(state: State, ctx: RouteCtx) -> Decision:
     ]
     return _do_work(
         "details", "\n".join(parts), ctx,
-        context={"kept": [{"id": c["id"], "severity": c.get("severity_final"),
-                           "location": f"{c['file']}:{c['line']}", "summary": c["summary"]}
-                          for c in kept],
+        context={"kept": kept_context(kept),
                  "coverage_required": bool(state.scope.get("repo_mode")
                                            or state.scope.get("whole_file_mode"))},
         shape=SHA_DETAILS, summary="等待报告细节", seq="05")
@@ -496,9 +505,7 @@ def fix_work(state: State, ctx: RouteCtx) -> Decision:
             "修完逐条记录 outcome: fixed / skipped(原因) / no_change_needed; "
             "修复前重跑覆盖该条的门禁, 绿了才算 fixed。"
         ),
-        context={"kept": [{"id": c["id"], "severity": c.get("severity_final"),
-                           "location": f"{c['file']}:{c['line']}", "summary": c["summary"]}
-                          for c in kept]},
+        context={"kept": kept_context(kept)},
         output=str(output),
         shape='{"outcomes": [{"id": "c001", "outcome": "fixed", "reason": "", "gate_results": "make check ✓"}]}',
         submit=_submit_cmd(ctx, "fix-outcomes", output),

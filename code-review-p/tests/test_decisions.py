@@ -246,3 +246,20 @@ def test_p7_载体1args携带模式参数():
     dq = decisions.sweep_work(stq, CTX)
     assert "verify: false" in dq.instructions and "floor-only" in dq.instructions
     assert f"dryRequired: {config.MODE_PARAMS['quick']['dry_required']}" in dq.instructions
+
+
+def test_p8_kept上下文单一形状():
+    """P8 回修: report_work 与 fix_work 原各自逐字重建 kept comprehension ——
+    加字段只改一份时 --fix 对着与 details 不同的候选视图编造 outcomes。"""
+    st = _state(phase="report")
+    st.candidates = [
+        {"id": "c001", "file": "a.py", "line": 9, "summary": "kept context shape defect",
+         "severity_final": "P1", "kept": True},
+        {"id": "c002", "file": "b.py", "line": 4, "summary": "dropped one",
+         "severity_final": "P2", "kept": False},
+    ]
+    rep = decisions.report_work(st, CTX)
+    fix = decisions.fix_work(st, CTX)
+    expected = [{"id": "c001", "severity": "P1", "location": "a.py:9",
+                 "summary": "kept context shape defect"}]
+    assert rep.context["kept"] == fix.context["kept"] == expected

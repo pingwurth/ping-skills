@@ -90,7 +90,7 @@ def _match_pool(state: State, file, line, summary,
     token 缓存)。匹配语义逐字不变(JS isDup 是 parity 锁定孪生)。
     """
     from . import config as _config
-    nf = ledger.norm_file(file, (state.repo or {}).get("cwd", ""))
+    nf = ledger.norm_file(file, ledger.norm_root(state))
     exact = None
     banded = []
     toks = ledger.tokens_of(summary or "")
@@ -141,7 +141,7 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
     """
     finder_count = 0
     gap_seen = 0
-    root = (state.repo or {}).get("cwd", "")
+    root = ledger.norm_root(state)
     # P6: 回配索引(按归一文件)+ 摘要 token 缓存; 有新候选入账后置脏重建
     file_index: dict = {}
     token_cache: dict = {}
@@ -294,23 +294,23 @@ def _reconcile_coverage(state: State) -> None:
 def _parity_notes(state: State, js: dict) -> None:
     """JS 内部计数 vs Python 重算的可见对照(分歧记入 parity_notes, 不静默)。
 
-    口径: JS totalSeen/dupDropped 为去重后/去重数; Python 台账
-    fresh + dup + invalid_dropped + 超帽丢弃 = 原始候选数。
-    不变式 = 原始总数两侧相等; 分桶差异若能被 invalid 丢弃解释(JS 生成端
-    schema 已补 maxLength 后不会再发生), 注明成因而非告警。
+    口径(P8 回修): 两侧同为**帽后基数** —— JS 在计数前已把单 finder 截到
+    8(raw.slice(0,8)), Python 摄取同样先截后算; 超帽丢弃只在
+    coverage.dropped 可见, 不进 raw 不变式(原版把 py_overcap 计入 py_raw,
+    finder 返回 >8 即确定性触发"原始候选总数不一致"假警报指控 workflow)。
+    不变式 = 帽后总数两侧相等; 分桶差异若能被 invalid 丢弃解释, 注明成因
+    而非告警。
     """
     acc = state.accounting
     fresh = sum(1 for c in state.candidates if c["status"] != "dup")
     py_fresh, py_dup = fresh, acc.get("dup_dropped", 0)
     py_invalid = acc.get("invalid_dropped", 0)
-    py_overcap = sum(cov.get("dropped", 0) for cov in
-                     (state.coverage.get("angles") or {}).values())
     js_fresh = js.get("total_seen", js.get("totalSeen"))
     js_dup = js.get("dup_dropped", js.get("dupDropped"))
     if js_fresh is None or js_dup is None:
         return
     js_raw = int(js_fresh) + int(js_dup)
-    py_raw = py_fresh + py_dup + py_invalid + py_overcap
+    py_raw = py_fresh + py_dup + py_invalid
     notes = acc.setdefault("parity_notes", [])
     if js_raw != py_raw:
         notes.append(f"raw: JS={js_raw} Python={py_raw} —— 原始候选总数不一致, "

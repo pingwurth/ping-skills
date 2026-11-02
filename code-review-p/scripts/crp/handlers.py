@@ -248,7 +248,8 @@ def _new_state(cwd: Path, mode: str, fix_requested: bool, target: Optional[str],
     return State(
         run_id="",  # 由 _place_state 落定
         created_at=_now(), updated_at=_now(),
-        repo={"cwd": str(cwd), "slug": repo_slug(cwd), "head": sig.get("head"),
+        repo={"cwd": str(cwd), "root": str(gitops.repo_root(cwd) or cwd),
+              "slug": repo_slug(cwd), "head": sig.get("head"),
               "wt_signature": sig.get("wt"), "is_git": gitops.is_git_repo(cwd)},
         mode=mode, fix_requested=fix_requested, target=target,
         phase="overlay", scope=sc,
@@ -724,6 +725,12 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                 if len(bits) != len(unset):
                     raise StepError.state_error(
                         f"逐条赋值长度不符: 需要 {len(unset)} 位, 收到 {len(bits)}")
+                # P8 回修: token 校验 —— '2'/'yes' 等任意位原版静默按 denied
+                # 处理(方向虽 fail-closed, 但违背全有或全无的提交纪律)
+                bad = [b for b in bits if b not in ("0", "1")]
+                if bad:
+                    raise StepError.state_error(
+                        f"逐条赋值只接受 0/1 位, 收到非法位: {bad}")
                 for g, b in zip(unset, bits):
                     g["approval"] = "approved" if b == "1" else "denied"
             else:
@@ -791,8 +798,8 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
 
         if key == "run":
-            # 回修 c009: 锁内不得再调 cmd_resume(其自身加锁 → 同进程 flock 自死锁);
-            # 交回路由器逐字执行
+            # 回修 c009: 交回路由器逐字执行(单出口)。注: locked() 已支持
+            # 同进程重入(P8), 当年的 flock 自死锁形态不复存在。
             return Decision(status="success", exit_code=config.EXIT_OK,
                             summary="run 答复已接收 —— 交回路由器",
                             route=Route.RESUME, reason="answer run → resume",

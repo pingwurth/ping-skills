@@ -147,3 +147,26 @@ def test_p6_回配索引与无索引结果一致(tmp_path):
         b2 = journal._match_candidate(st, "a.py", line, summary,
                                       file_index=file_index, token_cache=token_cache)
         assert b2 is b, "缓存二次调用结果稳定"
+
+
+def test_p8_路径归一根用仓库顶层():
+    """P8 回修: 归一根原版取 repo.cwd(可能是子目录启动目录)—— finder 回显
+    绝对路径被错误剥前缀, 同一缺陷两种拼写入账。现取 repo.root(顶层)。"""
+    st = State(mode="standard", repo={"cwd": "/repo/src", "root": "/repo"},
+               sweep_plan={"keep": config.KEEP_CONFIRMED_P01})
+    data = {"items": [{"angle": "A", "coverage": {"ran": True}, "candidates": [
+        {"file": "/repo/src/a.py", "line": 3, "summary": "subdir absolute path defect",
+         "failure_scenario": "f", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}]}
+    ledger.ingest_candidates(st, data, origin="sweep", round_no=1)
+    assert st.candidates[0]["file"] == "src/a.py", "绝对路径须按顶层剥成仓库相对"
+    # 另一角度相对提交同路径同缺陷 → 命中 dup(原版两种拼写互不相认)
+    data2 = {"items": [{"angle": "B", "coverage": {"ran": True}, "candidates": [
+        {"file": "src/a.py", "line": 3, "summary": "subdir absolute path defect",
+         "failure_scenario": "f", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}]}
+    r2 = ledger.ingest_candidates(st, data2, origin="sweep", round_no=1)
+    assert r2.dup_count == 1 and not r2.fresh_ids
+    # 旧 state(无 root)回退 cwd —— 降级同旧版, 不崩
+    st_old = State(mode="standard", repo={"cwd": "/repo/src"})
+    assert ledger.norm_root(st_old) == "/repo/src"

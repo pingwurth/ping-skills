@@ -62,8 +62,10 @@ Discipline: parse only the marked block; if it is missing, read the tail
 hand-edit `state.json`. Never substitute your own procedure for a protocol
 route — a missing block or a bypassed step is a terminate condition, not an
 improvisation prompt. State lives **outside the reviewed repo** (read-only
-discipline): `<state-home>/code-review-p/<repo-slug>/<run-id>/`, `CRP_HOME`
-overrides; `in/` holds your submissions, `out/` the report and ledger export.
+discipline): `<state-home>/code-review-p/<repo-slug>/<run-id>/`; `CRP_HOME`
+overrides the whole skill state root (runs live at `<CRP_HOME>/<repo-slug>/…` —
+no extra `code-review-p/` segment). `in/` holds your submissions, `out/` the
+report and ledger export.
 
 ## 2 — Command surface
 

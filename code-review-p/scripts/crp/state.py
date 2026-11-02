@@ -5,8 +5,10 @@
         state.json / state.json.lock / in/ / out/ / logs/
 
 state home 解析顺序: CRP_HOME > (Windows: %LOCALAPPDATA%) >
-XDG_STATE_HOME > ~/.local/state。~/.cache 语义为"可随时清除", 断点续跑
-状态不能放那(XDG state 才是可恢复状态的归宿)。
+XDG_STATE_HOME > ~/.local/state。CRP_HOME 直接作为技能状态根(运行在
+<CRP_HOME>/<repo-slug>/…, 不追加 code-review-p/ 子目录 —— 它覆盖整个根
+而非 state-home 的上层); 其余分支在 state home 之下追加 code-review-p/。
+~/.cache 语义为"可随时清除", 断点续跑状态不能放那(XDG state 才是归宿)。
 
 state.json 必须原子写入(临时文件 + os.replace + fsync), 避免半截状态破坏续跑。
 加载委托 models.State.from_dict, 对缺失键填默认值以兼容旧版本状态文件。
@@ -52,6 +54,11 @@ else:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
+# 本进程已持有的运行锁(P8: 重入守卫 —— 每次获锁新开 fd, 对自身已持的
+# flock 会永久阻塞, c009 当年正是锁内再调 cmd_resume 才死的)
+_HELD_LOCKS: set[str] = set()
+
+
 def _lock_held(lock_path: Path) -> bool:
     """非阻塞探测锁文件当前是否被进程持有(仅供陈旧锁诊断, 探测后立即释放)。"""
     try:
@@ -73,7 +80,11 @@ def _lock_held(lock_path: Path) -> bool:
 # 运行目录解析
 # --------------------------------------------------------------------------- #
 def state_home() -> Path:
-    """状态根目录: CRP_HOME > (nt: %LOCALAPPDATA%) > XDG_STATE_HOME > ~/.local/state。"""
+    """状态根目录: CRP_HOME > (nt: %LOCALAPPDATA%) > XDG_STATE_HOME > ~/.local/state。
+
+    CRP_HOME 覆盖整个技能状态根(不追加 code-review-p/); 其余分支追加 —— 与
+    SKILL.md §1 的布局描述一致(P8 回修: 原文档两说与代码不一致)。
+    """
     env = os.environ.get(config.CRP_HOME_ENV)
     if env:
         return Path(env)
@@ -193,9 +204,32 @@ def resolve_run_dir(explicit: Optional[str], cwd: str | Path,
 # --------------------------------------------------------------------------- #
 # 每个迁移函数接收 raw dict 并 in-place 修改, 将 schema 从 v(N-1) 升级到 vN。
 # 新增结构变更时: ① 递增 config.STATE_SCHEMA_VERSION  ② 追加迁移函数。
+def _migrate_v1_to_v2(data: dict) -> None:
+    """v1→v2: 回填 sweep_plan 的并发/预算键(2026-11 并发治理新增)与 repo.root。
+
+    P8 回修: 这些字段原先靠读点四处 or-回退兼容 —— 为 schema 迁移建的
+    _MIGRATIONS 注册表一直空置, 机制被绕开。加载时回填后, decisions/handlers
+    读点的 or-回退仅作为内存态 State(未经 load)的防御层。
+    """
+    mode = data.get("mode")
+    params = config.MODE_PARAMS.get(mode) if mode else None
+    plan = data.setdefault("sweep_plan", {})
+    if isinstance(plan, dict) and params:
+        for key in ("max_rounds", "dry_required", "keep", "cap"):
+            plan.setdefault(key, params[key])
+    if isinstance(plan, dict):
+        plan.setdefault("confidence_floor", config.CONFIDENCE_FLOOR)
+        angles = plan.get("angles") or []
+        plan.setdefault("max_agents", config.agent_budget(len(angles)))
+        plan.setdefault("max_concurrent", config.max_concurrent_agents())
+    repo = data.setdefault("repo", {})
+    if isinstance(repo, dict):
+        # v1 无 root(子目录启动的旧运行只能降级回 cwd —— 新运行由 _new_state 落真值)
+        repo.setdefault("root", repo.get("cwd", ""))
+
+
 _MIGRATIONS: dict[int, callable] = {
-    # 示例(未来使用):
-    # 2: _migrate_v1_to_v2,
+    2: _migrate_v1_to_v2,
 }
 
 
@@ -247,9 +281,15 @@ class StateStore:
         POSIX 使用 fcntl.flock, Windows 使用 msvcrt.locking。
         锁文件常驻不删(unlink 与后来者 open 新 inode 存在竞态, 会破坏互斥);
         仅当超 24 小时未刷新且仍被进程持有时提示疑似挂起。
+        同进程重入(P8 回修): 已持本运行锁时重入变 no-op —— 原版对自身
+        flock 阻塞挂死, 防死锁只靠调用点约定注释。
         """
         lock_path = self.path.with_name(config.STATE_FILENAME + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        key = str(self.run_dir.resolve())
+        if key in _HELD_LOCKS:
+            yield
+            return
 
         if lock_path.exists():
             try:
@@ -265,11 +305,15 @@ class StateStore:
         fp = open(lock_path, "a", encoding="utf-8")
         try:
             _lock_file(fp)
+            _HELD_LOCKS.add(key)
             try:
                 os.utime(lock_path)
             except OSError:
                 pass
-            yield
+            try:
+                yield
+            finally:
+                _HELD_LOCKS.discard(key)
         finally:
             try:
                 _unlock_file(fp)

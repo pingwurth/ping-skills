@@ -140,3 +140,53 @@ def test_p6_list_runs优先读meta边车(crp_home, tmp_path):
     runs2 = list_runs(repo)
     by_id = {r["run_id"]: r for r in runs2}
     assert by_id[run2.name]["mode"] == "quick" and by_id[run2.name]["done"] is True
+
+
+# ── P8 回修回归: schema 迁移 / 重入锁(2026-11-02 全面审查) ───────────
+def test_p8_v1状态加载迁移回填(crp_home, tmp_path):
+    """P8 回修: _MIGRATIONS 注册表空置, 新字段靠读点四处 or-回退兼容 ——
+    现走真迁移: v1 加载回填 sweep_plan 并发/预算键与 repo.root, 幂等。"""
+    import json
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rd = create_run_dir(repo)
+    v1 = {"schema_version": 1, "run_id": rd.name, "mode": "standard", "phase": "sweep",
+          "repo": {"cwd": str(repo)}, "sweep_plan": {"angles": ["A", "B", "C"],
+                                                     "keep": "confirmed_p01", "cap": 10}}
+    (rd / config.STATE_FILENAME).write_text(json.dumps(v1), encoding="utf-8")
+    st = StateStore(rd).load()
+    assert st is not None and st.schema_version == 2
+    plan = st.sweep_plan
+    assert plan["max_concurrent"] == config.max_concurrent_agents()
+    assert plan["max_rounds"] == 2 and plan["dry_required"] == 1  # standard 参数
+    assert plan["max_agents"] == config.agent_budget(3)
+    assert st.repo["root"] == str(repo)  # 旧运行降级回填 cwd
+    # 已有键不覆盖(keep/cap 保留 v1 原值); 迁移幂等
+    assert plan["keep"] == "confirmed_p01" and plan["cap"] == 10
+    StateStore(rd).save(st)
+    st2 = StateStore(rd).load()
+    assert st2.schema_version == 2 and st2.sweep_plan == plan
+
+
+def test_p8_同进程嵌套加锁不自锁(tmp_path):
+    """P8 回修: locked() 每次获锁新开 fd, 对自身已持的 flock 永久阻塞 ——
+    原版防死锁只靠调用点约定注释(c009)。嵌套重入必须 no-op 返回。
+
+    子进程带超时执行: 原版会挂死 → TimeoutExpired → 测试失败(而非挂起)。"""
+    import subprocess
+    import sys
+    scripts = Path(__file__).resolve().parents[1] / "scripts"
+    rd = tmp_path / "run"
+    rd.mkdir()
+    code = (
+        "import sys; sys.path.insert(0, %r)\n" % str(scripts)
+        + "from crp.state import StateStore\n"
+        + "s = StateStore(%r)\n" % str(rd)
+        + "with s.locked():\n"
+        + "    with s.locked():\n"   # 原版: 对自身 flock → 挂死
+        + "        pass\n"
+        + "print('NESTED_OK')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code],
+                          capture_output=True, text=True, timeout=15)
+    assert proc.returncode == 0 and "NESTED_OK" in proc.stdout

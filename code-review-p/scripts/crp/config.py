@@ -192,7 +192,7 @@ BRIEF_SOFT_LINE_LIMIT = 30  # 超限仅警告(advisory)
 # --------------------------------------------------------------------------- #
 # state.json schema 版本(顺序迁移; 每次结构变更递增并追加迁移函数)
 # --------------------------------------------------------------------------- #
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2  # v2: sweep_plan 并发/预算键 + repo.root 回填(见 state._MIGRATIONS)
 
 # ask_user key 取值
 QUESTION_KEYS = ("scope", "gates", "drift", "run")

@@ -1050,3 +1050,58 @@ def test_p7_轮次记账只写末轮(tmp_path):
     assert [h["round"] for h in hist] == [1, 2]
     assert hist[0].get("kept_after_verify", 0) == 0, "非末轮不得写最终总量"
     assert hist[1]["kept_after_verify"] == 2
+
+
+# ── P8 回修回归: 门禁 token / parity 帽后基数(2026-11-02 全面审查) ────
+def test_p8_门禁逐条赋值非法token拒收(tmp_path):
+    """P8 回修: gates 逐条赋值只认 '1', '2'/'yes' 等任意位静默按 denied
+    (方向虽 fail-closed, 违背全有或全无的提交纪律)—— 非法位整份拒收。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    while payload["next_step"]["type"] == "do_work":  # overlay → brief → gates ask
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "ask_user"
+    # 位数不符先拒(1 个待确认门禁, 传 2 位)
+    p, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "gates",
+                        "--choice", "choice", "--value", "1,yes"])
+    assert rc == config.EXIT_STATE and "长度不符" in p["summary"]
+    # 位数相符但 token 非法 —— 不得静默按 denied
+    p, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "gates",
+                        "--choice", "choice", "--value", "yes"])
+    assert rc == config.EXIT_STATE
+    assert "只接受 0/1" in p["summary"] and "yes" in p["summary"]
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["phase"] == "gates", "拒收不得推进相位"
+    assert all(g["approval"] == "unset" for g in state["overlay"]["gates"]), \
+        "非法位不得部分生效"
+    # 合法 0/1 序列照常
+    p2, _ = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "gates",
+                        "--choice", "choice", "--value", "1"])
+    assert p2["next_step"]["type"] == "do_work"
+    final = d.drive(p2)
+    assert final["next_step"]["type"] == "finish"
+
+
+def test_p8_超帽丢弃不再触发parity假警报(tmp_path):
+    """P8 回修: raw 不变式原版把 py_overcap 计入 py_raw(JS 计数前已 cap 到
+    8)—— finder 返回 >8 即确定性触发'原始候选总数不一致'假警报指控 workflow。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    cands = [{"file": "a.py", "line": i * 10,
+              "summary": f"overcap parity defect number {i} unique summary",
+              "failure_scenario": "f", "confidence": 0.9, "severity": "P2",
+              "category": "correctness"} for i in range(10)]  # >8, 行距 10 无带重叠
+    data = {"finders": [{"angle": "A", "candidates": cands}], "verdicts": [],
+            "counters": {"total_seen": 8, "dup_dropped": 0}}  # JS 只计帽后 8
+    journal_mod.apply_compact(st, data)
+    assert st.coverage["angles"]["A"]["dropped"] == 2, "超帽丢弃仍记 coverage.dropped"
+    notes = st.accounting.get("parity_notes", [])
+    assert not any("不一致" in n or "人工" in n for n in notes), \
+        f"帽后基数两侧相等(8==8), 不得告警: {notes}"
