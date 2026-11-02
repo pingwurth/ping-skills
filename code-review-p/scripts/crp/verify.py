@@ -33,7 +33,10 @@ def aggregate_verdict(votes: list[dict], high: bool) -> str:
     if refuted > len(votes) / 2:
         return "REFUTED"         # 严格多数; 平局存活
     confirmed = sum(1 for v in votes if v.get("verdict") == "CONFIRMED")
-    return "CONFIRMED" if confirmed >= (len(votes) + 1) // 2 else "PLAUSIBLE"
+    # P7 回修: 严格多数才 CONFIRMED —— 原版 confirmed >= (n+1)//2 在偶数票对峙
+    # (2 票 1C+1R、4 票 2C+2R)时聚合为 CONFIRMED, 违反三处文档"平局 = 不确定
+    # → PLAUSIBLE"; deep-review.js 同公式同错(已同步, 共享 fixture 锁死)。
+    return "CONFIRMED" if confirmed * 2 > len(votes) else "PLAUSIBLE"
 
 
 def validate_votes_file(data: object, state: State) -> list[str]:

@@ -1,14 +1,103 @@
 {
   "comment": "aggregateVerdict 票数法矩阵 —— Python(verify.aggregate_verdict) 与 JS(deep-review.js aggregateVerdict) 共享断言; P5 回修: 原两侧各自手抄九例, 新边界用例只进一侧时另一实现零测试、可带绿色测试漂移",
   "cases": [
-    {"name": "空票高危不确定", "votes": [], "high": true, "expected": "PLAUSIBLE"},
-    {"name": "高危单票反驳不足法定", "votes": ["REFUTED"], "high": true, "expected": "PLAUSIBLE"},
-    {"name": "高危单票确认不足法定", "votes": ["CONFIRMED"], "high": true, "expected": "PLAUSIBLE"},
-    {"name": "高危三票平局不确定", "votes": ["CONFIRMED", "REFUTED", "PLAUSIBLE"], "high": true, "expected": "PLAUSIBLE"},
-    {"name": "高危严格多数反驳", "votes": ["REFUTED", "REFUTED", "CONFIRMED"], "high": true, "expected": "REFUTED"},
-    {"name": "高危多数确认", "votes": ["CONFIRMED", "CONFIRMED", "PLAUSIBLE"], "high": true, "expected": "CONFIRMED"},
-    {"name": "高危少数确认不确定", "votes": ["CONFIRMED", "PLAUSIBLE", "PLAUSIBLE"], "high": true, "expected": "PLAUSIBLE"},
-    {"name": "非高危单票反驳", "votes": ["REFUTED"], "high": false, "expected": "REFUTED"},
-    {"name": "非高危单票确认", "votes": ["CONFIRMED"], "high": false, "expected": "CONFIRMED"}
+    {
+      "name": "空票高危不确定",
+      "votes": [],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    },
+    {
+      "name": "高危单票反驳不足法定",
+      "votes": [
+        "REFUTED"
+      ],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    },
+    {
+      "name": "高危单票确认不足法定",
+      "votes": [
+        "CONFIRMED"
+      ],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    },
+    {
+      "name": "高危三票平局不确定",
+      "votes": [
+        "CONFIRMED",
+        "REFUTED",
+        "PLAUSIBLE"
+      ],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    },
+    {
+      "name": "高危严格多数反驳",
+      "votes": [
+        "REFUTED",
+        "REFUTED",
+        "CONFIRMED"
+      ],
+      "high": true,
+      "expected": "REFUTED"
+    },
+    {
+      "name": "高危多数确认",
+      "votes": [
+        "CONFIRMED",
+        "CONFIRMED",
+        "PLAUSIBLE"
+      ],
+      "high": true,
+      "expected": "CONFIRMED"
+    },
+    {
+      "name": "高危少数确认不确定",
+      "votes": [
+        "CONFIRMED",
+        "PLAUSIBLE",
+        "PLAUSIBLE"
+      ],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    },
+    {
+      "name": "非高危单票反驳",
+      "votes": [
+        "REFUTED"
+      ],
+      "high": false,
+      "expected": "REFUTED"
+    },
+    {
+      "name": "非高危单票确认",
+      "votes": [
+        "CONFIRMED"
+      ],
+      "high": false,
+      "expected": "CONFIRMED"
+    },
+    {
+      "name": "高危两票对峙平局不确定",
+      "votes": [
+        "CONFIRMED",
+        "REFUTED"
+      ],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    },
+    {
+      "name": "高危四票二对二平局不确定",
+      "votes": [
+        "CONFIRMED",
+        "REFUTED",
+        "CONFIRMED",
+        "REFUTED"
+      ],
+      "high": true,
+      "expected": "PLAUSIBLE"
+    }
   ]
 }

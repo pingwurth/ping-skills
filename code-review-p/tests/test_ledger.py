@@ -73,7 +73,9 @@ def test_入账_去重计数与coverage(tmp_path):
     assert len(result.fresh_ids) == 1 and result.dup_count == 1  # 绝对路径已归一并判重
     assert state.accounting["total_seen"] == 2  # 台账含 dup 条目(曾见一切)
     cov = state.coverage["angles"]["C"]
-    assert cov == {"ran": True, "raw": 2, "fresh": 1, "dropped": 0}
+    # P7: coverage 形状由 ledger.default_angle_coverage 单一持有(与 journal 侧统一,
+    # dropped_invalid 恒在 —— 原版两处字面量分叉)
+    assert cov == {"ran": True, "raw": 2, "fresh": 1, "dropped": 0, "dropped_invalid": 0}
     # dup 条目带 dup_of 指回原条目
     dup_entry = next(c for c in state.candidates if c["status"] == "dup")
     assert dup_entry["dup_of"] == result.fresh_ids[0]

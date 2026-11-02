@@ -102,6 +102,13 @@ if (!brief || !scope) {
   return { error: 'args.brief (the Phase 1 review brief) and args.scope (the exact diff command) are required' }
 }
 const maxRounds = Math.max(1, Math.min(args?.maxRounds ?? 4, 5))
+// dryRequired: gap sweeps stop after N consecutive dry rounds — passed by the
+// engine (mode dry_required; default 2 = deep). Hardcoding 2 made standard
+// (dry_required=1) run one extra gap round beyond its plan.
+const dryRequired = Math.max(1, Math.min(args?.dryRequired ?? 2, 5))
+// VERIFY: the engine sets verify:false for quick mode — candidates pass through
+// unverified (Python ingests floor-only); no refuter budget is burned.
+const VERIFY = args?.verify !== false
 const angles = (args?.angles?.length ? args.angles : DEFAULT_ANGLES).map(a =>
   typeof a === 'string'
     ? (DEFAULT_ANGLES.find(d => d.key === a) ?? { key: a, name: a, charter: '' })
@@ -120,7 +127,9 @@ const coverage = {}    // angleKey -> { ran, raw, fresh }: what actually execute
 // host transcript journal (journal.jsonl) is not reachable.
 const journalFinders = []
 const journalVerdicts = []
-const JOURNAL_EVIDENCE_CHARS = 400
+// = Python config.MAX_EVIDENCE_CHARS — same limit as the inline/carrier-2 path
+// (parity-locked by tests/test_workflow_script.py; schema maxLength is 4000 anyway)
+const JOURNAL_EVIDENCE_CHARS = 4000
 
 // ── agent budget: overflow degrades before it stops ──
 // Default scales with fan-out width (v1.4.1 #12): a 12-angle whole-file sweep
@@ -183,7 +192,10 @@ const overlapToks = (a, b) => {
 }
 const isDup = (seenArr, c) => {
   const toks = tokensOf(c.summary)
-  return seenArr.some(p => p.file === c.file
+  // status:'dup' rows are never anchors (parity with Python find_dup): a drifted
+  // chain merges into its first anchor only — the tail is not transitively swallowed
+  return seenArr.some(p => p.status !== 'dup'
+    && p.file === c.file
     && Math.abs((p.line ?? 0) - (c.line ?? 0)) <= 3
     && overlapToks(toks, tokensOf(p.summary)))
 }
@@ -196,7 +208,9 @@ const aggregateVerdict = (votes, high) => {
   const refuted = votes.filter(v => v.verdict === 'REFUTED').length
   if (refuted > votes.length / 2) return 'REFUTED'      // strict majority only; ties survive
   const confirmed = votes.filter(v => v.verdict === 'CONFIRMED').length
-  return confirmed >= Math.ceil(votes.length / 2) ? 'CONFIRMED' : 'PLAUSIBLE'
+  // strict majority only — an even split (1C+1R, 2C+2R) is a tie = uncertainty,
+  // not confirmation (parity with Python aggregate_verdict; shared fixture locks it)
+  return confirmed * 2 > votes.length ? 'CONFIRMED' : 'PLAUSIBLE'
 }
 // ── end pure helpers ──
 
@@ -268,7 +282,7 @@ async function refute(c, angleKey) {
 
 // ── rounds: initial full sweep, then gap sweeps until dry (no NEW candidates) or cap ──
 let dry = 0, round = 0, dupDropped = 0
-while (round < maxRounds && (round === 0 || dry < 2)) {
+while (round < maxRounds && (round === 0 || dry < dryRequired)) {
   const isGap = round > 0 // round counts EXECUTED sweeps only (v1.4.1 #11) — a budget-stopped round never increments it
   if (isGap) {
     // reserve room for a gap round: 1 finder + a handful of refuters
@@ -325,6 +339,7 @@ while (round < maxRounds && (round === 0 || dry < 2)) {
       cov.raw += Math.min(raw.length, 8)
       cov.fresh += fresh.length
       if (!fresh.length) return []
+      if (!VERIFY) return fresh // quick: no refuters — Python finalizes floor-only
       return (await parallel(fresh.map(c => () => refute(c, angleKey)))).filter(Boolean)
     }
   )

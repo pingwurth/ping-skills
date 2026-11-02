@@ -328,3 +328,80 @@ def test_concurrency_semaphore_behavioral():
     assert len(first_calls) == 1, f"A 角度应恰好一次失败调用: {first_calls}"
     assert r["covA"] is True, "重试成功后 coverage.A.ran 应恢复为 true"
     assert r["findings"] >= 1
+
+
+# ── P7 回修回归: 常量 parity 锁 / verify:false / dryRequired(2026-11-02) ──
+def test_p7_js常量与config对齐():
+    """P7 回归: deep-review.js 复刻的 config 常量逐值锁定 —— config 改动而
+    JS 未同步时此处变红(操作者读 workflow 输出与最终报告不再两套口径)。"""
+    from crp import config
+
+    src = script_src()
+
+    def grab(pattern):
+        m = re.search(pattern, src)
+        assert m, f"deep-review.js 中未找到 {pattern!r} —— 常量位置变了?"
+        return m.group(1)
+
+    assert int(grab(r"maxRounds \?\? (\d+)")) == config.MODE_PARAMS["deep"]["max_rounds"]
+    assert int(grab(r"dryRequired \?\? (\d+)")) == config.MODE_PARAMS["deep"]["dry_required"]
+    assert int(grab(r"maxRounds \?\? \d+, (\d+)\)")) == config.MAX_ROUNDS_MAX
+    assert int(grab(r"args\?\.concurrency \?\? (\d+)")) == config.DEFAULT_MAX_CONCURRENT
+    assert int(grab(r"concurrency \?\? \d+, (\d+)\)")) == config.MAX_CONCURRENT_MAX
+    assert float(grab(r"\(f\.confidence \?\? 1\) >= (\d+(?:\.\d+)?)")) == config.CONFIDENCE_FLOOR
+    assert int(grab(r"raw\.slice\(0, (\d+)\)")) == config.MAX_CANDIDATES_PER_ANGLE
+    assert int(grab(r"reportable\.slice\(0, (\d+)\)")) == config.MODE_PARAMS["deep"]["cap"]
+    assert int(grab(r"JOURNAL_EVIDENCE_CHARS = (\d+)")) == config.MAX_EVIDENCE_CHARS
+    # 排序表: severity 键序 / category 逐值
+    order_keys = [kv.split(":")[0].strip() for kv in
+                  re.search(r"const order = \{([^}]+)\}", src).group(1).split(",")]
+    assert order_keys == list(config.SEVERITIES)
+    js_cat = {k.strip(): int(v) for k, v in
+              (kv.split(":") for kv in
+               re.search(r"const catOrder = \{([^}]+)\}", src).group(1).split(","))}
+    assert js_cat == config.CATEGORY_RANK, "类别排序表与 config.CATEGORY_RANK 漂移"
+
+
+@requires_node
+def test_p7_verify_false免对抗验证():
+    """P7 回归: quick 模式引擎传 verify:false —— workflow 不跑反驳(免烧
+    P0/P1 三透镜预算), 候选原样通过(Python floor-only 摄取)。"""
+    body = re.sub(r"export const meta = \{.*?\n\}\n", "", script_src(), flags=re.S)
+    stub = STUB_JS.replace(
+        "maxRounds: 1, maxAgents: 60, concurrency: 3 }",
+        "maxRounds: 1, maxAgents: 60, concurrency: 3, verify: false }")
+    js = (
+        "const run = async (args, agent, parallel, pipeline, phase, log, budget) => {\n"
+        + body + "\n};\n" + stub + "\n"
+        + "run(args, agent, parallel, pipeline, phase, log, budget).then(out => {\n"
+        + "  console.log(JSON.stringify({labels, findings: out.findings.length,\n"
+        + "    verdicts: out.journal.verdicts.length}));\n"
+        + "}).catch(e => { console.error('SCRIPT_THREW', e); process.exit(9); });\n"
+    )
+    r = json.loads(run_node(js))
+    assert not any(l.startswith("verify:") for l in r["labels"]), "verify:false 不得 spawn 反驳者"
+    assert r["findings"] >= 1, "候选应原样通过(引擎 floor-only 摄取)"
+    assert r["verdicts"] == 0
+
+
+@requires_node
+def test_p7_dryRequired_单轮dry即收口():
+    """P7 回归: dryRequired 由引擎下发 —— standard(dry_required=1)首轮 dry
+    即收口(原版硬编码 dry<2 的 deep 语义多跑一整轮 gap)。"""
+    body = re.sub(r"export const meta = \{.*?\n\}\n", "", script_src(), flags=re.S)
+    stub = STUB_JS.replace(
+        "maxRounds: 1, maxAgents: 60, concurrency: 3 }",
+        "maxRounds: 2, maxAgents: 60, concurrency: 3, dryRequired: 1 }")
+    stub = re.sub(r"return \{ angle: key, candidates: \[.*?\] \};",
+                  "return { angle: key, candidates: [] };", stub, flags=re.S)
+    js = (
+        "const run = async (args, agent, parallel, pipeline, phase, log, budget) => {\n"
+        + body + "\n};\n" + stub + "\n"
+        + "run(args, agent, parallel, pipeline, phase, log, budget).then(out => {\n"
+        + "  console.log(JSON.stringify({rounds: out.rounds,\n"
+        + "    gapRounds: out.coverage.GAP ? 1 : 0}));\n"
+        + "}).catch(e => { console.error('SCRIPT_THREW', e); process.exit(9); });\n"
+    )
+    r = json.loads(run_node(js))
+    assert r["rounds"] == 1, f"dryRequired=1 首轮 dry 即收口(实际 {r['rounds']} 轮)"
+    assert r["gapRounds"] == 0, "不应再开 gap 轮"

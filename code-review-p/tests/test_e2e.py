@@ -500,11 +500,12 @@ def test_c023_quick载体1走floor_only(tmp_path, quick_repo):
 
 
 def test_c018_journal单票升级走高危quorum(tmp_path):
-    """c018 回归: journal 路径单票把 P2 升 P1 → 不得单票 CONFIRMED 终裁。"""
+    """c018 回归 + P7: journal 路径单票把 P2 升 P1 → 与 verify.apply_votes 同
+    机制 —— 退回补其余透镜再终裁, 不再"按现有票立即聚合"的降级副本。"""
     from crp import journal as journal_mod
     from crp.models import State
     st = State(mode="deep", repo={"cwd": str(tmp_path)},
-               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20, "angles": ["A"]})
     data = {"finders": [{"angle": "A", "candidates": [
         {"file": "a.py", "line": 5, "summary": "upgrade rule defect beta",
          "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
@@ -516,7 +517,12 @@ def test_c018_journal单票升级走高危quorum(tmp_path):
     journal_mod.apply_compact(st, data)
     c = next(c for c in st.candidates if c["status"] != "dup")
     assert c["severity"] == "P1", "升级必须改写 severity"
-    assert c["verdict"] == "PLAUSIBLE", "单票不足高危 quorum → PLAUSIBLE"
+    assert c["verdict"] is None, "升级候选不在此终裁(退回复核)"
+    assert st.cursor["pending_verify"] == [
+        {"id": c["id"], "lenses": ["reproduction", "security"]}]
+    assert st.phase == "verify" and st.cursor["awaiting"] == "verdicts"
+    # 覆盖对账: 计划角度全部可见(死 finder 的空洞不再隐形)
+    assert set(st.coverage["angles"]) == {"A"}
 
 
 def test_c009_answer_run不死锁(tmp_path, quick_repo):
@@ -943,3 +949,104 @@ def test_p4_非UTF8的brief整份拒收exit3(tmp_path, quick_repo):
     # 路由不变: resume 仍等待 brief
     p2, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
     assert p2["next_step"]["type"] == "do_work"
+
+
+# ── P7 回修回归: journal 摄取契约(2026-11-02 全面审查) ───────────────
+def test_p7_journal票据枚举校验(tmp_path):
+    """P7 回归: 载体 1 票据原版完全绕过 validate_votes_file —— 任意 lens/
+    severity 字符串原样入票计入 REFUTED 多数并传播进 severity_final。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20, "angles": ["A"]})
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 5, "summary": "vote sanitize defect one",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}],
+        "verdicts": [
+            {"file": "a.py", "line": 5, "summary": "vote sanitize defect one",
+             "lens": "cross-check", "verdict": "REFUTED", "evidence": "q",
+             "severity": "P1"},   # lens 非枚举
+            {"file": "a.py", "line": 5, "summary": "vote sanitize defect one",
+             "lens": "correctness", "verdict": "REFUTED", "evidence": "  ",
+             "severity": "P1"},   # evidence 空(无引证不下裁决)
+            {"file": "a.py", "line": 5, "summary": "vote sanitize defect one",
+             "lens": "correctness", "verdict": "CONFIRMED", "evidence": "q",
+             "severity": "P9"},   # severity 非枚举
+        ], "counters": {}}
+    journal_mod.apply_compact(st, data)
+    c = next(c for c in st.candidates if c["status"] != "dup")
+    assert c["votes"] == [], "非法票据一律不入账"
+    assert st.accounting["invalid_votes"] == 3
+    assert c["verdict"] == "PLAUSIBLE", "无有效票 → PLAUSIBLE(不被垃圾票杀死)"
+
+
+def test_p7_歧义回显注记上报告(tmp_path):
+    """P7 回归: 歧义回显(带内命中不唯一)原版静默丢票, 仅日志一行 —— 现入
+    parity_notes(上报告)并计数。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    st.candidates = [
+        {"id": "c001", "file": "a.py", "line": 10, "summary": "alpha beta gamma one two",
+         "status": "fresh", "severity": "P2", "confidence": 0.9, "kept": False},
+        {"id": "c002", "file": "a.py", "line": 12, "summary": "delta epsilon zeta three four",
+         "status": "fresh", "severity": "P2", "confidence": 0.9, "kept": False},
+    ]
+    data = {"finders": [], "verdicts": [
+        {"file": "a.py", "line": 11, "summary": "gamma delta alpha beta epsilon three",
+         "lens": "correctness", "verdict": "REFUTED", "evidence": "q", "severity": "P2"},
+    ], "counters": {}}
+    # finders 空 → apply_compact 会拒; 直接调 _ingest_records(返回 finder 数)
+    journal_mod._ingest_records(st, journal_mod.records_from_compact(data))
+    assert all(not c.get("votes") for c in st.candidates), "歧义票不得落在任一候选"
+    assert st.accounting.get("ambiguous_echo_votes") == 1
+    assert any("回显歧义" in n and "2 个带内" in n
+               for n in st.accounting.get("parity_notes", []))
+
+
+def test_p7_证据上限与inline同量(tmp_path):
+    """P7 回归: 载体 1 证据原版截 400 字(inline 允 4000)—— 同一票不同载体
+    证据量实质不同; 现统一 config.MAX_EVIDENCE_CHARS。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    long_ev = "引证原文 " * 300  # 1500 字(>400, <4000)
+    data = {"finders": [{"angle": "A", "candidates": [
+        {"file": "a.py", "line": 5, "summary": "evidence limit defect one",
+         "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+         "category": "correctness"}]}],
+        "verdicts": [{"file": "a.py", "line": 5, "summary": "evidence limit defect one",
+                      "lens": "correctness", "verdict": "CONFIRMED",
+                      "evidence": long_ev, "severity": "P2"}],
+        "counters": {}}
+    journal_mod.apply_compact(st, data)
+    c = next(c for c in st.candidates if c["status"] != "dup")
+    assert len(c["votes"][0]["evidence"]) == len(long_ev.strip()), \
+        "400<长度≤4000 的证据不得截断(仅去首尾空白)"
+
+
+def test_p7_轮次记账只写末轮(tmp_path):
+    """P7 回归: journal 路径把最终 kept 总量覆写进每一条 round_history ——
+    与 verify.finalize_round 的逐轮快照语义不同; 现只在末轮写当前总量。"""
+    from crp import journal as journal_mod
+    from crp.models import State
+    st = State(mode="deep", repo={"cwd": str(tmp_path)},
+               sweep_plan={"keep": "confirmed_plausible", "cap": 20})
+    data = {"finders": [
+        {"angle": "A", "candidates": [
+            {"file": "a.py", "line": 1, "summary": "round one defect alpha",
+             "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+             "category": "correctness"}]},
+        {"angle": "GAP", "candidates": [
+            {"file": "b.py", "line": 2, "summary": "gap round defect beta",
+             "failure_scenario": "fs", "confidence": 0.9, "severity": "P2",
+             "category": "correctness"}]},
+    ], "verdicts": [], "counters": {}}
+    journal_mod.apply_compact(st, data)
+    hist = sorted(st.accounting["round_history"], key=lambda h: h["round"])
+    assert [h["round"] for h in hist] == [1, 2]
+    assert hist[0].get("kept_after_verify", 0) == 0, "非末轮不得写最终总量"
+    assert hist[1]["kept_after_verify"] == 2

@@ -232,3 +232,17 @@ def test_p2_carrier布尔值拒收():
     assert any("max_concurrent" in e for e in errs)
     assert any("max_agents" in e for e in errs)
     assert handlers._validate_carrier({"carrier": 2, "reason": "x"}) == []
+
+
+def test_p7_载体1args携带模式参数():
+    """P7 回归: 载体 1 workflow args 携带 dryRequired(JS 原硬编码 dry<2 的
+    deep 语义, standard 被多跑一整轮 gap); quick 传 verify:false 免对抗验证。"""
+    st = _state(mode="standard", phase="sweep", carrier={"carrier": 1, "reason": "wf"})
+    d = decisions.sweep_work(st, CTX)
+    assert f"dryRequired: {config.MODE_PARAMS['standard']['dry_required']}" in d.instructions
+    assert "verify: false" not in d.instructions
+
+    stq = _state(mode="quick", phase="sweep", carrier={"carrier": 1, "reason": "wf"})
+    dq = decisions.sweep_work(stq, CTX)
+    assert "verify: false" in dq.instructions and "floor-only" in dq.instructions
+    assert f"dryRequired: {config.MODE_PARAMS['quick']['dry_required']}" in dq.instructions

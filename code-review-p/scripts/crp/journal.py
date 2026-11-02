@@ -4,7 +4,7 @@
     1. transcript journal —— Workflow 工具原生持久化 <transcriptDir>/journal.jsonl
        (记录每个 agent 的真实返回值); 主上下文只搬运一个路径, 零逐字转录漂移。
     2. 压缩 journal —— journal 不可读时, deep-review.js 返回值携带的压缩台账
-       (evidence 截断 400 字/条), LLM 一次 Write 落盘后经 --file 提交。
+       (evidence 截断 MAX_EVIDENCE_CHARS/条), LLM 一次 Write 落盘后经 --file 提交。
 
 自描述返回(deep-review.js 的 schema 已改为):
     finder  {angle, candidates: [候选…]}
@@ -24,7 +24,10 @@ from .models import State
 
 # journal.jsonl 记录中"agent 返回值"的候选键(按序探测)
 _RESULT_KEYS = ("result", "output", "returnValue", "value", "data")
-_COMPACT_EVIDENCE_LIMIT = 400
+# P7 回修: 证据截断统一 config.MAX_EVIDENCE_CHARS(与 inline/载体 2 同限)——
+# 原版两条摄取路径都截 400 字, 同一票不同载体证据量实质不同; JS 侧
+# JOURNAL_EVIDENCE_CHARS 已同步, schema maxLength 本就允许 4000。
+_EVIDENCE_LIMIT = config.MAX_EVIDENCE_CHARS
 
 
 # --------------------------------------------------------------------------- #
@@ -72,20 +75,19 @@ def _classify(result) -> str:
     return "unknown"
 
 
-def _match_candidate(state: State, file, line, summary,
-                      file_index: Optional[dict] = None,
-                      token_cache: Optional[dict] = None) -> Optional[dict]:
-    """把 refuter 自描述返回匹配回台账候选。
+def _match_pool(state: State, file, line, summary,
+                 file_index: Optional[dict] = None,
+                 token_cache: Optional[dict] = None) -> tuple[Optional[dict], int]:
+    """把 refuter 自描述返回匹配回台账候选; 返回 (候选, 带内命中数)。
 
     回修 c051: echo 的 file:line 可能与台账条目有小漂移(多 finder 对同一缺陷
     的行号取点不同), 只做精确匹配会让票据落在 dup 副本或完全丢失 —— 与
     find_dup 同语义: 同 file + 行号 ±DEDUP_LINE_BAND + 摘要重叠; 精确命中
-    优先, 带内命中唯一才算。
+    优先, 带内命中唯一才算(歧义返回 None, 计数交调用方注记 —— P7 回修,
+    原版静默丢票只在日志一行)。
 
     P6 回修: file_index/token_cache 由调用方预建(按归一文件索引 + 摘要
-    token 缓存)—— 原版每条记录线性走全部候选并对每个同文件条目重算
-    tokens_of(≤500 字摘要), 200-finding 审查约 24 万次字典探测加数千次
-    重复分词。匹配语义逐字不变(JS isDup 是 parity 锁定孪生)。
+    token 缓存)。匹配语义逐字不变(JS isDup 是 parity 锁定孪生)。
     """
     from . import config as _config
     nf = ledger.norm_file(file, (state.repo or {}).get("cwd", ""))
@@ -113,8 +115,18 @@ def _match_candidate(state: State, file, line, summary,
             if ledger.overlap_toks(toks, ctoks):
                 banded.append(c)
     if exact is not None:
-        return exact
-    return banded[0] if len(banded) == 1 else None
+        return exact, 0
+    if len(banded) == 1:
+        return banded[0], 1
+    return None, len(banded)
+
+
+def _match_candidate(state: State, file, line, summary,
+                     file_index: Optional[dict] = None,
+                     token_cache: Optional[dict] = None) -> Optional[dict]:
+    """兼容外壳(测试/旧行为): 只返回候选。"""
+    return _match_pool(state, file, line, summary,
+                       file_index=file_index, token_cache=token_cache)[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +157,7 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
                 round_no, origin = 1 + gap_seen, "gap"
             valid: list[dict] = []
             cov = state.coverage.setdefault("angles", {}).setdefault(
-                angle, {"ran": True, "raw": 0, "fresh": 0, "dropped": 0, "dropped_invalid": 0})
+                angle, ledger.default_angle_coverage(True))
             for c in (result.get("candidates") or []):
                 if not isinstance(c, dict):
                     c = {}
@@ -170,34 +182,59 @@ def _ingest_records(state: State, records: Iterator[tuple[str, object]]) -> int:
                     if c.get("status") != "dup":
                         file_index.setdefault(c.get("file"), []).append(c)
                 index_dirty = False
-            cand = _match_candidate(state, result.get("file"), result.get("line"),
-                                    result.get("summary"),
-                                    file_index=file_index, token_cache=token_cache)
+            cand, n_banded = _match_pool(state, result.get("file"), result.get("line"),
+                                         result.get("summary"),
+                                         file_index=file_index, token_cache=token_cache)
             if cand is None:
+                # P7 回修: 歧义回显不再静默 —— parity 注记上报告 + 计数
+                if n_banded > 1:
+                    state.accounting.setdefault("parity_notes", []).append(
+                        f"refuter 回显歧义: {result.get('file')}:{result.get('line')} "
+                        f"同时命中 {n_banded} 个带内候选, 票丢弃(人工对照)")
+                    state.accounting["ambiguous_echo_votes"] = \
+                        state.accounting.get("ambiguous_echo_votes", 0) + 1
                 module_logger().warning(
                     f"journal: refuter 返回无法匹配候选: {result.get('file')}:{result.get('line')}")
                 continue
+            # P7 回修: 票据过枚举校验(原版完全绕过 validate_votes_file, 任意
+            # lens/severity 字符串原样入票计入多数)—— lens/severity 非枚举或
+            # evidence 缺失/超长者丢弃计数, 不再污染裁决与 severity_final
+            lens = result.get("lens") or "correctness"
+            sev = result.get("severity") or cand.get("severity")
+            ev = str(result.get("evidence") or "").strip()
+            if (lens not in config.LENSES or sev not in config.SEVERITIES
+                    or not ev or len(ev) > config.MAX_EVIDENCE_CHARS):
+                module_logger().warning(
+                    f"journal 票据非法丢弃({result.get('file')}:{result.get('line')}): "
+                    f"lens={lens!r} severity={sev!r} evidence_len={len(ev)}")
+                state.accounting["invalid_votes"] = \
+                    state.accounting.get("invalid_votes", 0) + 1
+                continue
             cand.setdefault("votes", []).append({
-                "lens": result.get("lens") or "correctness",
+                "lens": lens,
                 "verdict": result.get("verdict"),
-                "evidence": str(result.get("evidence") or "")[:_COMPACT_EVIDENCE_LIMIT],
-                "severity": result.get("severity") or cand.get("severity"),
+                "evidence": ev[:_EVIDENCE_LIMIT],
+                "severity": sev,
                 "source": "agent",
             })
     state.cursor["round"] = 1 + gap_seen
     return finder_count
 
 
-def _finalize_all(state: State) -> None:
-    """终裁。
+def _finalize_all(state: State) -> list[dict]:
+    """终裁; 返回需补透镜的升级候选 [{id, lenses}](调用方据此进入 verify 相位)。
 
     回修 c023: quick 模式走 floor-only 语义(verdict 保持 null), 不得套用
     mode keep 阈值; 回修 c018: 单票把 P2/P3 升为 P0/P1 时改写 severity,
-    使聚合按高危法定票数走(单票不足 quorum → PLAUSIBLE, 不再按单票终裁)。
+    使聚合按高危法定票数走。
+    P7 回修: 升级不再"改写后立即按现有票聚合"的降级副本 —— 与
+    verify.apply_votes 同机制: 退回复核其余透镜(升级候选经 pending_verify
+    由常规验证轮补票终裁, P0/P1 永不躺在单票上, SKILL.md §7 契约)。
     """
     if state.mode == "quick":
         verify.finalize_without_verify(state)
-        return
+        return []
+    pending: list[dict] = []
     for c in state.candidates:
         if c.get("status") in ("dup", "verified", "unverified"):
             continue
@@ -205,29 +242,53 @@ def _finalize_all(state: State) -> None:
         if not votes:
             c["evidence"] = ("workflow 预算耗尽前未经反驳(deep 保留 PLAUSIBLE) —— "
                              "无引证可用, 见 journal")
-        elif not verify.is_high(c.get("severity")):
+        elif not verify.is_high(c.get("severity")) and len(votes) == 1:
             highs = [v for v in votes if verify.is_high(v.get("severity"))]
             if highs:
+                # 升级: 改写 severity, 补其余透镜再终裁(不在此聚合)
                 c["severity"] = highs[0].get("severity")
-                c["evidence"] = ((c.get("evidence") or "") +
-                                 " [refuter 升级为高危; journal 路径无补透镜通道, "
-                                 "按高危法定票数聚合]")
+                rest = [l for l in config.LENSES
+                        if l not in {v.get("lens") for v in votes}]
+                pending.append({"id": c["id"], "lenses": rest})
+                continue
         verify.finalize_candidate(state, c)
+    return pending
 
 
-def _account_rounds(state: State) -> None:
-    """轮次收敛记账(dry 重算自 round_history 的 fresh)。"""
+def _account_rounds(state: State, to_report: bool = True) -> None:
+    """轮次收敛记账(dry 重算自 round_history 的 fresh)。
+
+    P7 回修: kept_after_verify 只写末轮 —— 原版把最终 kept 总量覆写进每一条
+    round_history, 与 verify.finalize_round 的逐轮快照语义不同(同一字段两
+    载体含义不同); journal 一次性摄取无法回溯逐轮快照, 末轮即当前总量。
+    to_report=False(存在升级补透镜候选)时不清队列不推进相位。
+    """
     hist = state.accounting.setdefault("round_history", [])
     dry = 0
     for h in sorted(hist, key=lambda x: x.get("round", 0)):
-        h["kept_after_verify"] = sum(1 for c in state.candidates if c.get("kept"))
         h["dry"] = h.get("fresh", 0) == 0
         dry = dry + 1 if h["dry"] else 0
+    if hist:
+        last = max(hist, key=lambda x: x.get("round", 0))
+        last["kept_after_verify"] = sum(1 for c in state.candidates if c.get("kept"))
     state.cursor["dry_streak"] = dry
     state.accounting["rounds"] = state.cursor["round"]
-    state.cursor["pending_verify"] = []
-    state.cursor["pending_angles"] = []
-    state.phase, state.cursor["awaiting"] = "report", "details"
+    if to_report:
+        state.cursor["pending_verify"] = []
+        state.cursor["pending_angles"] = []
+        state.phase, state.cursor["awaiting"] = "report", "details"
+
+
+def _reconcile_coverage(state: State) -> None:
+    """P7 回修: 计划角度对账 —— 死 finder 的覆盖空洞在台账可见。
+
+    JS 侧 {ran:false} 注册(v1.4.1 #10)只活在被丢弃的 workflow 返回值里;
+    引擎侧按 sweep_plan 角度补齐缺省条目, coverage 空洞在 ledger.json 可见
+    ('no silent caps/coverage holes' 契约)。
+    """
+    for a in (state.sweep_plan or {}).get("angles") or []:
+        state.coverage.setdefault("angles", {}).setdefault(
+            a, ledger.default_angle_coverage(False))
 
 
 def _parity_notes(state: State, js: dict) -> None:
@@ -280,13 +341,19 @@ def ingest_transcript(state: State, transcript_dir: Path,
     count = _ingest_records(state, records_from_transcript(transcript_dir))
     if count == 0:
         raise ValueError(f"journal 中未发现 finder 返回: {transcript_dir}")
-    _finalize_all(state)
-    _account_rounds(state)
+    _reconcile_coverage(state)
+    upgrades = _finalize_all(state)
+    _account_rounds(state, to_report=not upgrades)
+    if upgrades:
+        # 单票升级的候选退回验证相位补其余透镜(P7: 与 verify.apply_votes 同机制)
+        state.cursor["pending_verify"] = upgrades
+        state.phase, state.cursor["awaiting"] = "verify", "verdicts"
     if js_counters:
         _parity_notes(state, js_counters)
     return (f"journal 摄取: {count} finder 返回, "
             f"{state.accounting.get('total_seen', 0)} 入账, "
-            f"{len(state.accounting.get('round_history') or [])} 轮")
+            f"{len(state.accounting.get('round_history') or [])} 轮"
+            + (f", {len(upgrades)} 条升级待补透镜" if upgrades else ""))
 
 
 def load_compact(path) -> dict:
@@ -302,9 +369,14 @@ def apply_compact(state: State, data: dict) -> str:
     count = _ingest_records(state, records_from_compact(data))
     if count == 0:
         raise ValueError("压缩 journal 中无 finder 返回")
-    _finalize_all(state)
-    _account_rounds(state)
+    _reconcile_coverage(state)
+    upgrades = _finalize_all(state)
+    _account_rounds(state, to_report=not upgrades)
+    if upgrades:
+        state.cursor["pending_verify"] = upgrades
+        state.phase, state.cursor["awaiting"] = "verify", "verdicts"
     js = data.get("counters") or {}
     if js:
         _parity_notes(state, js)
-    return f"压缩 journal 摄取: {count} finder 返回"
+    return (f"压缩 journal 摄取: {count} finder 返回"
+            + (f", {len(upgrades)} 条升级待补透镜" if upgrades else ""))

@@ -324,13 +324,20 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
     # 永远无法满足引擎); 复审轮(quick 语义单轮)固定走常规 candidates 提交。
     if carrier_no == 1 and round_kind != "fix_review":
         output = str(ctx.in_dir / "04-carrier1-transcript-dir.txt")
+        # P7 回修: dryRequired 下发(原版 JS 硬编码 dry<2 的 deep 语义, standard
+        # 被多跑一整轮 gap); quick 传 verify:false 免对抗验证(引擎 floor-only
+        # 摄取, 反驳预算不再白烧)。
+        quick_arg = ", verify: false" if state.mode == "quick" else ""
         instructions = (
             "载体 1(Workflow 工具, 仅主会话): 以 scriptPath 调用已安装的 "
             "workflows/deep-review.js, args 携带 "
             "{brief: <02-brief.md 全文>, scope: <scope_command>, cwd: <仓库绝对路径>, "
             f"angles: {angles}, maxRounds: {plan.get('max_rounds')}, "
-            f"maxAgents: {max_agents_eff}, concurrency: {max_conc}}}。\n"
-            "运行结束后, 把工具结果中的 transcriptDir 路径原样写入 output 文件(单行)。\n"
+            f"dryRequired: {plan.get('dry_required')}, "
+            f"maxAgents: {max_agents_eff}, concurrency: {max_conc}{quick_arg}}}。\n"
+            + ("quick 模式: verify:false —— workflow 不跑对抗验证, 引擎按 floor-only 摄取。\n"
+               if state.mode == "quick" else "")
+            + "运行结束后, 把工具结果中的 transcriptDir 路径原样写入 output 文件(单行)。\n"
             "若 journal 不可读, 改写压缩 journal JSON 到同一文件(引擎按内容嗅探)。"
         )
         return Decision(

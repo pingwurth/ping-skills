@@ -97,10 +97,17 @@ def overlap_toks(a: set[str], b: set[str]) -> bool:
 
 
 def find_dup(seen: list[dict], cand: dict) -> Optional[dict]:
-    """在曾见台账中找同缺陷条目: 同 file + 行号 ±DEDUP_LINE_BAND + 摘要重叠。"""
+    """在曾见台账中找同缺陷条目: 同 file + 行号 ±DEDUP_LINE_BAND + 摘要重叠。
+
+    P7 回修: status=='dup' 的台账行不作锚 —— JS 的 seen 只收 fresh(非传递),
+    原版 Python 把 dup 行也当锚(传递), 渐进漂移链(10/12/14)两载体分类不同;
+    对齐为非传递(dup 行已由其锚代表), 共享 fixture 链式用例锁死。
+    """
     toks = tokens_of(cand.get("summary", ""))
     cline = cand.get("line") or 0
     for p in seen:
+        if p.get("status") == "dup":
+            continue
         if p.get("file") != cand.get("file"):
             continue
         if abs((p.get("line") or 0) - cline) > config.DEDUP_LINE_BAND:
@@ -113,6 +120,12 @@ def find_dup(seen: list[dict], cand: dict) -> Optional[dict]:
 # --------------------------------------------------------------------------- #
 # 候选 schema 校验(全有或全无; 拒收不截断)
 # --------------------------------------------------------------------------- #
+def default_angle_coverage(ran: bool = False) -> dict:
+    """coverage 角度条目的唯一形状(P7 回修: journal/ledger 两处字面量已分叉
+    —— journal 版多 dropped_invalid 且 ran 默认 True, ledger 版反之)。"""
+    return {"ran": ran, "raw": 0, "fresh": 0, "dropped": 0, "dropped_invalid": 0}
+
+
 def validate_candidate(c: object, where: str) -> list[str]:
     """单条候选校验; 返回错误列表(空 = 通过)。"""
     errs: list[str] = []
@@ -210,7 +223,7 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
     for item in data.get("items", []):
         angle = item.get("angle", "?")
         cov = state.coverage.setdefault("angles", {}).setdefault(
-            angle, {"ran": False, "raw": 0, "fresh": 0, "dropped": 0})
+            angle, default_angle_coverage(False))
         cov["ran"] = cov.get("ran") or bool((item.get("coverage") or {}).get("ran", True))
         cands = item.get("candidates") or []
         if len(cands) > config.MAX_CANDIDATES_PER_ANGLE:
