@@ -67,7 +67,11 @@ def test_总量预算环境覆盖(monkeypatch):
     assert config.agent_budget(12) == config.default_max_agents(12) == 96
     monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "20")
     assert config.agent_budget(13) == 20
-    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "3")  # 下限 12(对齐 deep-review.js)
-    assert config.agent_budget(1) == config.MAX_AGENTS_MIN
+    # P12(c025): 下限 1 与 JS 同口径(deep-review.js 已删 Math.max(12,…) 地板,
+    # env 旋钮的 1-11 收紧必须生效而非静默抬回 12)
+    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "3")
+    assert config.agent_budget(1) == 3
+    monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "1")
+    assert config.agent_budget(13) == 1
     monkeypatch.setenv(config.CRP_MAX_AGENTS_ENV, "abc")
     assert config.agent_budget(12) == 96

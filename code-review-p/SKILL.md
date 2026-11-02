@@ -71,7 +71,7 @@ report and ledger export.
 
 ```bash
 python3 scripts/crp.py start  [--mode quick|standard|deep] [--target <branch|PR|range|path|repo>] [--fix] [--run-dir D] [--force]
-python3 scripts/crp.py resume [--run-dir D]          # the universal router
+python3 scripts/crp.py resume [--run-dir D]          # the universal router (`next` is an alias)
 python3 scripts/crp.py submit --kind <overlay|brief|candidates|verdicts|details|carrier|fix-outcomes> --file F [--run-dir D]
 python3 scripts/crp.py submit --kind carrier1 --transcript-dir D [--run-dir D]   # Workflow journal ingest
 python3 scripts/crp.py answer --run-dir D --key <scope|gates|drift|run> --choice <option> [--value V]
@@ -134,8 +134,8 @@ sync pairs, doc claims); section 5 marks read-only vs write.
 Project config: repo overlay (`.claude/code-review-p.md`) → CLAUDE.md/AGENTS.md
 → heuristic gate scan. The engine determines overlay trust; an untrusted
 overlay's exclusions are **suspended** (they become review targets, not scope
-cuts) and its gates need user confirmation — one batched ask_user after the
-brief, never repeated. [references/project-config.md](references/project-config.md).
+cuts) and its gates need user confirmation — one batched ask_user after each
+brief (a scope re-import after drift re-extracts the overlay and re-asks). [references/project-config.md](references/project-config.md).
 
 ## 5 — Phase 2: candidate sweep (generate; do NOT filter)
 

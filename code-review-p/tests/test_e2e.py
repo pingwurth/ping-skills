@@ -1370,3 +1370,49 @@ def test_p11_carrier1重开轮重贴吸收(tmp_path, quick_repo):
     p3, _ = d.run_argv(argv)
     st3 = json.loads(sp.read_text(encoding="utf-8"))
     assert st3["accounting"]["total_seen"] == seen, "吸收不得重复入账"
+
+
+# ── P12 回修回归: 尾巴批次(2026-11-02 傍晚) ──────────────────────────
+def test_p12_new_scope重置计数器并翻页幂等(tmp_path):
+    """P12(c016+scope_epoch): new_scope 重置收敛计数器/验证队列/修复状态并
+    递增 scope_epoch —— 同字节 overlay 重投不再命中旧幂等键被误吞(实测:
+    重提取从未发生), carrier1 同字节 journal 重环活锁同根解除。"""
+    import argparse
+    from crp import handlers as handlers_mod
+    from crp.models import State as MState
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", ".claude/code-review-p.md": "# o\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "standard")
+    ns = payload["next_step"]  # overlay do_work
+    d._note_run_dir(ns)
+    overlay_body = json.dumps({"red_lines": [], "gates": [], "exclusions": [], "invariants": []})
+    Path(ns["output"]).write_text(overlay_body)
+    payload, _ = d.run_argv(ns["submit"]["params"])
+    # 构造 drift 待决(旧范围打到 round 2 + fix 残留)
+    sp = d.run_dir / "state.json"
+    st = json.loads(sp.read_text(encoding="utf-8"))
+    st["cursor"]["round"] = 2
+    st["cursor"]["dry_streak"] = 1
+    st["cursor"]["pending_verify"] = [{"id": "cX", "lenses": ["correctness"]}]
+    st["accounting"]["round_history"] = [{"round": 2, "kind": "gap", "fresh": 0, "dup": 0,
+                                          "kept_after_verify": 1, "dry": True}]
+    st["fix"] = {"re_review_done": True, "outcomes": [{"id": "cX", "outcome": "fixed"}]}
+    st["pending_question"] = {"key": "drift", "at": "t"}
+    sp.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    p, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "drift",
+                        "--choice", "new_scope"])
+    st = json.loads(sp.read_text(encoding="utf-8"))
+    assert st["cursor"]["round"] == 0 and st["cursor"]["dry_streak"] == 0
+    assert st["cursor"]["pending_verify"] == [] and st["cursor"]["round_kind"] == "sweep"
+    assert st["accounting"]["round_history"] == []
+    assert st["fix"]["re_review_done"] is False and "outcomes" not in st["fix"]
+    assert st["cursor"]["scope_epoch"] == 1, "幂等账本翻页"
+    # 同字节 overlay 重投: 不被吸收, 正常入账推进
+    ns2 = p["next_step"]
+    assert ns2["type"] == "do_work"  # 回 overlay 重提取
+    Path(ns2["output"]).write_text(overlay_body)  # 与第一次字节相同
+    p2, rc2 = d.run_argv(ns2["submit"]["params"])
+    assert "重复提交已吸收" not in p2["summary"], "跨范围同字节是新工作, 不得误吞"
+    st = json.loads(sp.read_text(encoding="utf-8"))
+    assert st["phase"] == "brief", "重提取真实发生"

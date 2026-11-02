@@ -179,7 +179,7 @@ def brief_work(state: State, ctx: RouteCtx) -> Decision:
 
 
 def gates_question(state: State, ctx: RouteCtx) -> Decision:
-    """A4: 门禁确认前置 —— 恰好一次批量 ask_user(brief 之后)。"""
+    """A4: 门禁确认 —— 每次 brief 之后恰一次批量 ask_user(重导范围后重提取并重问)。"""
     ov = state.overlay or {}
     undecided = [g for g in (ov.get("gates") or [])
                  if g.get("approval") == "unset" and g.get("semantics") != "write"]

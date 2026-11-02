@@ -221,6 +221,48 @@ def resolve_run_dir(explicit: Optional[str], cwd: str | Path,
 # --------------------------------------------------------------------------- #
 # 每个迁移函数接收 raw dict 并 in-place 修改, 将 schema 从 v(N-1) 升级到 vN。
 # 新增结构变更时: ① 递增 config.STATE_SCHEMA_VERSION  ② 追加迁移函数。
+def _normalize_state_types(data: dict) -> None:
+    """类型归一(常驻, 不依赖 schema 版本)。
+
+    P12(c019): P11 的类型防御只在 v1→v2 迁移里 —— v2 态的畸形类型绕过防御,
+    mode_params 在 brief/finalize 时 TypeError → exit-2(端到端实证)。归一移到
+    load 常驻路径。P12(c006): 归一不再静默 —— 非法 mode/类型回填记 warning
+    (原版静默把 deep 换成 standard 预算且首存后不可检)。
+    """
+    mode = data.get("mode")
+    fixed = None
+    if not isinstance(mode, str):
+        fixed = mode
+        mode = config.DEFAULT_MODE
+    elif mode not in config.MODE_PARAMS:
+        fixed = mode
+        mode = config.DEFAULT_MODE
+    if fixed is not None:
+        module_logger().warning(
+            f"state.json mode 非法({fixed!r})已归一为 {mode}(预算/保留阈值按默认)")
+        data["mode"] = mode
+    for key in ("sweep_plan", "repo", "cursor", "overlay", "scope", "brief",
+                "carrier", "coverage", "accounting", "report", "fix",
+                "interrupted"):
+        val = data.get(key)
+        if not isinstance(val, dict):
+            if val is not None:
+                module_logger().warning(
+                    f"state.json {key} 类型非法({type(val).__name__})已归一为 {{}}")
+            data[key] = {}  # 缺失同补(from_dict 本就默认 {}, 形状统一)
+    plan = data.get("sweep_plan")
+    if isinstance(plan, dict):
+        angles = plan.get("angles")
+        if not isinstance(angles, list):
+            if angles is not None:
+                module_logger().warning("state.json sweep_plan.angles 类型非法已归一为 []")
+            plan["angles"] = []  # 缺失同置 [](形状统一, 消费者免查键)
+    if not isinstance(data.get("candidates"), list):
+        data["candidates"] = []
+    if not isinstance(data.get("submissions"), list):
+        data["submissions"] = []
+
+
 def _migrate_v1_to_v2(data: dict) -> None:
     """v1→v2: 回填 sweep_plan 的并发/预算键(2026-11 并发治理新增)与 repo.root。
 
@@ -231,11 +273,9 @@ def _migrate_v1_to_v2(data: dict) -> None:
     # P11(c032): 畸形但合法 JSON 的类型防御 —— 原版 MODE_PARAMS.get(不可哈希
     # mode)/len(非列表 angles) 抛 TypeError 逃出 load 的 ValueError 捕获,
     # "损坏→None→exit-3 自愈"契约退化为 exit-2 内部错误(实证)
+    # 类型归一由 load 常驻的 _normalize_state_types 负责(P12/c019)
     mode = data.get("mode")
-    if not isinstance(mode, str):
-        mode = config.DEFAULT_MODE
-        data["mode"] = mode
-    params = config.MODE_PARAMS.get(mode)
+    params = config.MODE_PARAMS.get(mode) if isinstance(mode, str) else None
     plan = data.get("sweep_plan")
     if not isinstance(plan, dict):
         plan = {}
@@ -245,10 +285,8 @@ def _migrate_v1_to_v2(data: dict) -> None:
             plan.setdefault(key, params[key])
     plan.setdefault("confidence_floor", config.CONFIDENCE_FLOOR)
     angles = plan.get("angles")
-    if not isinstance(angles, list):
-        angles = []
-        plan["angles"] = angles
-    plan.setdefault("max_agents", config.agent_budget(len(angles)))
+    plan.setdefault("max_agents",
+                    config.agent_budget(len(angles)) if isinstance(angles, list) else 0)
     plan.setdefault("max_concurrent", config.max_concurrent_agents())
     repo = data.get("repo")
     if not isinstance(repo, dict):
@@ -354,6 +392,10 @@ class StateStore:
         finally:
             try:
                 _unlock_file(fp)
+            except OSError as exc:
+                # P12(c015): _lock_file 抛出时 fd 从未上锁, Windows 的 LK_UNLCK
+                # 对未锁区自身抛错并覆盖原始异常(POSIX 为 no-op)—— 记日志不 raise
+                module_logger().warning(f"解锁失败(fd 可能从未上锁, POSIX 为 no-op): {exc}")
             finally:
                 fp.close()
 
@@ -376,6 +418,7 @@ class StateStore:
             return None
         try:
             data = _migrate(data)
+            _normalize_state_types(data)  # P12(c019): 常驻, v2 态同样归一
         except (ValueError, TypeError) as exc:
             module_logger().warning(f"state.json 迁移失败: {exc}")
             return None
@@ -410,5 +453,7 @@ class StateStore:
             try:
                 meta_path.unlink(missing_ok=True)
                 meta_tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                # P12(c013): 双失败不再静默 —— 陈旧 meta 若幸存, list_runs 仍会
+                # 误读, 至少留下日志线索
+                module_logger().warning(f"meta 边车删除失败(陈旧 meta 可能残留): {exc}")

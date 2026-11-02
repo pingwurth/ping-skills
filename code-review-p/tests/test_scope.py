@@ -366,3 +366,30 @@ def test_p9_改名进overlay路径被判untrusted(tmp_path):
     assert ".claude/code-review-p.md" in sc["diff_files"], "改名目标即真实新路径"
     trust, _ = overlay.trust_of(sc, ".claude/code-review-p.md")
     assert trust == "untrusted", "被审 diff 引入/触及 overlay 必须 untrusted"
+
+
+# ── P12 回修回归: 第二轮自食验收尾巴(2026-11-02 傍晚) ────────────────
+def test_p12_字面箭头与C引用路径保持原样(tmp_path):
+    """P12 根修(-z): P9 的花括号/箭头解析对字面 ' => ' 文件名是回归、对
+    C 引用路径未解码; -z 输出原始 NUL 字段, 两类路径原样保真。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "plain => arrow.txt": "p\n",
+                 "cfg{a => b}.txt": "c\n", "uni\xe9.py": "u\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n", "plain => arrow.txt": "p2\n",
+               "cfg{a => b}.txt": "c2\n", "uni\xe9.py": "u2\n"})
+    sc = scope_mod.resolve_scope(repo.root)
+    assert "plain => arrow.txt" in sc["diff_files"], "字面箭头文件名不得被截断"
+    assert "cfg{a => b}.txt" in sc["diff_files"], "字面花括号文件名不得被改写"
+    assert "uni\xe9.py" in sc["diff_files"], "非 ASCII 路径不得带 C 引用/转义"
+    assert not any('"' in f or "\\251" in f for f in sc["diff_files"]), "不得出现引号/八进制转义"
+
+
+def test_p12_z模式重命名取新路径(tmp_path):
+    """P12: -z 模式下重命名行为空槽+old+new 两个 NUL 字段 —— 取 new 为审查对象。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "src/old_name.txt": "old\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    (repo.root / "src" / "old_name.txt").rename(repo.root / "src" / "new_name.txt")
+    repo.stage("src/old_name.txt"); repo.stage("src/new_name.txt")
+    sc = scope_mod.resolve_scope(repo.root)
+    assert sc["diff_files"] == ["src/a.py", "src/new_name.txt"]

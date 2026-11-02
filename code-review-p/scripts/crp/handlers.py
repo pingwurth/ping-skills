@@ -293,6 +293,17 @@ def cmd_resume(args) -> tuple[Decision, EmitContext]:
         if err is not None:
             return err, EmitContext(run_dir=run_dir)
         if state.is_done:
+            # P12(c012): 修复陈旧 meta 边车 —— 终写在两 rename 间崩溃会留下
+            # done=false 的 meta, done 运行不再 save 故永不自愈(list_runs 永远
+            # 误读为未完成); resume 是天然的修复点
+            meta_path = run_dir / config.META_FILENAME
+            if meta_path.is_file():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if isinstance(meta, dict) and meta.get("done") != state.is_done:
+                        store.save(state)
+                except (OSError, ValueError):
+                    pass
             return decisions.decide_next(state, _ctx(state, run_dir)), \
                 EmitContext(run_dir=run_dir, state=state)
         # P2 回修: 范围逃逸口存活时不得继续 —— 原版 resume 只看 phase, 一条普通
@@ -382,8 +393,11 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                 # P11(c004): carrier1 幂等键不含 round —— 常规种类含 round 防
                 # 连续空 gap 轮误吞, 但 carrier1 的同一 journal 字节无论在哪个
                 # 轮次重贴都是同一份工作; 含 round 使引擎侧重开 gap 轮后的
-                # 陈旧重贴绕开吸收分支而双重入账(实证)
-                idem = f"carrier1|{digest}"
+                # 陈旧重贴绕开吸收分支而双重入账(实证)。
+                # P12: 含 scope_epoch —— drift new_scope 重环后的同字节 journal
+                # 按新工作摄取(否则重置 round 后命中旧 idem 无限吸收 = 活锁,
+                # 第二轮自食验收实证); 同范围内的 429 重贴仍吸收。
+                idem = f"carrier1|{state.cursor.get('scope_epoch', 0)}|{digest}"
                 dup = next((s for s in state.submissions
                             if s.get("idem") == idem and s.get("applied")), None)
                 if dup is not None:
@@ -420,9 +434,10 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
         except OSError as exc:
             raise StepError.state_error(f"提交文件不可读: {path} ({exc})")
         digest = hashlib.sha256(raw).hexdigest()
-        # 幂等键含轮次: 同轮内字节相同重投 = 孤儿结果吸收; 跨轮同字节(如连续
-        # 空的 gap 轮)是新工作, 不得误吞 —— 否则 gap 循环死锁
-        idem = f"{kind}|{state.cursor.get('round', 0)}|{digest}"
+        # 幂等键含范围代次+轮次: 同轮内字节相同重投 = 孤儿结果吸收; 跨轮同
+        # 字节(如连续空的 gap 轮)是新工作, 不得误吞 —— 否则 gap 循环死锁;
+        # scope_epoch 随 drift new_scope 递增(跨范围重环同字节按新工作摄取)
+        idem = f"{kind}|{state.cursor.get('scope_epoch', 0)}|{state.cursor.get('round', 0)}|{digest}"
         dup = next((s for s in state.submissions
                     if s.get("idem") == idem and s.get("applied")), None)
         if dup is not None:
@@ -796,6 +811,24 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                     _touch(state); store.save(state)
                     return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
                 state.scope = sc
+                # P12 回修(c016): 重导范围 = 新一轮审查 —— 收敛计数器/验证队列/
+                # 修复状态归零(原版沿用旧范围计数: 新 diff 以 round 3 撞轮顶单轮
+                # 收口; --fix 残留 re_review_done 跳过新 diff 复审; 旧 pending_verify
+                # 候选混入新验证队列)。台账(candidates/总账)按契约保留。
+                state.cursor["round"] = 0
+                # 幂等翻页(P12, c016 衍生/c001 同族): 重置 round=0 会使跨范围
+                # 同字节提交命中旧 idem 被误吞(实测: 同字节 overlay 重投被吸收,
+                # 重提取从未发生; 同字节 journal 重环活锁同根)。scope_epoch 递增
+                # 后: 同一范围内的 429 重贴仍吸收(c004), 跨范围重环按新工作摄取。
+                state.cursor["scope_epoch"] = state.cursor.get("scope_epoch", 0) + 1
+                state.cursor["dry_streak"] = 0
+                state.cursor["round_kind"] = "sweep"
+                state.cursor["pending_verify"] = []
+                state.cursor["pending_angles"] = []
+                state.accounting["round_history"] = []
+                if state.fix:
+                    state.fix["re_review_done"] = False
+                    state.fix.pop("outcomes", None)
                 # P10 回修(c009, 吸收 P1-4 手写重评块): 重导范围后一律回 overlay
                 # 阶段重新发现/提取 —— 信任判定、内容、门禁、排除全部以当前
                 # 文件为准。原版沿用中断前的 ov['content']: 旧排除施加于新

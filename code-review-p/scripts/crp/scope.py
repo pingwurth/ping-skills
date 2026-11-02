@@ -93,45 +93,37 @@ def _pr_diff_files(cwd: str | Path, pr_number: Optional[int] = None) -> Optional
     return [f for f in out.splitlines() if f and not f.startswith(("Draft:", "Title:"))]
 
 
-def _numstat_new_path(raw: str) -> str:
-    """numstat 第三列 → 真实新路径(重命名形归一)。
-
-    P9 回修(自食验收 P1): diff.renames 默认开, numstat 的重命名行打
-    '{old => new}' / 'old => new' 伪路径 —— 原样入库使 brief 拿到打不开的
-    路径、apply_exclusions 失配、trust_of 精确成员判定失配(改名进
-    .claude/code-review-p.md 逃过 untrusted, A3 绕过, 已实证)。
-    """
-    if "{" in raw and "}" in raw and "=>" in raw:
-        pre, rest = raw.split("{", 1)
-        mid, post = rest.split("}", 1)
-        new = mid.split("=>", 1)[1].strip() if "=>" in mid else ""
-        return (pre + new + post).strip()
-    if "=>" in raw:
-        return raw.split("=>", 1)[1].strip()
-    return raw
-
-
 def _diff_stat(cwd: str | Path, diff_args: list[str]) -> tuple[Optional[list[str]], int, int]:
-    """`git diff --numstat <args>` 一条命令同时取文件清单与增删行数。
+    """`git diff --numstat -z <args>` 一条命令同时取文件清单与增删行数。
 
-    P6 回修: 原 _diff_files(--name-only) + _numstat(--numstat) 每个命中
-    rung 把同一 git diff 跑两遍 —— 大树上每次 git diff 100-500ms 的纯双倍
-    功; 且路径受限 rung 3/4 的 _numstat 漏掉 -- target(统计口径不一致)。
-    每行 ins<TAB>del<TAB>path(二进制为 -); 失败返回 (None, 0, 0) 继续下降。
+    P6 合并两遍 diff; P9 用花括号/箭头解析归一重命名 —— 第二轮自食验收实证
+    该解析对字面 ' => ' 文件名是回归、对 C 引用路径(quotePath 默认开)未解码。
+    P12 根修: -z 模式输出 NUL 分隔的**原始**字段 —— 重命名行为
+    `ins<TAB>del<TAB>`(第三列空)后随 `\0old\0new` 两个真实路径, 无任何伪
+    路径/C 引用, 字面 ' => ' 文件名保持单字段; 普通行为 `ins<TAB>del<TAB>path\0`。
+    二进制行 ins/del 为 '-'; 失败返回 (None, 0, 0) 继续下降。
     """
-    ok, out = gitops.run(["diff", "--numstat", *diff_args], cwd)
+    ok, out = gitops.run(["diff", "--numstat", "-z", *diff_args], cwd)
     if not ok:
         return None, 0, 0
     files: list[str] = []
     ins = dele = 0
-    for line in out.splitlines():
-        if not line:
+    parts = out.split("\0")
+    i = 0
+    while i < len(parts):
+        seg = parts[i]
+        i += 1
+        if not seg:
             continue
-        parts = line.split("\t", 2)
-        if len(parts) < 3:
+        cols = seg.split("\t", 2)
+        if len(cols) < 3:
             continue
-        a, d, path = parts
-        files.append(_numstat_new_path(path))  # P9: 重命名形归一为新路径
+        a, d, path = cols
+        if path == "" and i + 1 < len(parts):
+            # 重命名: 空槽后随 old/new 两个 NUL 字段, 取新路径为审查对象
+            path = parts[i + 1]
+            i += 2
+        files.append(path)
         if a.isdigit():
             ins += int(a)
         if d.isdigit():

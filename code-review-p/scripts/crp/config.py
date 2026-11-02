@@ -26,7 +26,7 @@ CRP_HOME_ENV = "CRP_HOME"
 CRP_MAX_ROUNDS_ENV = "CRP_MAX_ROUNDS"
 # 并发上限环境覆盖(钳制 [MAX_CONCURRENT_MIN, MAX_CONCURRENT_MAX]) —— 限流保护
 CRP_MAX_CONCURRENT_ENV = "CRP_MAX_CONCURRENT"
-# 载体 1 总量预算环境覆盖(下限 MAX_AGENTS_MIN)
+# 载体 1 总量预算环境覆盖(下限 1 —— 与 deep-review.js 同口径: 限流收紧不得静默抬回)
 CRP_MAX_AGENTS_ENV = "CRP_MAX_AGENTS"
 
 RUN_ID_PREFIX = "crp"
@@ -127,7 +127,7 @@ def default_max_agents(n_angles: int) -> int:
 DEFAULT_MAX_CONCURRENT = 4
 MAX_CONCURRENT_MIN = 1
 MAX_CONCURRENT_MAX = 16
-MAX_AGENTS_MIN = 12  # 与 deep-review.js 的 Math.max(12, ...) 对齐
+MIN_AGENT_BUDGET = 1  # 与 deep-review.js 的 Math.max(1, args?.maxAgents ?? …) 对齐
 
 
 def max_concurrent_agents() -> int:
@@ -146,7 +146,9 @@ def agent_budget(n_angles: int) -> int:
     raw = os.environ.get(CRP_MAX_AGENTS_ENV)
     if raw:
         try:
-            return max(MAX_AGENTS_MIN, int(raw))
+            # P12(c025): 下限 1 与 JS 同口径 —— 原版 max(12, raw) 把限流用户收紧的
+            # 1-11 静默抬回 12, 而 JS 侧已删同款地板, 文档化 env 旋钮静默失效
+            return max(MIN_AGENT_BUDGET, int(raw))
         except (TypeError, ValueError):
             pass
     return default_max_agents(n_angles)

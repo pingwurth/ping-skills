@@ -269,3 +269,47 @@ def test_p11_锁键异常清理与线程独立(tmp_path):
     th.start()
     th.join()
     assert seen["keys"] == set(), "其它线程不得看见本线程的持锁键"
+
+
+def test_p12_v2畸形态常驻归一(crp_home, tmp_path):
+    """P12(c019): 类型防御移到 load 常驻 —— v2 态畸形类型不再绕过(v1 迁移
+    只在 ver<2 时跑, v2 垃圾态原样构造 State 在 mode_params 崩为 exit-2)。"""
+    import json
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for bad, want_mode in (({"schema_version": 2, "mode": [], "sweep_plan": "x"}, "standard"),
+                           ({"schema_version": 2, "mode": "turbo"}, "standard")):
+        rd = create_run_dir(repo)
+        (rd / config.STATE_FILENAME).write_text(json.dumps(bad), encoding="utf-8")
+        st = StateStore(rd).load()
+        assert st is not None and st.mode == want_mode, f"{bad} 应常驻归一"
+        assert st.sweep_plan["angles"] == [] and isinstance(st.sweep_plan, dict)
+    # mode_params 不再抛(归一后键必在)
+    from crp import config as _c
+    assert _c.mode_params("standard")["max_rounds"] == 2
+
+
+def test_p12_resume修复陈旧meta(crp_home, tmp_path):
+    """P12(c012): 终写在两 rename 间崩溃留下 done=false 的 meta, done 运行
+    不再 save 无自愈 —— resume 是修复点。"""
+    import json
+    import subprocess
+    import sys
+    from crp import handlers as _h  # noqa: F401
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    rd = create_run_dir(repo)
+    store = StateStore(rd)
+    store.save(State(run_id=rd.name, mode="quick", phase="done"))
+    # 模拟崩溃: meta 回退到 done=false
+    meta_p = rd / config.META_FILENAME
+    meta = json.loads(meta_p.read_text(encoding="utf-8"))
+    meta["done"] = False
+    meta_p.write_text(json.dumps(meta), encoding="utf-8")
+    runs = list_runs(repo)
+    assert runs[0]["done"] is False, "前置: 陈旧 meta 致误读"
+    # resume(同进程调用 handler) → meta 修复
+    import argparse
+    _h.cmd_resume(argparse.Namespace(run_dir=str(rd)))
+    runs2 = list_runs(repo)
+    assert runs2[0]["done"] is True, "resume 应刷新陈旧 meta"

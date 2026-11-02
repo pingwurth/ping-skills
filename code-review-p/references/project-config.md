@@ -51,9 +51,10 @@ merge base → untrusted):
   exclusions are recorded, surfaced in the brief as suspect, and audited
   like any other diff content.
 - **Heuristic gates** — never auto-run, trusted overlay or not. The engine
-  proposes them; exactly one batched user confirmation (exact commands
-  listed, approve-all / skip-all / per-gate) fires after the brief; after
-  that the gate set is frozen. Unapproved gates report "unverified by gate".
+  proposes them; one batched user confirmation (exact commands
+  listed, approve-all / skip-all / per-gate) fires after each brief; the
+  gate set is frozen until a scope re-import re-extracts the overlay and
+  re-asks. Unapproved gates report "unverified by gate".
 
 The engine enforces all of this — `approval` states in `state.overlay.gates`
 are `auto` (trusted read-only), `denied` (write-semantics, or user skipped),
