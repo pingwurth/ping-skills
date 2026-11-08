@@ -746,10 +746,17 @@ def test_p1_drift重导范围后重评overlay信任(tmp_path):
     payload, _ = d.run_argv(ns["submit"]["params"])
     state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
     assert state["overlay"]["trust"] == "trusted"
-    assert state["overlay"]["gates"][0]["approval"] == "auto"
-    while payload["next_step"]["type"] == "do_work":  # 推进到 candidates 提交后停
+    # c041: trusted 只读门禁也须 A4 确认(不再 auto)
+    assert state["overlay"]["gates"][0]["approval"] == "unset"
+    while payload["next_step"]["type"] in ("do_work", "ask_user"):
         ns2 = payload["next_step"]
         d._note_run_dir(ns2)
+        if ns2["type"] == "ask_user":  # gates 询问(在 brief 之后)自动批准
+            approve = next((o for o in ns2.get("resume", [])
+                            if o.get("option") == "approve_all" and o.get("script")), None)
+            assert approve is not None, "此处应为 gates 询问"
+            payload, _ = d.run_argv(approve["params"])
+            continue
         d.fabricate(ns2)
         payload, _ = d.run_argv(ns2["submit"]["params"])
         if "candidates" in str(ns2.get("submit", {}).get("params", [])):

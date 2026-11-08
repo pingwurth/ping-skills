@@ -145,14 +145,17 @@ def apply_overlay(state: State, data: dict) -> dict:
     trust = ov.get("trust", "none")
 
     # ── 门禁合并 ──
+    # c041(安全根修): 不再有 approval="auto" —— 'trusted' 只说明 overlay 位于
+    # 合并基线而非被审 diff, 是位置事实不是授权; semantics 标签由 overlay
+    # 作者自述, 引擎不检查命令内容。与 heuristic 门禁同一条原则(读一个
+    # 不可信构建文件证明不了它做什么): 一切门禁执行前须经用户确认
+    # (A4 一次性批量 ask_user), 语义为 write 的直接拒绝。
     merged: list[dict] = []
     for g in data.get("gates", []):
         entry = {"command": g.get("command", ""), "semantics": g.get("semantics", "read_only"),
                  "source": "overlay" if trust != "none" else "heuristic"}
         if entry["semantics"] == "write":
             entry["approval"] = "denied"
-        elif trust == "trusted" and entry["source"] == "overlay":
-            entry["approval"] = "auto"
         else:
             entry["approval"] = "unset"
         merged.append(entry)

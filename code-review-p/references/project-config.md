@@ -39,9 +39,14 @@ or plant a `make check` that does anything). The engine determines trust
 mechanically (overlay touched by the reviewed diff, or repo mode with no
 merge base → untrusted):
 
-- **Trusted overlay** — untouched by the reviewed diff. Full effect: red
-  lines set severity, read-only gates are pre-approved and run as Phase 3
-  evidence.
+- **Trusted overlay** — untouched by the reviewed diff. Red lines set
+  severity and exclusions apply. Read-only gates are **not pre-approved**:
+  "trusted" is a positional fact (the overlay sits in the merge base), not
+  an authorization — the `semantics` label is the overlay author's own
+  claim and the engine never inspects the command text, so overlay gates
+  join the same one-batch user confirmation as heuristic gates before
+  anything runs (c041: a third-party repo's baseline overlay declaring
+  `(read-only) curl … | sh` must not auto-execute).
 - **Untrusted overlay** — added or modified by the reviewed diff, or repo
   mode. Its red lines and invariants are recorded as *candidates* only, no
   severity override (a fabricated red line must not be able to steer the
@@ -57,8 +62,8 @@ merge base → untrusted):
   re-asks. Unapproved gates report "unverified by gate".
 
 The engine enforces all of this — `approval` states in `state.overlay.gates`
-are `auto` (trusted read-only), `denied` (write-semantics, or user skipped),
-`approved`/`unset` (user-confirmed or awaiting). Nothing you write in a
+are `denied` (write-semantics, or user skipped), `approved`/`unset`
+(user-confirmed or awaiting; there is no `auto`). Nothing you write in a
 submission can promote a gate past the user.
 
 ## Overlay template

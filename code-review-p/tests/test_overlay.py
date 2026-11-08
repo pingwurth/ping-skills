@@ -49,8 +49,9 @@ def test_应用_trusted排除项生效(tmp_path):
     summary = overlay.apply_overlay(st, data)
     assert summary["exclusions_applied"] == ["gen/"]
     assert "gen/x.py" not in st.scope["diff_files"] and "keep.py" in st.scope["diff_files"]
-    # trusted overlay 的只读门禁 auto
-    assert st.overlay["gates"][0]["approval"] == "auto"
+    # c041: trusted overlay 的只读门禁也不再 auto —— 'trusted' 是位置事实
+    # 不是授权, 一律 unset 待 A4 批量确认(semantics 标签由 overlay 作者自述)
+    assert st.overlay["gates"][0]["approval"] == "unset"
 
 
 def test_应用_untrusted排除项挂起A3(tmp_path):

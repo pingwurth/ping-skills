@@ -82,8 +82,9 @@ def test_do_work_装配_output与submit():
 
 def test_gates_无待确认直接过carrier():
     st = _state(phase="gates")
+    # c041 后无 auto: 无待确认 = 门禁都已用户批复(approved)或被拒(denied)
     st.overlay = {"gates": [{"command": "make check", "source": "overlay",
-                             "semantics": "read_only", "approval": "auto"}]}
+                             "semantics": "read_only", "approval": "approved"}]}
     d = decisions.decide_next(st, CTX)
     assert built_type(d) == "do_work"  # 无 unset 门禁 → carrier do_work
 
