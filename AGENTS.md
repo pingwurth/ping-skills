@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This repo is a collection of five **agent skills** (for Claude Code, Qwen, Qoder, OpenCode). There is no application — each top-level directory is a self-contained skill installed into *other* projects.
+This repo is a collection of seven **agent skills** (for Claude Code, Qwen, Qoder, OpenCode). There is no application — each top-level directory is a self-contained skill installed into *other* projects.
 
 ## Project Structure & Module Organization
 
@@ -10,7 +10,15 @@ This repo is a collection of five **agent skills** (for Claude Code, Qwen, Qoder
 | `batch-unit-test-generator/` | Same engine, batched over classes from a branch diff, via the `agents/batch-class-writer.md` subagent |
 | `sensitive-log-review/` | Audit Java diffs for sensitive data leaking into logs; emits an HTML report and CI gate codes |
 | `sensors-analyze/` | Inventory analytics tracking calls (埋点) into `sensors.csv` |
+| `claude-review/` | Multi-angle, evidence-verified code review of branch diffs / working-tree changes / PRs / paths; severity-ranked JSON defect list |
 | `code-review-p/` | Protocol-driven code review (diff/PR/path/whole repo): targeted brief → 12-angle sweep → adversarial verify → ranked findings; single-entry engine `scripts/crp.py` (NEXT_STEP protocol) owns scope/ledger/dedup/accounting/report |
+| `pwiki/` | Unified repo-wiki engine (supersedes `wiki-plan-gen`/`qwiki`/`repowiki`, kept for reference): single CLI `scripts/pwiki.py` — theme-pack/layered/seed planners, per-style citation gates (concise/deep), parallel-safe job claiming, snapshot increments, BM25 search, Qoder-IDE plan emit/lint |
+
+> `pwiki` 取代 `wiki-plan-gen`/`qwiki`/`repowiki` 三个 skill(主体功能覆盖;
+> 少数旧闸门按决策降级为警告, 口径见 `pwiki/references/validation.md`)。
+> 旧三 skill 的目录**不在本仓库**(历史版本只在开发者机器的 ~/Downloads 与
+> ~/.claude、~/.agents/skills 安装位), 不要再给它们加功能; 安装位的
+> repowiki 仍带重叠触发词, wiki 类请求可能路由到旧引擎 —— 注意甄别。
 
 Inside a skill: `SKILL.md` (triggers + workflow), `references/` and `protocol/` (rules, JSON schema), `scripts/` (Python drivers), `tests/` (pytest). Docs and comments are largely Chinese — keep them that way (`code-review-p`'s `SKILL.md`/`references/` are English; its code comments and test docstrings are Chinese).
 
@@ -19,7 +27,7 @@ Inside a skill: `SKILL.md` (triggers + workflow), `references/` and `protocol/` 
 No root-level runner exists; run tests from inside a skill directory:
 
 ```bash
-cd sensitive-log-review        # or java-unit-test-generator / batch-unit-test-generator / code-review-p
+cd sensitive-log-review        # or java-unit-test-generator / batch-unit-test-generator / sensors-analyze / code-review-p / pwiki
 python3 -m pytest tests/                     # full suite
 python3 -m pytest tests/test_cli.py          # one file
 python3 -m pytest tests/test_cli.py::test_x  # one test
@@ -37,7 +45,7 @@ Scripts are Python 3 stdlib-only (pytest only for tests); each `tests/conftest.p
 
 ## Testing Guidelines
 
-Use pytest, matching existing frameworks and conventions. Add focused tests beside related ones, name cases `test_<behavior>`, and cover failure paths, exit codes, and protocol `next_step` blocks. `sensors-analyze` has no suite.
+Use pytest, matching existing frameworks and conventions. Add focused tests beside related ones, name cases `test_<behavior>`, and cover failure paths, exit codes, and protocol `next_step` blocks. `sensors-analyze`'s suite is its `tests/test_p0..p3_regressions.py` + `tests/test_artifact_dir.py` (37 tests).
 
 ## Architecture & Agent Notes
 

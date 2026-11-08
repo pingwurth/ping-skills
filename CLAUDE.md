@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Is
 
-A collection of five **agent skills** (Claude Code / qwen / qoder / opencode) installed into *other* projects. There is no application here — each top-level directory with a `SKILL.md` is a self-contained skill: prompt/workflow docs (`SKILL.md`, `references/`, `protocol/`), Python driver scripts (`scripts/`), and pytest suites (`tests/`). Docs and comments are largely in Chinese.
+A collection of seven **agent skills** (Claude Code / qwen / qoder / opencode) installed into *other* projects. There is no application here — each top-level directory with a `SKILL.md` is a self-contained skill: prompt/workflow docs (`SKILL.md`, `references/`, `protocol/`), Python driver scripts (`scripts/`), and pytest suites (`tests/`). Docs and comments are largely in Chinese.
 
 | Skill | Purpose |
 |---|---|
@@ -12,7 +12,9 @@ A collection of five **agent skills** (Claude Code / qwen / qoder / opencode) in
 | `batch-unit-test-generator` | Same engine, batched over **many** classes from a branch diff; delegates each class to the `batch-class-writer` subagent (`agents/batch-class-writer.md`) |
 | `sensitive-log-review` | Audit Java diffs for sensitive data leaking into logs (banking/finance rules); produces an HTML report and CI gate exit codes |
 | `sensors-analyze` | Inventory/verify analytics tracking calls (埋点) in arbitrary codebases → `sensors.csv`. See `sensors-analyze/CLAUDE.md` for its detailed constraints |
+| `claude-review` | Multi-angle, evidence-verified code review of branch diffs / working-tree changes / PRs / paths; outputs a severity-ranked JSON defect list |
 | `code-review-p` | Review any diff (working tree / branch / PR / path / whole repo) for real bugs: targeted brief → 12-angle sweep → adversarial verify → gap sweep → ranked findings. Protocol-driven (NEXT_STEP) since v2.0: single entry `scripts/crp.py` owns scope/ledger/dedup/verify-aggregation/accounting/report; quick/standard/deep modes; parallel fan-out (Workflow script journal ingest + agents + inline) |
+| `pwiki` | Unified repo-wiki engine (supersedes wiki-plan-gen/qwiki/repowiki): plan→digest→generate→publish lifecycle with theme/layer/seed planners, per-style citation gates (concise/deep), parallel-safe job claiming, snapshot increments, BM25 search, Qoder-IDE plan emit/lint |
 
 ## Commands
 
@@ -21,18 +23,19 @@ A collection of five **agent skills** (Claude Code / qwen / qoder / opencode) in
 ./install.sh <claude|qwen|qoder|opencode|all> [<skill>[,<skill>...]] [<project-dir>]
 # → copies to <project>/.<tool>/skills/<name> (and agents/ → <project>/.<tool>/agents/,
 #   asking before overwriting an existing agent file), strips tests/, __pycache__/,
-#   .pytest_cache/, test.log, docs/, and workflows/ for non-claude targets;
+#   .pytest_cache/, test.log, docs/, runtime-state dirs (.pwiki/, .repowise/, .claude/),
+#   and workflows/ for non-claude targets;
 #   strips the SKILL.md frontmatter `tools:` line for claude/opencode, and agents/*.md's
 #   for opencode only (claude/qwen/qoder agents keep their tools line)
 
 # Run tests — from inside a skill directory (there is no root-level runner)
-cd java-unit-test-generator   # or batch-unit-test-generator / sensitive-log-review
+cd java-unit-test-generator   # or batch-unit-test-generator / sensitive-log-review / sensors-analyze / code-review-p / pwiki
 python3 -m pytest tests/                      # full suite
 python3 -m pytest tests/test_cli.py           # one file
 python3 -m pytest tests/test_cli.py::test_x   # one test
 ```
 
-Scripts are Python stdlib-only (pytest is needed only for tests). Each `tests/conftest.py` puts that skill's `scripts/` on `sys.path`. `sensors-analyze` has no test suite; `code-review-p`'s suite includes the protocol-engine tests (scope ladder, ledger dedup parity vs the JS workflow script, routing matrix, e2e protocol driver) and gates its Workflow script through node (skipped when node is absent).
+Scripts are Python stdlib-only (pytest is needed only for tests). Each `tests/conftest.py` puts that skill's `scripts/` on `sys.path`. `sensors-analyze`'s suite (37 regression tests: `tests/test_p0..p3_regressions.py`, `tests/test_artifact_dir.py`) covers its 2026-10-12 fix round; `code-review-p`'s suite includes the protocol-engine tests (scope ladder, ledger dedup parity vs the JS workflow script, routing matrix, e2e protocol driver) and gates its Workflow script through node (skipped when node is absent).
 
 Per-skill CLI entry points accept `--help` for full flags (e.g. `python scripts/main.py --help` in sensitive-log-review, `python scripts/select_worktree.py --help` in the unit-test skills).
 
@@ -60,6 +63,10 @@ Pipeline of sub-scanners (`java_log_scanner`, `check_log_print`, `check_tostring
 ### sensors-analyze
 
 LLM/Python split pipeline (LLM produces `sensors.json` + traces CSV rows; deterministic scripts extract entries, locate call sites, validate reports). Its scripts print a single `next_step:` line on stdout and logs to `--log`. Read `sensors-analyze/CLAUDE.md` before working on it — especially: never modify the target codebase, no dynamic placeholders in CSV values, and `entry.txt` needs a human `# CONFIRMED` marker.
+
+### pwiki
+
+Single CLI `scripts/pwiki.py` + `scripts/pwiki_lib/` (21 modules). Lifecycle: plan (`wiki_plan.yaml` v3, the sole human-edit surface) → `begin` queues knowledge-first jobs (module_sheet → card → pages bottom-up) → writers claim via `next` (single BEGIN IMMEDIATE + leases + claim tokens; token mismatch = orphan-save, never data loss) and `submit` through per-style gates (concise/deep presets in `styles.py`; submit warns, finish LINING hard-fails) → `finish` = LINING → publish → snapshot; `update` queues only stale items. Card model: plan cards carry `kind=<card_kind>` (e.g. `external_dependency`) while job/page rows carry `kind='card'` — card checks go through `config.is_card_kind()`, never a bare `==` compare. State lives in `<root>/wiki.db` (default root `<repo>/.pwiki`; root `.gitignore` covers `.pwiki` — never commit it). Run tests with `cd pwiki && python3 -m pytest tests/`.
 
 ### code-review-p
 

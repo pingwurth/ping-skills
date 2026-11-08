@@ -11,18 +11,29 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── 可选的工具列表及其对应的目录名 ────────────────────────────────
 TOOLS=("claude" "qwen" "qoder" "opencode")
 
-# ── 扫描脚本目录下所有含 SKILL.md 的 skill 子目录（排除隐藏目录） ──
+# ── 可安装 skill 显式 allowlist ──────────────────────────────────
+# c007/c058: 旧实现"任何含 SKILL.md 的目录都算 skill"会把仓内非发布脚手架
+# 静默装进目标项目; 新增 skill 必须显式登记在此(与 CLAUDE.md/AGENTS.md 的
+# seven-skills 技能表保持同步)。
+INSTALLABLE_SKILLS=(
+    "java-unit-test-generator"
+    "batch-unit-test-generator"
+    "sensitive-log-review"
+    "sensors-analyze"
+    "code-review-p"
+    "claude-review"
+    "pwiki"
+)
+
+# ── 按 allowlist 发现本仓库的可安装 skill ────────────────────────
 discover_skills() {
     local skills=()
-    for d in "$SCRIPT_DIR"/*/; do
-        [ -d "$d" ] || continue
-        # skill 的判定标准：目录内必须存在 SKILL.md
-        [ -f "$d/SKILL.md" ] || continue
-        local name
-        name="$(basename "$d")"
-        # 跳过隐藏目录和非目录文件
-        [[ "$name" == .* ]] && continue
-        [[ "$name" == "agents" ]] && continue
+    local name
+    for name in "${INSTALLABLE_SKILLS[@]}"; do
+        [ -f "$SCRIPT_DIR/$name/SKILL.md" ] || {
+            echo "警告: allowlist 中的 $name 缺少 SKILL.md, 跳过" >&2
+            continue
+        }
         skills+=("$name")
     done
     echo "${skills[@]}"
@@ -175,8 +186,15 @@ install_skill() {
     cp -r "$src" "$target"
     echo "  已复制 $skill_name -> $target"
 
-    # 删除测试、缓存与随装无意义的文件（docs/ 是仓库内文档，不装进目标项目）
-    find "$target" -name "test.log" -or -name "__pycache__" -or -name "tests" -or -name ".pytest_cache" -or -name "docs" | xargs rm -rf
+    # 删除测试、缓存与随装无意义的文件（docs/ 是仓库内文档，不装进目标项目；
+    # .pwiki/ 是本仓库 dogfood 的引擎运行态(wiki.db/work)；.repowise/.claude
+    # 是仓库内工具的运行态与本地配置 —— 都曾随 cp -r 一起装进每个目标项目）
+    # -print0/-0: 目标项目路径含空白时, 裸管道会把一个路径拆成多个 rm 操作数,
+    # 删到安装目标之外(c007)
+    find "$target" \( -name "test.log" -or -name "__pycache__" -or -name "tests" \
+        -or -name ".pytest_cache" -or -name "docs" -or -name ".pwiki" \
+        -or -name ".repowise" -or -name ".claude" \) \
+        -print0 | xargs -0 rm -rf --
 
     # workflows/ 只有带 Workflow 工具的宿主（claude）用得上
     if [[ "$tool" != "claude" ]]; then
