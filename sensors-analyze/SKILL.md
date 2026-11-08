@@ -20,6 +20,7 @@ description: 审查代码库里已有的埋点（analytics tracking / 数据上�
 | `.agent/sensors-analyze/check_report.txt` | 第 5 步脚本 | 一致性与非空校验报告 |
 | `.agent/sensors-analyze/resolution_report.csv` | 第 5 步脚本 | 空字段追踪清单（WARN 时人工复核用） |
 | `.agent/sensors-analyze/review_report.txt` | 第 5.5 步脚本 | 预审报告（结构校验 + 字面量比对） |
+| `.agent/sensors-analyze/sensors.csv.bak` | 第 5.5 步脚本 | 覆写 `sensors.csv` 前的原始备份（畸形行原始字节留档，人工复核/恢复依据） |
 | `.agent/sensors-analyze/reports/sensors_*.csv` | 第 6 步脚本归档 | 带时间戳的 CSV 归档版本 |
 | `.agent/sensors-analyze/reports/diff_report.txt` | 第 6 步脚本生成 | 版本差异报告（增删改） |
 
@@ -27,7 +28,7 @@ CSV 表头固定为：
 ```
 page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,illegal_reason
 ```
-其中 `file` 格式为 `文件名:start,end`（如 `src/components/Home.vue:42,58`）。`illegal_reason` 由第 5.5 步脚本追加，多个原因用 `; ` 分隔。
+其中 `file` 格式为 `文件名:start,end`（如 `src/components/Home.vue:42,58`）。`illegal_reason` 由第 5.5 步脚本追加，多个原因用 `; ` 分隔。基线 7 列之后允许附加文档认可的列（如第 5.6 步的 `manual_note`）：脚本按「基线列在前、附加列在后」识别，按文档工作流正确加列不会触发表头告警；表头常量以 `scripts/utils.py` 为单一来源。
 
 ## 前置调研（每次分析前简要做一次）
 
@@ -112,6 +113,14 @@ python3 scripts/extract_entries.py --sensors .agent/sensors-analyze/sensors.json
 ```
 这是进入第 3 步的**硬性前置条件**。`locate_call_sites.py` 会检查此标记，未确认则拒绝执行。
 
+**可选交叉审计**（对应第 1 步完整性自审的脚本化版本）：
+
+```bash
+python3 scripts/extract_entries.py --sensors .agent/sensors-analyze/sensors.json --out .agent/sensors-analyze/entry.txt --audit --root <代码库根>
+```
+
+脚本扫描代码库，核对每个 SDK API 调用点是否被某个 `entry_function` 的 `grep_pattern` 覆盖、是否有疑似埋点函数未被收录。发现疑似遗漏时退出码 3（`entry.txt` 仍生成），需回第 1 步补充后重跑。两点口径与第 3 步一致：审计与第 3 步扫描排除同一批目录（`node_modules / dist / .agent/` 等）；rg 拒绝的正则（lookahead、反向引用等 Rust regex 不支持的语法）自动回退纯 Python 扫描并在日志留痕，不会被误报成"未覆盖"。
+
 复核是质量关键，不要跳过。
 
 ---
@@ -128,7 +137,8 @@ python3 scripts/locate_call_sites.py --entry .agent/sensors-analyze/entry.txt --
 - 附带 `snippet` 片段便于第 4 步阅读。
 - **自动排除封装实现**：脚本会读 `sensors.json` 里 `kind` 为 `wrapper` / `hook` 的入口，按花括号平衡算出其函数体范围，落在这些函数体内的命中（如 wrapper 内部转发到 `sensors.track` 的那一行）会被排除——它们是封装 plumbing，不是独立业务埋点。若 `sensors.json` 不在同目录，用 `--sensors` 指明路径。
 - **统一排除目录**：`node_modules / vendor / dist / build / venv / .venv` 与本 skill 产物目录 `.agent/` 不参与扫描（rg 与纯 Python 回退两种模式一致）。
-- **正则方言回退**：`entry.txt` 的正则按 Python 语义编写；若含 rg（Rust regex）不支持的语法（lookahead、反向引用等），脚本会自动对该正则回退纯 Python 搜索并在日志中说明，不会静默丢弃。
+- **单次合并扫描**：全部正则合并为一次 rg 全树扫描（`entry.txt` 通常 10~40 个正则，逐正则各扫一遍全树没有必要）。
+- **正则方言回退**：`entry.txt` 的正则按 Python 语义编写；脚本先对每个正则做一次不扫树的 rg 语法预检，被 rg（Rust regex）拒绝的语法（lookahead、反向引用等）自动回退纯 Python 搜索并在日志中说明，不会静默丢弃；其余正则共享单次 rg 扫描。
 
 输出 `call_sites.json`（数组，每项有 `id / file / start_line / end_line / location / file_csv / patterns / snippet`）。其中 `file_csv` 与 `sensors.csv` 的 `file` 列完全同格式（`文件名:start,end`），第 4 步可直接取用；注意该值含逗号，写入 CSV 时仍需整体加双引号。
 
@@ -223,7 +233,7 @@ python3 scripts/review_report.py --csv .agent/sensors-analyze/sensors.csv --site
 6. **可从字面量推断**：必填字段为空但代码片段中有字面量 → 记录 `"{field}为空，代码片段含字面量'…'（提示性线索，未必与该字段相关）"`
 
 ### 输出
-- 覆写 `.agent/sensors-analyze/sensors.csv`（每行追加 `illegal_reason` 列，多个原因用 `; ` 分隔）
+- 覆写 `.agent/sensors-analyze/sensors.csv`（每行追加 `illegal_reason` 列，多个原因用 `; ` 分隔）。覆写是**非破坏性**的：写前先把原文件备份为 `sensors.csv.bak`；字段数多于表头的畸形行（`file` 列含逗号未加引号），其溢出值会并回 `file` 列保真（绝不截断），`illegal_reason` 指引人工以备份为准修正引号写法
 - 输出 `.agent/sensors-analyze/review_report.txt`（预审摘要：逐行列出问题，附统计）
 
 退出码：

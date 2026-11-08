@@ -17,7 +17,7 @@ The skill follows a deterministic pipeline where LLM and Python each handle what
 3. **Script** (`scripts/locate_call_sites.py`) greps the codebase → `call_sites.json`
 4. **LLM** traces each call site through the call chain to determine actual field values → appends to `sensors.csv`
 5. **Script** (`scripts/check_report.py`) validates consistency → `check_report.txt` (PASS/FAIL)
-5.5. **Script** (`scripts/review_report.py`) pre-reviews CSV, adds `illegal_reason` column → `review_report.txt`
+5.5. **Script** (`scripts/review_report.py`) pre-reviews CSV, adds `illegal_reason` column → `review_report.txt` (non-destructive rewrite: backs up to `sensors.csv.bak` first; overflow fields of malformed rows are merged back into `file`, never truncated)
 5.6. **LLM** reviews rows with non-empty `illegal_reason`, verifies/corrects field values (human notes go to a `manual_note` column, which step 5.5 reruns preserve) → updates `sensors.csv`
 6. **Script** (`scripts/report_manager.py`) archives the timestamped CSV and diffs against the previous version → `reports/diff_report.txt` (exit 2 = differences need review)
 
@@ -58,7 +58,7 @@ Scripts use only stdlib (no third-party dependencies). `locate_call_sites.py` pr
 ## Schema & Output Format
 
 - `sensors.schema.json` — JSON Schema (draft-07) for `sensors.json`. Defines paradigms, call chains, data flow annotations, entry functions, and SDK APIs.
-- `sensors.csv` header (fixed, exact order): `page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,illegal_reason`（`file` 格式为 `文件名:start,end`；`illegal_reason` 由 Step 5.5 脚本追加，多个原因用 `; ` 分隔）
+- `sensors.csv` header (fixed, exact order): `page_name,first_biz_id,second_biz_id,first_biz_name,second_biz_name,event,file,illegal_reason`（`file` 格式为 `文件名:start,end`；`illegal_reason` 由 Step 5.5 脚本追加，多个原因用 `; ` 分隔）。基线 7 列之后允许附加文档认可的列（如 Step 5.6 的 `manual_note`）；表头常量以 `scripts/utils.py` 为单一来源，三个脚本统一引用。
 - `call_sites.json` entries have: `id, file, start_line, end_line, location, file_csv, patterns, snippet` (`file_csv` matches the CSV `file` column format exactly — use it verbatim in step 4, quoted)
 
 ## Critical Constraints (from 问题.txt)

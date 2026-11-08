@@ -14,6 +14,9 @@
   4. 输出：
      - 覆写 sensors.csv（带 illegal_reason 列；该列由脚本每次重算覆写，
        5.6 步的人工复核结论请写入 manual_note 等额外列，会被原样保留）
+     - 覆写是非破坏性的：写前先把原文件备份为 sensors.csv.bak；字段数
+       多于表头的畸形行，其溢出值并回 file 列保真（不截断），原始行以
+       备份为准，illegal_reason 会指引人工查阅
      - 输出 review_report.txt（预审摘要）
 
 用法（所有产物默认在 .agent/sensors-analyze/ 下）：
@@ -31,35 +34,21 @@ import argparse
 import csv
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
-from utils import ARTIFACT_DIR, next_step, setup_logging
+from utils import (
+    ALL_CHECK_FIELDS, ARTIFACT_DIR, CSV_BASE_HEADER, CSV_FULL_HEADER,
+    REQUIRED_NONEMPTY, next_step, setup_logging,
+)
 
 LOG = None
 
-# CSV 表头（含 illegal_reason）
-CSV_HEADER_WITH_REASON = [
-    "page_name", "first_biz_id", "second_biz_id",
-    "first_biz_name", "second_biz_name", "event",
-    "file", "illegal_reason",
-]
-
-# 旧表头（兼容读取无 illegal_reason 列的 CSV）
-CSV_HEADER_OLD = [
-    "page_name", "first_biz_id", "second_biz_id",
-    "first_biz_name", "second_biz_name", "event",
-    "file",
-]
-
-# 必填非空字段
-REQUIRED_NONEMPTY = [
-    "page_name", "first_biz_id", "second_biz_id",
-    "first_biz_name", "second_biz_name",
-]
-
-# 所有检查字段（含 event）
-ALL_CHECK_FIELDS = REQUIRED_NONEMPTY + ["event"]
+# CSV 表头常量收敛到 utils 单一来源；此处保留历史别名以免外部引用漂移
+# CSV_HEADER_WITH_REASON = 完整 8 列；CSV_HEADER_OLD = 第 4 步的基线 7 列
+CSV_HEADER_WITH_REASON = CSV_FULL_HEADER
+CSV_HEADER_OLD = CSV_BASE_HEADER
 
 # 解析 file 字段：格式为 "文件名:start,end"
 _FILE_LOC_RE = re.compile(r'^(.+):(\d+),(\d+)$')
@@ -273,6 +262,9 @@ def main() -> int:
             site_keys.add((s["file"], s["start_line"], s["end_line"]))
         LOG.info("加载 %d 个调用点", len(site_keys))
 
+        # 覆写前的备份路径（F14：重算 illegal_reason / 行重排版前，原始字节留档）
+        backup_path = csv_path.parent / (csv_path.name + ".bak")
+
         # 读取 CSV（兼容有/无 illegal_reason 列；多余字段收进 __extra__ 而非
         # 默认的 None 键——后者会让 DictReader 产出 list 值并在写出时崩溃）
         rows: list[dict] = []
@@ -281,13 +273,23 @@ def main() -> int:
             reader = csv.DictReader(f, restkey="__extra__", restval="")
             existing_header = list(reader.fieldnames or [])
             for i, row in enumerate(reader, 1):
-                if row.pop("__extra__", None):
+                extra = row.pop("__extra__", None)
+                if extra:
                     malformed_rows.add(i)
+                    # 溢出值是行尾被挤出的字段（典型：file 列 src/a.js:1,1 未加
+                    # 引号，结束行号被挤成第 9 字段）。并回 file 列保真——绝不
+                    # 截断丢弃，否则 5.6 人工复核要用的证据被销毁；原始行以
+                    # 备份 .bak 为准，illegal_reason 会指引人工修正引号写法
+                    row["file"] = ",".join(
+                        [row.get("file", "")] + [str(x) for x in extra])
                 rows.append(row)
 
         LOG.info("加载 CSV: %d 行，表头: %s", len(rows), existing_header)
         if malformed_rows:
-            LOG.warning("第 %s 行字段数多于表头（file 列逗号未加引号），已标记待复核", sorted(malformed_rows))
+            LOG.warning(
+                "第 %s 行字段数多于表头（file 列逗号未加引号），已标记待复核；"
+                "溢出值已并回 file 列保真，原始文件备份为 %s",
+                sorted(malformed_rows), backup_path.name)
 
         # 逐行预审
         report_lines: list[str] = []
@@ -302,7 +304,9 @@ def main() -> int:
         for idx, row in enumerate(rows, 1):
             reasons = review_row(row, root, site_keys)
             if idx in malformed_rows:
-                reasons.insert(0, "CSV行字段数多于表头（file列形如 a.js:1,1 含逗号，必须整体加双引号）")
+                reasons.insert(0, (
+                    "CSV行字段数多于表头（file列形如 a.js:1,1 含逗号，必须整体加双引号）；"
+                    f"溢出值已并回 file 列保真，原始行见备份 {backup_path.name}"))
             row["illegal_reason"] = "; ".join(reasons) if reasons else ""
             if reasons:
                 n_flagged += 1
@@ -329,7 +333,10 @@ def main() -> int:
             LOG.info(line)
         LOG.info("预审报告已写入 %s", out)
 
-        # 覆写 sensors.csv（带 illegal_reason 列），保留原始表头中的额外列
+        # 覆写 sensors.csv（带 illegal_reason 列），保留原始表头中的额外列。
+        # 覆写是破坏性操作（illegal_reason 重算、行重排版、畸形行修复引号），
+        # 写前先落备份 .bak——畸形行的原始字节是 5.6 人工复核/恢复的依据
+        shutil.copy2(csv_path, backup_path)
         output_fields = list(existing_header)
         if "illegal_reason" not in output_fields:
             output_fields.append("illegal_reason")
@@ -337,7 +344,8 @@ def main() -> int:
             writer = csv.DictWriter(f, fieldnames=output_fields)
             writer.writeheader()
             writer.writerows(rows)
-        LOG.info("已覆写 %s（添加 illegal_reason 列，保留 %d 列）", csv_path, len(output_fields))
+        LOG.info("原文件已备份为 %s；已覆写 %s（添加 illegal_reason 列，保留 %d 列）",
+                 backup_path, csv_path, len(output_fields))
 
         if n_flagged > 0:
             exit_code = 2

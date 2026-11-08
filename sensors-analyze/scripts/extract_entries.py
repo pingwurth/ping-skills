@@ -21,7 +21,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from utils import ARTIFACT_DIR, check_rg_available, next_step, setup_logging
+from utils import (
+    ARTIFACT_DIR, RG_EXCLUDE_ARGS, check_rg_available, is_excluded, next_step,
+    setup_logging,
+)
 from schema_lite import load_schema, validate as schema_validate
 
 LOG = None
@@ -30,17 +33,33 @@ LOG = None
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "sensors.schema.json"
 
 
-def _rg(pattern: str, root: Path) -> list[str]:
-    """用 ripgrep 搜索，返回匹配行所在的文件:行号列表。"""
+def _rg(pattern: str, root: Path) -> tuple[list[str], bool]:
+    """用 ripgrep 搜索，返回 (["file:line", ...], ok)。
+
+    ok=False 表示 rg 不可用或无法处理该正则（退出码 2：Rust regex 不支持
+    lookahead / 反向引用等 LLM 常写的 Python 语法）——调用方必须回退纯
+    Python 扫描，不能静默当作无匹配：否则该正则的覆盖面被误判为空，
+    --audit 会把所有 SDK API 调用点报成 uncovered，产出虚假告警
+    （audit_issues=True、exit 3）把用户逐回第 1 步且日志无任何解释。
+    行为与 locate_call_sites 的 rg 搜索对齐；排除目录同样用
+    utils.RG_EXCLUDE_ARGS，保证审计与第 3 步扫描比较的是同一文件集。
+    """
     try:
+        # encoding 固定 utf-8：rg 输出的是文件原始字节（常为 UTF-8 中文），
+        # 让 subprocess 按区域设置解码会在 LC_ALL=C / cp936 环境直接
+        # UnicodeDecodeError 或产生乱码（对齐 crp/gitops、jaut/proc 的修法）
         proc = subprocess.run(
-            ["rg", "-n", "--no-heading", "--color=never", "-e", pattern, "."],
+            ["rg", "-n", "--no-heading", "--color=never",
+             *RG_EXCLUDE_ARGS, "-e", pattern, "."],
             capture_output=True, text=True, cwd=str(root),
+            encoding="utf-8", errors="replace",
         )
     except FileNotFoundError:
-        return []
-    if proc.returncode not in (0, 1):
-        return []
+        return [], False
+    if proc.returncode not in (0, 1):  # 1 = 无匹配；2 = 正则语法错误等
+        sys.stderr.write(
+            f"[WARN] rg 无法处理正则 {pattern!r}（错误码 {proc.returncode}），回退纯 Python 扫描\n")
+        return [], False
     results: list[str] = []
     for ln in proc.stdout.splitlines():
         idx1 = ln.find(":")
@@ -55,15 +74,25 @@ def _rg(pattern: str, root: Path) -> list[str]:
         except ValueError:
             continue
         results.append(f"{file}:{lineno}")
-    return results
+    return results, True
 
 
 def _py_scan(pattern: str, root: Path, exts: set[str]) -> list[str]:
-    """纯 Python 回退扫描。"""
+    """纯 Python 回退扫描（无 rg 或 rg 不支持该正则时）。
+
+    排除规则与 rg 模式对齐（utils.EXCLUDED_DIRS + 隐藏路径），
+    两种模式的审计结论才可比。
+    """
     compiled = re.compile(pattern)
     results: list[str] = []
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix not in exts:
+            continue
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            continue
+        if is_excluded(rel_parts):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -151,15 +180,27 @@ def audit_sdk_coverage(root: Path, sensors_data: dict, have_rg: bool) -> dict[st
         ".py", ".java", ".kt", ".swift", ".go", ".dart",
         ".html", ".svelte", ".astro",
     }
+
+    def _search(pattern: str) -> list[str]:
+        """rg 优先；rg 拒绝该正则（Rust regex 语法限制）或不可用时回退
+        纯 Python 扫描并留痕——静默当作无匹配会产出虚假 uncovered 告警。"""
+        if have_rg:
+            locs, rg_ok = _rg(pattern, root)
+            if rg_ok:
+                return locs
+            if LOG:
+                LOG.warning(
+                    "rg 不支持正则 %r（lookahead/反向引用等 Rust regex 语法限制），"
+                    "该正则回退纯 Python 扫描", pattern)
+            return _py_scan(pattern, root, exts)
+        return _py_scan(pattern, root, exts)
+
     for p in sensors_data.get("paradigms", []):
         for ef in p.get("entry_functions", []):
             pat = ef.get("grep_pattern", "").strip()
             if not pat:
                 continue
-            if have_rg:
-                covered.update(_rg(pat, root))
-            else:
-                covered.update(_py_scan(pat, root, exts))
+            covered.update(_search(pat))
 
     # 用每个 sdk_api 的名称搜调用点
     uncovered: dict[str, list[str]] = {}
@@ -169,10 +210,7 @@ def audit_sdk_coverage(root: Path, sensors_data: dict, have_rg: bool) -> dict[st
             continue
         # 用 \b 匹配 API 名的完整调用形式
         api_pattern = re.escape(api_name).replace(r"\.", r"[.\[]")
-        if have_rg:
-            api_locs = _rg(api_pattern, root)
-        else:
-            api_locs = _py_scan(api_pattern, root, exts)
+        api_locs = _search(api_pattern)
         diff = [loc for loc in api_locs if loc not in covered]
         if diff:
             uncovered[api_name] = diff[:20]  # 截断，避免日志过大

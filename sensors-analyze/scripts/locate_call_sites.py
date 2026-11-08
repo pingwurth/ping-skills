@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
-from utils import ARTIFACT_DIR, check_rg_available, next_step, setup_logging
+from utils import (
+    ARTIFACT_DIR, RG_EXCLUDE_ARGS, check_rg_available, is_excluded, next_step,
+    setup_logging,
+)
 
 LOG = None
 
@@ -33,24 +36,6 @@ DEFAULT_EXTS = {
     ".html", ".svelte", ".astro",
 }
 
-# rg 与纯 Python 回退统一排除的目录：依赖产物与本 skill 自身的产物目录。
-# 不排除的话：无 .gitignore 时 node_modules 会被扫入；回退模式会把
-# .agent/ 下落盘的源码后缀文件当成调用点，且两种模式结果不一致。
-EXCLUDED_DIRS = {".agent", "node_modules", "vendor", "dist", "build", "venv", ".venv"}
-
-# rg 侧等价的 glob 排除参数（每个排除目录一条）
-_RG_EXCLUDE_ARGS = [f"--glob=!{d}/**" for d in sorted(EXCLUDED_DIRS)]
-
-
-def _is_excluded(rel_parts: tuple[str, ...]) -> bool:
-    """相对路径的任一段命中排除目录或为隐藏目录则排除（与 rg 默认跳过隐藏一致）。"""
-    for part in rel_parts:
-        if part in EXCLUDED_DIRS:
-            return True
-    # 隐藏目录对齐 rg 默认行为（rg 不加 --hidden 时跳过 . 开头路径）；
-    # 文件名本身以 . 开头（如 .foo.js）也一并跳过，与 rg 一致
-    return any(p.startswith(".") for p in rel_parts)
-
 
 def read_patterns(entry_path: Path) -> list[str]:
     """读取 entry.txt：非 # 开头、非空行视为正则。"""
@@ -63,42 +48,84 @@ def read_patterns(entry_path: Path) -> list[str]:
     return patterns
 
 
-def rg_search(pattern: str, root: Path) -> tuple[list[tuple[str, int, str]], bool]:
-    """用 ripgrep 搜索；返回 ([(相对file, line_no, matched_text)], ok)。
+def _rg_pattern_ok(pattern: str) -> bool:
+    """单个正则的 rg 语法预检：对空设备跑一次 rg（不扫树，毫秒级）。
 
-    ok=False 表示 rg 不支持该正则（Rust regex 引擎不支持 lookahead /
-    反向引用等 Python 语法），调用方应回退纯 Python 搜索该 pattern，
-    不能静默丢弃——否则该正则的调用点会整体丢失且无从察觉。
+    Rust regex 不支持 lookahead / 反向引用等 Python 语法时 rg 退出码 2，
+    该正则须回退纯 Python 搜索。预检比从组合调用的报错里拆坏正则可靠：
+    组合报错时 stderr 里是整条拼接后的正则，每个组成部分都是它的子串，
+    按子串匹配会把好正则一并误伤。
     """
     try:
         proc = subprocess.run(
-            ["rg", "-n", "--no-heading", "--color=never",
-             *_RG_EXCLUDE_ARGS, "-e", pattern, "."],
-            capture_output=True, text=True, cwd=str(root),
+            ["rg", "--color=never", "-e", pattern, os.devnull],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
         )
     except FileNotFoundError:
-        return [], False
-    if proc.returncode not in (0, 1):  # 1 = 无匹配；2 = 正则语法错误等
-        # 正则语法等问题：告知调用方回退（rg 内部错误无中文消息可读，写日志即可）
-        sys.stderr.write(f"[WARN] rg 无法处理正则 {pattern!r}（错误码 {proc.returncode}），回退 Python 搜索\n")
-        return [], False
-    out: list[tuple[str, int, str]] = []
-    for ln in proc.stdout.splitlines():
-        # 形如 path/to/file.ts:42:matched text（路径相对 root，可能带 ./ 前缀）
-        idx1 = ln.find(":")
-        idx2 = ln.find(":", idx1 + 1)
-        if idx1 == -1 or idx2 == -1:
-            continue
-        file = ln[:idx1]
-        if file.startswith("./"):
-            file = file[2:]
-        try:
-            lineno = int(ln[idx1 + 1:idx2])
-        except ValueError:
-            continue
-        matched = ln[idx2 + 1:]
-        out.append((file, lineno, matched))
-    return out, True
+        return False
+    return proc.returncode != 2  # 2 = 正则被 Rust regex 拒绝
+
+
+def rg_search_multi(
+    patterns: list[str], root: Path
+) -> tuple[dict[tuple[str, int], str] | None, list[str]]:
+    """全部正则合并为单次 ripgrep 全树搜索（多个 -e 共享一次扫描）。
+
+    返回 (union, bad_patterns)：
+      - union: {(相对file, line_no): 行文本}——任一正则命中的行（按位置去重）。
+        rg 的行输出不区分是哪个 -e 命中的，模式归因由调用方用编译后的
+        Python 正则在该行文本上重放完成（与 end_line 起始列的计算同源）。
+      - bad_patterns: Rust regex 不接受（_rg_pattern_ok 预检退出码 2）、
+        须由调用方回退纯 Python 搜索的正则。
+      - union 为 None 表示组合调用失败且无法定位坏正则（意外错误），全部
+        正则应整体回退纯 Python——不能静默丢弃，否则对应调用点会整体
+        丢失且无从察觉。
+    """
+    ok_flags = {p: _rg_pattern_ok(p) for p in dict.fromkeys(patterns)}
+    good = [p for p in patterns if ok_flags[p]]
+    bad = [p for p in patterns if not ok_flags[p]]
+    if not good:
+        return {}, bad
+
+    cmd: list[str] = ["rg", "-n", "--no-heading", "--color=never",
+                      *RG_EXCLUDE_ARGS]
+    for p in dict.fromkeys(good):
+        cmd += ["-e", p]
+    cmd.append(".")
+    try:
+        # encoding 固定 utf-8：rg 输出的是文件原始字节（常为 UTF-8 中文），
+        # 让 subprocess 按区域设置解码会在 LC_ALL=C / cp936 环境直接
+        # UnicodeDecodeError 或产生乱码（对齐 crp/gitops、jaut/proc 的修法）
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(root),
+            encoding="utf-8", errors="replace",
+        )
+    except FileNotFoundError:
+        return None, list(patterns)
+    if proc.returncode in (0, 1):  # 1 = 无匹配
+        union: dict[tuple[str, int], str] = {}
+        for ln in proc.stdout.splitlines():
+            # 形如 path/to/file.ts:42:line text（路径相对 root，可能带 ./ 前缀）
+            idx1 = ln.find(":")
+            idx2 = ln.find(":", idx1 + 1)
+            if idx1 == -1 or idx2 == -1:
+                continue
+            file = ln[:idx1]
+            if file.startswith("./"):
+                file = file[2:]
+            try:
+                lineno = int(ln[idx1 + 1:idx2])
+            except ValueError:
+                continue
+            union[(file, lineno)] = ln[idx2 + 1:]
+        return union, bad
+    # 预检全过但组合仍失败（意外错误，如组合规模超限）：无法指认坏正则，
+    # 整体回退纯 Python，保证不丢调用点
+    sys.stderr.write(
+        f"[WARN] rg 组合搜索失败（错误码 {proc.returncode}）且无法定位被拒正则，"
+        f"全部正则回退纯 Python 搜索\n")
+    return None, list(patterns)
 
 
 def py_search(pattern: str, root: Path, compiled: re.Pattern,
@@ -107,7 +134,7 @@ def py_search(pattern: str, root: Path, compiled: re.Pattern,
 
     exts 为 None 时用 DEFAULT_EXTS；--exts 参数在此生效（rg 模式忽略
     后缀白名单，与 --help 描述一致）。
-    排除规则与 rg 模式对齐（EXCLUDED_DIRS + 隐藏路径）。已知残余差异：
+    排除规则与 rg 模式对齐（utils.EXCLUDED_DIRS + 隐藏路径）。已知残余差异：
     rg 默认尊重 .gitignore 而此处不解析——被 gitignore 的生成目录里若
     真有埋点调用，rg 模式会漏掉；此类场景少见，靠第 6 步版本比对兜底。
     """
@@ -120,7 +147,7 @@ def py_search(pattern: str, root: Path, compiled: re.Pattern,
             rel_parts = path.relative_to(root).parts
         except ValueError:
             continue
-        if _is_excluded(rel_parts):
+        if is_excluded(rel_parts):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -349,35 +376,64 @@ def main() -> int:
         exts = {e.strip() for e in args.exts.split(",") if e.strip()}
         LOG.info("搜索方式: %s；正则数: %d", 'ripgrep' if have_rg else 'python fallback', len(patterns))
 
-        # (file, start_line) -> {patterns:set, matched_text, end_line}
+        # rg 模式：全部正则合并为一次全树扫描（此前逐正则各起一次 rg，
+        # entry.txt 通常 10~40 个正则 = 10~40 次顺序全树遍历，单次足够）
+        union: dict[tuple[str, int], str] = {}
+        rg_bad: set[str] = set()
+        if have_rg:
+            union, rg_bad_list = rg_search_multi(patterns, root)
+            if union is None:
+                # rg 不可用 / 错误无法指认：全部正则回退纯 Python，不静默丢弃
+                LOG.warning("rg 组合搜索不可用，全部正则回退纯 Python 搜索")
+                union = {}
+                rg_bad_list = list(patterns)
+            else:
+                for p in rg_bad_list:
+                    LOG.warning("rg 不支持正则 %r（lookahead/反向引用等 Rust regex 语法限制），该正则回退纯 Python 搜索", p)
+            rg_bad = set(rg_bad_list)
+        else:
+            rg_bad = set(patterns)
+
+        # (file, start_line) -> {patterns, end_line}
         sites: dict[tuple[str, int], dict] = {}
         # 文件内容缓存：避免同一文件被多个 pattern 重复读取
         file_content_cache: dict[str, str] = {}
 
+        def _file_lines(file: str) -> list[str]:
+            """读取（并缓存）相对路径文件的行列表，供模式归因与片段提取共用。"""
+            if file not in file_content_cache:
+                try:
+                    file_content_cache[file] = (root / file).read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    file_content_cache[file] = ""
+            return file_content_cache[file].split("\n")
+
         for pat in patterns:
-            if have_rg:
-                hits, rg_ok = rg_search(pat, root)
-                if not rg_ok:
-                    LOG.warning("rg 不支持正则 %r（lookahead/反向引用等 Rust regex 语法限制），该正则回退纯 Python 搜索", pat)
-                    hits = py_search(pat, root, compiled[pat], exts)
+            if pat in rg_bad:
+                hits: list[tuple[str, int]] = [
+                    (f, l) for f, l, _m in py_search(pat, root, compiled[pat], exts)]
             else:
-                hits = py_search(pat, root, compiled[pat], exts)
-            for file, lineno, matched in hits:
+                # 组合命中行的模式归因：rg 行输出不区分命中的 -e，用编译后的
+                # Python 正则在该行实际内容上重放（与下方起始列计算同源；
+                # 两种引擎语义一致时与逐正则 rg 调用的归因等价）
+                hits = []
+                for (file, lineno) in union:
+                    lines_list = _file_lines(file)
+                    line_text = (lines_list[lineno - 1]
+                                 if 0 <= lineno - 1 < len(lines_list)
+                                 else union[(file, lineno)])
+                    if compiled[pat].search(line_text):
+                        hits.append((file, lineno))
+            for file, lineno in hits:
                 if in_exclusions(file, lineno, exclusions):
                     continue  # 落在 wrapper/hook 函数体内，属封装实现，非业务调用点
                 key = (file, lineno)
                 if key not in sites:
-                    if file not in file_content_cache:
-                        try:
-                            file_content_cache[file] = (root / file).read_text(encoding="utf-8", errors="ignore")
-                        except Exception:
-                            file_content_cache[file] = ""
-                    content = file_content_cache[file]
-                    lines_list = content.split("\n")
+                    lines_list = _file_lines(file)
                     # 计算 matched 在该行的起始列（用于括号扫描）
                     m = compiled[pat].search(lines_list[lineno - 1]) if 0 <= lineno - 1 < len(lines_list) else None
                     start_col = m.start() if m else 0
-                    end_line = compute_end_line(lines_list, lineno, start_col) if content else lineno
+                    end_line = compute_end_line(lines_list, lineno, start_col) if lines_list else lineno
                     sites[key] = {
                         "file": file,
                         "start_line": lineno,
@@ -386,6 +442,26 @@ def main() -> int:
                         "snippet": build_snippet(lines_list, lineno, end_line),
                     }
                 sites[key]["patterns"].append(pat)
+
+        # 方言漂移兜底：rg 命中但所有 Python 正则都无法在该行重放命中的行
+        # （rg/Rust 与 Python 语义分歧，极罕见），按 rg 证据保留调用点
+        # （patterns 为空列表）并留痕——绝不静默丢弃
+        for (file, lineno) in union:
+            key = (file, lineno)
+            if key in sites or in_exclusions(file, lineno, exclusions):
+                continue
+            lines_list = _file_lines(file)
+            end_line = compute_end_line(lines_list, lineno, 0) if lines_list else lineno
+            sites[key] = {
+                "file": file,
+                "start_line": lineno,
+                "end_line": end_line,
+                "patterns": [],
+                "snippet": build_snippet(lines_list, lineno, end_line),
+            }
+            LOG.warning(
+                "行 %s:%d 的 rg 命中无法用 Python 正则归因（rg/Rust 与 Python 方言分歧），已按 rg 证据保留",
+                file, lineno)
 
         result = []
         for i, ((file, sl), v) in enumerate(sorted(sites.items(), key=lambda kv: (kv[0][0], kv[0][1])), 1):

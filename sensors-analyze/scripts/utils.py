@@ -21,6 +21,64 @@ _ATEXIT_REGISTERED = False
 # sensors.json / entry.txt / call_sites.json / sensors.csv / 各报告与日志默认都落在这里
 ARTIFACT_DIR = Path(".agent/sensors-analyze")
 
+# ==================== sensors.csv 表头单一来源 ====================
+# 此前固定表头在 check_report.py / review_report.py / report_manager.py
+# 里各自硬编码成 6 个列表字面量并已漂移（7 列 / 8 列混写）；收敛到这里，
+# 三个脚本统一引用，杜绝"改一处漏两处"。
+#
+# 基线 7 列（第 4 步 LLM 产出，不含 illegal_reason）：
+CSV_BASE_HEADER = [
+    "page_name", "first_biz_id", "second_biz_id",
+    "first_biz_name", "second_biz_name", "event", "file",
+]
+# 完整 8 列（第 5.5 步脚本追加 illegal_reason 后）：
+CSV_FULL_HEADER = CSV_BASE_HEADER + ["illegal_reason"]
+# 必填非空字段（check_report / review_report 共用；空值只 WARN 不 FAIL）：
+REQUIRED_NONEMPTY = [
+    "page_name", "first_biz_id", "second_biz_id",
+    "first_biz_name", "second_biz_name",
+]
+# 所有检查字段（必填 + event）：
+ALL_CHECK_FIELDS = REQUIRED_NONEMPTY + ["event"]
+
+# 文档认可的可选附加列（SKILL.md 第 5.6 步：人工备注写 manual_note 列）。
+# 出现在表头时不算异常——按文档工作流正确操作的 CSV 不应触发表头告警。
+ALLOWED_EXTRA_COLUMNS = ("manual_note",)
+
+
+def header_is_expected(header: list[str]) -> bool:
+    """sensors.csv 表头是否符合期望（供 report_manager 等做一致性告警）。
+
+    期望形态：7 列基线按序开头，其后只允许 illegal_reason 与文档认可的
+    附加列（manual_note 等）以任意顺序出现。基线缺列 / 乱序 / 出现
+    未认可列时返回 False，仍照常告警。
+    """
+    if list(header[: len(CSV_BASE_HEADER)]) != CSV_BASE_HEADER:
+        return False
+    return all(
+        c == "illegal_reason" or c in ALLOWED_EXTRA_COLUMNS
+        for c in header[len(CSV_BASE_HEADER):]
+    )
+
+
+# ==================== 搜索排除规则（第 3 步定位与第 2 步 --audit 共用） ====================
+# rg 与纯 Python 回退统一排除的目录：依赖产物与本 skill 自身的产物目录。
+# 两处脚本共用一份定义，保证 --audit 与第 3 步扫描比较的是同一文件集。
+EXCLUDED_DIRS = {".agent", "node_modules", "vendor", "dist", "build", "venv", ".venv"}
+
+# rg 侧等价的 glob 排除参数（每个排除目录一条）
+RG_EXCLUDE_ARGS = [f"--glob=!{d}/**" for d in sorted(EXCLUDED_DIRS)]
+
+
+def is_excluded(rel_parts: tuple[str, ...]) -> bool:
+    """相对路径的任一段命中排除目录或为隐藏目录则排除（与 rg 默认跳过隐藏一致）。"""
+    for part in rel_parts:
+        if part in EXCLUDED_DIRS:
+            return True
+    # 隐藏目录对齐 rg 默认行为（rg 不加 --hidden 时跳过 . 开头路径）；
+    # 文件名本身以 . 开头（如 .foo.js）也一并跳过，与 rg 一致
+    return any(p.startswith(".") for p in rel_parts)
+
 
 def _restore_stderr() -> None:
     """恢复原始 stderr 并关闭重定向句柄（atexit / 重复配置时调用）。"""

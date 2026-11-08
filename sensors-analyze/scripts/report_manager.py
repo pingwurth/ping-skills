@@ -25,17 +25,31 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-from utils import ARTIFACT_DIR, next_step, setup_logging
+from utils import (
+    ARTIFACT_DIR, CSV_BASE_HEADER, CSV_FULL_HEADER, header_is_expected,
+    next_step, setup_logging,
+)
 
 LOG = None
 
-# 固定 CSV 表头（含 illegal_reason）
-CSV_HEADER = ["page_name", "first_biz_id", "second_biz_id",
-              "first_biz_name", "second_biz_name", "event",
-              "file", "illegal_reason"]
+# CSV 表头常量收敛到 utils 单一来源；此处保留历史别名以免外部引用漂移
+# CSV_HEADER = 完整 8 列（含 illegal_reason）；CSV_HEADER_OLD = 基线 7 列
+CSV_HEADER = CSV_FULL_HEADER
+CSV_HEADER_OLD = CSV_BASE_HEADER
 
 # file 列标识调用点，但同一调用点可产生多行（不同 page_name 等），
 # 因此用全列签名做主键，支持重复行计数比对。
+
+
+def _row_columns(*rows: dict) -> list[str]:
+    """行签名/展示用的列序列：期望全列在前，行内其余列（manual_note 等
+    文档认可的附加列）按出现顺序在后——附加列的变更也要进差异报告。"""
+    cols = list(CSV_FULL_HEADER)
+    for row in rows:
+        for c in row:
+            if c not in cols:
+                cols.append(c)
+    return cols
 
 
 def generate_timestamped_name(base: str = "sensors") -> str:
@@ -68,9 +82,7 @@ def find_previous_csv(reports_dir: Path, base: str = "sensors") -> Path | None:
     return csv_files[0] if csv_files else None
 
 
-# 旧表头（兼容无 illegal_reason 列的 CSV）
-CSV_HEADER_OLD = ["page_name", "first_biz_id", "second_biz_id",
-                   "first_biz_name", "second_biz_name", "event", "file"]
+# 旧表头（兼容无 illegal_reason 列的 CSV）——见顶部单一来源别名
 
 
 def load_csv_rows(csv_path: Path) -> list[dict]:
@@ -78,13 +90,18 @@ def load_csv_rows(csv_path: Path) -> list[dict]:
 
     行内字段数多于表头（典型：file 列 `a.js:1,1` 含逗号未加双引号）时
     视为致命输入错误直接报错——不能把损坏行静默修剪后固化进归档历史。
+    （5.5 步修复后正常流程不会出现此类行：review_report 会先落备份并
+    把溢出值并回 file 列，归档件里是修复后的完整值。）
     """
     rows = []
     with csv_path.open(encoding="utf-8", newline="") as f:
         # restkey 把多余字段收进 __extra__（默认会变成 None 键导致下游 .strip() 崩溃）
         reader = csv.DictReader(f, restkey="__extra__", restval="")
         header = list(reader.fieldnames or [])
-        if header not in (CSV_HEADER, CSV_HEADER_OLD):
+        # 期望表头由 utils.header_is_expected 判定：基线 7 列开头，其后允许
+        # illegal_reason 与文档认可的附加列（manual_note 等，SKILL.md 5.6 步）。
+        # 按文档工作流正确人工编辑的 CSV 不应触发本告警；真正的缺列/乱序仍告警。
+        if not header_is_expected(header):
             LOG.warning("CSV 表头 %s 与期望 %s 不一致", header, CSV_HEADER)
         for i, row in enumerate(reader, 1):
             if row.pop("__extra__", None):
@@ -98,9 +115,13 @@ def load_csv_rows(csv_path: Path) -> list[dict]:
 
 
 def build_row_signature(row: dict) -> str:
-    """构建行的全列签名（用作主键 + 值检测）。"""
+    """构建行的全列签名（用作主键 + 值检测）。
+
+    覆盖行内全部列（含 manual_note 等附加列），附加列变更可被检出；
+    归档旧件没有的列按空值参与签名，与此前行为兼容。
+    """
     parts = []
-    for col in CSV_HEADER:
+    for col in _row_columns(row):
         parts.append(f"{col}={row.get(col, '').strip()}")
     return "|".join(parts)
 
@@ -159,9 +180,9 @@ def diff_csv(old_rows: list[dict], new_rows: list[dict]) -> dict:
 
 
 def format_row(row: dict) -> str:
-    """格式化一行 CSV 为可读字符串。"""
+    """格式化一行 CSV 为可读字符串（含 manual_note 等附加列）。"""
     parts = []
-    for col in CSV_HEADER:
+    for col in _row_columns(row):
         val = row.get(col, "").strip()
         parts.append(f"{col}={val!r}")
     return " | ".join(parts)
@@ -171,7 +192,7 @@ def _format_modified_entry(entry: dict) -> list[str]:
     """格式化一条修改记录，返回报告行列表。"""
     lines = []
     lines.append(f"  ~ file={entry['file']!r}")
-    for col in CSV_HEADER:
+    for col in _row_columns(entry["old"], entry["new"]):
         if col == "file":
             continue
         old_val = entry["old"].get(col, "").strip()

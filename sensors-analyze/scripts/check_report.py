@@ -26,17 +26,18 @@ import re
 import sys
 from pathlib import Path
 
-from utils import ARTIFACT_DIR, next_step, setup_logging
+from utils import (
+    ALL_CHECK_FIELDS, ARTIFACT_DIR, CSV_BASE_HEADER, CSV_FULL_HEADER,
+    REQUIRED_NONEMPTY, next_step, setup_logging,
+)
 
 LOG = None  # main() 中由 setup_logging 初始化
 
-REQUIRED_NONEMPTY = ["page_name", "first_biz_id", "second_biz_id", "first_biz_name", "second_biz_name"]
-ALL_CHECK_FIELDS = REQUIRED_NONEMPTY + ["event"]
-CSV_HEADER = ["page_name", "first_biz_id", "second_biz_id",
-              "first_biz_name", "second_biz_name", "event",
-              "file"]
-# review_report.py 会追加 illegal_reason 列，check_report 兼容两种表头
-CSV_HEADER_WITH_REASON = CSV_HEADER + ["illegal_reason"]
+# CSV 表头常量收敛到 utils 单一来源；此处保留历史别名以免外部引用漂移
+# CSV_HEADER = 第 4 步的基线 7 列；review_report.py 会追加 illegal_reason
+# 列（= CSV_HEADER_WITH_REASON），check_report 兼容两种表头
+CSV_HEADER = CSV_BASE_HEADER
+CSV_HEADER_WITH_REASON = CSV_FULL_HEADER
 
 # 解析 file 字段：格式为 "文件名:start,end"
 _FILE_LOC_RE = re.compile(r'^(.+):(\d+),(\d+)$')
