@@ -14,17 +14,18 @@
     双条件判定/预算/升级 -> decisions.decide_after_verify(纯函数);
     本文件负责"记录观测到 state"与"把决策回传的 mark_done/reset_trajectory 落地后持久化"。
 
-判定与升级(SKILL.md §5/§6, 详见 decisions):
+判定与预算(SKILL.md §5/§6, 详见 decisions):
     覆盖率达标且测试全绿 -> done -> make_plan; 单方法 >=8 轮 / 全局 >=30 轮 /
-    连续 3 轮失败 / 连续 3 轮无提升 -> ask_user; 测试不绿或覆盖率未达标 -> build_prompt。
+    连续 3 轮失败 / 连续 3 轮无提升 -> 自动跳过并写入 skip_reason(0699407 起不再
+    ask_user, --unskip 是唯一复活途径) -> make_plan; 测试不绿或覆盖率未达标 -> build_prompt。
 
 输入:
     --workdir 或 --project-root 定位 workdir; 读取 <workdir>/state.json,
     必须已含 current_method(否则状态错误 exit 3)。
 
 输出(NEXT_STEP):
-    达标 -> run_script make_plan.py(exit 0); 未达标 -> run_script build_prompt.py(exit 1);
-    升级 -> ask_user(exit 1); mvn/报告/环境失败 -> ask_user(exit 2, failed)。
+    达标/跳过 -> run_script make_plan.py(exit 0); 未达标 -> run_script build_prompt.py(exit 1);
+    mvn/报告/环境失败 -> ask_user(exit 2, failed)。
     artifacts 附 mvn.log 与 surefire-reports; metrics 附 before/after/轮次/测试计数。
 
 关键约束:
@@ -203,11 +204,8 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if decision.reset_trajectory:
             entry.reset_trajectory()
         if decision.skip_all_pending:
-            for m in state.methods:
-                if m.status == MethodStatus.PENDING:
-                    m.status = MethodStatus.SKIPPED
-                    m.skip_reason = decision.auto_skip_reason
-                    m.skip_source = SKIP_SOURCE_AUTO
+            # c039: 统一走 State.skip_pending_methods(与 batch 副本同款, 消除手抄循环)
+            state.skip_pending_methods(decision.auto_skip_reason)
             logger.info(f"跳过全部未达标方法: {decision.auto_skip_reason}")
         store.save(state)
         logger.info(f"方法 {entry.key.label()}: {before_rate:.1f}% -> {entry.rate:.1f}% "

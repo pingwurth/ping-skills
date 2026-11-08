@@ -137,3 +137,17 @@ class TestJvmTypes:
 
     def test_void_mapping(self):
         assert config.JVM_PRIMITIVE_TYPES["V"] == "void"
+
+
+def test_method_global_round_budget_env_override(monkeypatch):
+    """c038: java 副本的预算 env 覆盖此前零测试(默认值断言之外)——锁定
+    覆盖生效与非法值回退, 与 batch 副本同 env 名(一个 CI 旋钮管两技能)。"""
+    from jaut import config
+    monkeypatch.setenv("JAVA_UT_METHOD_ROUND_BUDGET", "2")
+    monkeypatch.setenv("JAVA_UT_GLOBAL_ROUND_BUDGET", "9")
+    assert config.method_round_budget() == 2
+    assert config.global_round_budget() == 9
+    monkeypatch.setenv("JAVA_UT_METHOD_ROUND_BUDGET", "x")
+    monkeypatch.setenv("JAVA_UT_GLOBAL_ROUND_BUDGET", "1.5")
+    assert config.method_round_budget() == config._DEFAULT_METHOD_ROUND_BUDGET
+    assert config.global_round_budget() == config._DEFAULT_GLOBAL_ROUND_BUDGET

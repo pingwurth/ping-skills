@@ -483,6 +483,21 @@ class State:
         """返回所有状态为 pending 的方法列表。"""
         return [m for m in self.methods if m.status == MethodStatus.PENDING]
 
+    def skip_pending_methods(self, reason: str) -> list[MethodCoverage]:
+        """把全部 pending 方法置为 skipped 并写入原因与来源, 返回被跳过的方法列表。
+
+        c039(双副本同步): "全局预算耗尽 -> 跳过全部 pending" 原为 verify_coverage
+        内联手抄循环(java 副本连本方法都没有), 与 batch 副本 State.skip_pending_methods
+        分叉 —— 后续在共享方法里加簿记时, 手抄路径会静默绕开。两条落地路径
+        统一走本方法; 来源恒为 SKIP_SOURCE_AUTO(预算耗尽属脚本自动跳过)。
+        """
+        skipped = [m for m in self.methods if m.status == MethodStatus.PENDING]
+        for m in skipped:
+            m.status = MethodStatus.SKIPPED
+            m.skip_reason = reason
+            m.skip_source = SKIP_SOURCE_AUTO
+        return skipped
+
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "schema_version": self.schema_version,
