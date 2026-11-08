@@ -67,7 +67,8 @@ parse_tools_arg() {
             exit 1
         fi
     done
-    echo "${selected[@]}"
+    # c6f6e36 同款 set -u 防护(bash<4.4 空数组裸展开误报 unbound)
+    echo ${selected[@]+"${selected[@]}"}
 }
 
 # ── 交互式选择工具（支持多选） ──────────────────────────────────────
@@ -176,7 +177,10 @@ install_skill() {
 
     # 检查目标是否已存在同名 skill
     if [[ -d "$target" ]]; then
-        read -rp "  目标已存在 '$target'，是否覆盖？(y/N): " overwrite </dev/tty
+        # 无 tty（CI/脚本调用）时 read 失败不致命：默认不覆盖，走跳过路径
+        # （对齐下方 agents 覆盖分支的既有加固，F20）
+        overwrite=""
+        read -rp "  目标已存在 '$target'，是否覆盖？(y/N): " overwrite </dev/tty || true
         if [[ "$overwrite" != "y" && "$overwrite" != "Y" ]]; then
             echo "  跳过 $skill_name（已存在）"
             return
@@ -184,20 +188,22 @@ install_skill() {
         rm -rf "$target"
     fi
 
-    # 创建目标目录并复制 skill
-    mkdir -p "$target_base"
-    cp -r "$src" "$target"
+    # 预排除复制(F49): 排除树自始至终不落盘 —— cp -r 先全量写入再删除是
+    # 双倍 I/O(NFS/慢盘上可感), 且每个新运行时目录在 denylist 补丁之前都会
+    # 先泄漏进目标项目。tar 双侧 --exclude 模式匹配任意路径分量上的同名
+    # 文件/目录, 与原 find -name 语义一致(无 xargs 拆路径风险, c007 类不复发)。
+    # （tests 缓存与 docs 仓库内文档；.pwiki/.repowise/.claude 是运行态与
+    # 本地配置；问题.txt/trigger-eval.json 是 skill 根开发残留 —— F22）
+    local excluded=(tests __pycache__ .pytest_cache docs .pwiki .repowise .claude
+        test.log 问题.txt trigger-eval.json)
+    local excl_args=()
+    local name
+    for name in "${excluded[@]}"; do
+        excl_args+=(--exclude "$name")
+    done
+    mkdir -p "$target"
+    tar -C "$src" -cf - "${excl_args[@]}" . | tar -C "$target" -xf -
     echo "  已复制 $skill_name -> $target"
-
-    # 删除测试、缓存与随装无意义的文件（docs/ 是仓库内文档，不装进目标项目；
-    # .pwiki/ 是本仓库 dogfood 的引擎运行态(wiki.db/work)；.repowise/.claude
-    # 是仓库内工具的运行态与本地配置 —— 都曾随 cp -r 一起装进每个目标项目）
-    # -print0/-0: 目标项目路径含空白时, 裸管道会把一个路径拆成多个 rm 操作数,
-    # 删到安装目标之外(c007)
-    find "$target" \( -name "test.log" -or -name "__pycache__" -or -name "tests" \
-        -or -name ".pytest_cache" -or -name "docs" -or -name ".pwiki" \
-        -or -name ".repowise" -or -name ".claude" \) \
-        -print0 | xargs -0 rm -rf --
 
     # workflows/ 只有带 Workflow 工具的宿主（claude）用得上
     if [[ "$tool" != "claude" ]]; then
@@ -218,7 +224,7 @@ install_skill() {
     if [[ -d "$agents_src" ]]; then
         local agents_target="$project_dir/.$tool/agents"
         mkdir -p "$agents_target"
-        local md_file agent_file
+        local md_file agent_file stripped_any=false
         for md_file in "$agents_src"/*.md; do
             [[ -f "$md_file" ]] || continue
             agent_file="$agents_target/$(basename "$md_file")"
@@ -232,16 +238,18 @@ install_skill() {
                 fi
             fi
             cp "$md_file" "$agent_file"
+            # 仅 opencode 删除本次 cp 过去的 agent 文件的第一个 tools: 行
+            # （claude/qwen/qoder 的 agent frontmatter 支持 tools，保留作为硬限制）
+            # F02: 只处理上面 cp 过去的文件——共享 agents/ 目录里还有用户自己的
+            # agent, 旧实现对整个目录 find 会把它们的 tools 白名单一并剥掉
+            if [[ "$tool" == "opencode" ]]; then
+                remove_first_tools_line "$agent_file"
+                stripped_any=true
+            fi
         done
         echo "  已复制 agents -> $agents_target"
-
-        # 仅 opencode 删除 agents 中 .md 文件的第一个 tools: 行
-        # （claude/qwen/qoder 的 agent frontmatter 支持 tools，保留作为硬限制）
-        if [[ "$tool" == "opencode" ]]; then
-            find "$agents_target" -name '*.md' -type f | while read -r md_file; do
-                remove_first_tools_line "$md_file"
-            done
-            echo "  已移除 agents/*.md 中的 tools 行"
+        if $stripped_any; then
+            echo "  已移除本次安装的 agents/*.md 中的 tools 行"
         fi
     fi
 }
@@ -251,11 +259,24 @@ install_skill() {
 # ══════════════════════════════════════════════════════════════
 
 # 第一步：确定要安装的工具
+# F19: 先落变量再解析——命令替换里 parse_tools_arg 对未知工具的 exit 1
+# 会带着 set -e 终止脚本(报错文案由子 shell 直接打到 stderr); 而空/纯空白
+# 入参解析出空列表时在此显式报错, 不再静默"什么都没装还打印安装完成"
 selected_tools=()
 if [[ $# -ge 1 ]]; then
-    read -ra selected_tools <<< "$(parse_tools_arg "$1")"
+    tools_raw="$(parse_tools_arg "$1")"
+    if [[ -z "$tools_raw" ]]; then
+        echo "错误: 未从入参 '$1' 解析出任何工具，可选值: ${TOOLS[*]}" >&2
+        exit 1
+    fi
+    read -ra selected_tools <<< "$tools_raw"
 else
-    read -ra selected_tools <<< "$(prompt_tools)"
+    tools_raw="$(prompt_tools)"
+    if [[ -z "$tools_raw" ]]; then
+        echo "错误: 未选择任何工具" >&2
+        exit 1
+    fi
+    read -ra selected_tools <<< "$tools_raw"
 fi
 
 # 第二步：选择要安装的 skill
@@ -269,11 +290,27 @@ fi
 
 selected_skills=()
 if [[ $# -ge 2 ]]; then
-    # 第二个参数指定 skill（可选）
+    # 第二个参数指定 skill（可选）；空入参报错而非静默空跑（F19 同类）
     IFS=', ' read -ra selected_skills <<< "$2"
+    if [[ ${#selected_skills[@]} -eq 0 ]]; then
+        echo "错误: 未从入参 '$2' 解析出任何 skill，可选值: ${all_skills[*]}" >&2
+        exit 1
+    fi
 else
-    read -ra selected_skills <<< "$(prompt_skills "${all_skills[@]}")"
+    skills_raw="$(prompt_skills "${all_skills[@]}")"
+    if [[ -z "$skills_raw" ]]; then
+        echo "错误: 未选择任何 skill" >&2
+        exit 1
+    fi
+    read -ra selected_skills <<< "$skills_raw"
 fi
+# 入参指定的 skill 必须真实存在——否则只会逐个"目录不存在,跳过"后照样成功
+for skill in "${selected_skills[@]}"; do
+    if [[ ! -f "$SCRIPT_DIR/$skill/SKILL.md" ]]; then
+        echo "错误: 未知 skill '$skill'，可选值: ${all_skills[*]}" >&2
+        exit 1
+    fi
+done
 
 # 第三步：询问项目目录
 echo ""
@@ -293,7 +330,9 @@ fi
 project_dir="${project_dir/#\~/$HOME}"
 
 if [[ ! -d "$project_dir" ]]; then
-    read -rp "目录 '$project_dir' 不存在，是否创建？(y/N): " create_dir
+    # 无 tty（CI/脚本调用）时 read 失败不致命：默认不创建，走取消路径（F20 同族）
+    create_dir=""
+    read -rp "目录 '$project_dir' 不存在，是否创建？(y/N): " create_dir || true
     if [[ "$create_dir" == "y" || "$create_dir" == "Y" ]]; then
         mkdir -p "$project_dir"
     else
