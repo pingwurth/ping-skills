@@ -362,7 +362,7 @@ def run_fast_single_cov(
         project_root: 项目根目录(脚本的 cwd)。
         module: Maven 模块名(脚本第1参数)。
         target_class: 目标类 FQCN(脚本第2参数)。
-        test_class: 测试类 FQCN(脚本第3参数)。
+        test_class: 测试类简单名(脚本第3参数)。
         log_file: 日志文件路径(run_command 把脚本 stdout 写入该文件;
             脚本自身不接收日志参数, 内部 mvn 输出走脚本临时文件)。
         no_am: 是否跳过依赖模块编译(verify 阶段依赖已预装时传 True)。
@@ -447,7 +447,7 @@ def _tail_file(path: str, *, lines: int = 30) -> str:
 # fast-single-cov.sh 日志中表示「降级无意义」的关键字
 _NON_FALLBACKABLE_PATTERNS = re.compile(
     r"编译失败"                       # mvn test-compile 失败(脚本输出)
-    r"|mvn 执行失败"                  # surefire:test 失败(脚本输出)
+    r"|mvn surefire:test 执行失败"    # mvn 层失败: 插件/提供程序解析等(脚本输出)
     r"|COMPILATION ERROR"            # mvn 编译失败(Maven 原生输出, step4)
     r"|No tests were executed"       # 测试类未找到
     r"|缺少参数"                      # 参数校验失败
@@ -480,6 +480,80 @@ def _is_fallbackable_failure(log_file: str) -> bool:
         # 无日志内容(如 launch_failed), 视为可降级
         return True
     return not _NON_FALLBACKABLE_PATTERNS.search(content)
+
+
+def run_single_cov_with_fallback(
+    project_root: str | Path,
+    module: str,
+    target_class: str,
+    test_class: str,
+    log_file: str,
+    *,
+    no_am: bool = False,
+    jacoco_version: str = config.DEFAULT_JACOCO_VERSION,
+    state: Optional[State] = None,
+    timeout: Optional[int] = None,
+) -> tuple[CommandResult, str | None]:
+    """获取单类覆盖率, fast-single-cov.sh 失败时自动降级到 mvn test jacoco:report。
+
+    将日志备份与降级逻辑封装在一处, 避免 init_coverage / verify_coverage 重复实现
+    (batch 副本既有实现, 双副本同口径: 内联版本不备份快速路径日志, 降级的
+    'w'-mode 日志写入会破坏失败证据)。
+
+    Args:
+        project_root: 项目根目录。
+        module: Maven 模块名。
+        target_class: 目标类 FQCN。
+        test_class: 测试类简单名。
+        log_file: 日志文件路径。
+        no_am: 是否跳过依赖模块编译。
+        jacoco_version: JaCoCo 版本(降级方案需要)。
+        state: 状态对象(降级方案传递给 build_mvn_cmd)。
+        timeout: 超时秒数。
+
+    Returns:
+        (CommandResult, fast_cov_log_path):
+            - result.ok=True 表示最终成功;
+            - fast_cov_log_path 非 None 时为快速路径的日志备份路径。
+    """
+    log = module_logger()
+    result = run_fast_single_cov(
+        project_root, module, target_class, test_class, log_file,
+        no_am=no_am, timeout=timeout)
+
+    fast_cov_log_path: str | None = None
+    if not result.ok:
+        # 始终备份快速路径日志, 便于排查
+        fast_cov_log_path = log_file + ".fast-single-cov.log"
+        if Path(log_file).is_file():
+            shutil.copy2(log_file, fast_cov_log_path)
+            log.info(f"已备份快速路径日志: {fast_cov_log_path}")
+        else:
+            log.warning(f"快速路径日志文件不存在, 跳过备份: {log_file}")
+
+        if not _is_fallbackable_failure(log_file):
+            # 编译失败、测试失败、测试类未找到、mvn 层失败等场景降级也会同样失败
+            tail = _tail_file(log_file, lines=30)
+            log.error(
+                "fast-single-cov.sh 失败且降级无意义(编译/参数问题)\n"
+                "--- 日志(末尾 %d 行) ---\n%s"
+                "--- 结束 ---", len(tail.splitlines()) if tail else 0, tail or "")
+        else:
+            # 可恢复失败(如 exec 未生成) -> 执行降级
+            tail = _tail_file(log_file, lines=30)
+            if tail:
+                log.warning(
+                    "fast-single-cov.sh 失败, 降级到 mvn test jacoco:report\n"
+                    "--- fast-single-cov.sh 日志(末尾 %d 行) ---\n%s"
+                    "--- 结束 ---", len(tail.splitlines()), tail)
+            else:
+                log.warning("fast-single-cov.sh 失败, 降级到 mvn test jacoco:report")
+            clean_jacoco_dirs(project_root, [module])
+            result = run_mvn_test_with_jacoco(
+                project_root, module, test_class, jacoco_version, log_file,
+                state=state, timeout=timeout)
+
+    return result, fast_cov_log_path
 
 
 def _module_base(project_root: str | Path, module: str) -> str:

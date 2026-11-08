@@ -249,17 +249,11 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 project_root, module, fqcn)
                 or decisions.test_simple_name(fqcn))
             logger.info(f"执行 fast-single-cov.sh: module={module}, class={fqcn}, test={test_simple}")
-            result = maven.run_fast_single_cov(
-                project_root, module, fqcn, test_simple, mvn_log)
-            # <argLine> 降级: 仅对可恢复失败(如 exec 未生成)回退到 mvn test jacoco:report
-            if not result.ok:
-                if maven._is_fallbackable_failure(mvn_log):
-                    logger.warning("fast-single-cov.sh 失败, 降级到 mvn test jacoco:report")
-                    maven.clean_jacoco_dirs(project_root, [module])
-                    result = maven.run_mvn_test_with_jacoco(
-                        project_root, module, test_simple, args.jacoco_version, mvn_log, state=prev_state)
-                else:
-                    logger.error("fast-single-cov.sh 失败且降级无意义(编译/测试问题), 详见 %s", mvn_log)
+            # 降级(含快速路径日志备份)封装在 maven.run_single_cov_with_fallback,
+            # 与 batch 副本/verify_coverage 同口径(内联版不备份失败证据)
+            result, _fast_cov_log = maven.run_single_cov_with_fallback(
+                project_root, module, fqcn, test_simple, mvn_log,
+                jacoco_version=args.jacoco_version, state=prev_state)
             if not result.ok:
                 raise StepError.exec_error("覆盖率采集失败, 详见 mvn.log",
                                            question=f"覆盖率采集失败, 详见 {mvn_log}",

@@ -99,18 +99,11 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if uncleaned:
             logger.warning(f"surefire 目录清理失败, 本轮测试结果可能含陈旧数据: {uncleaned}")
         logger.info(f"执行 fast-single-cov.sh: module={module}, class={state.target_class}, test={test_simple}")
-        result = maven.run_fast_single_cov(
-            project_root, module, state.target_class, test_simple, mvn_log, no_am=True)
-        # <argLine> 降级: 仅对可恢复失败(如 exec 未生成)回退到 mvn test jacoco:report,
-        # 与 init_coverage.py 同口径; 编译/测试失败时降级同样会失败, 留给后续错误分支处置
-        if not result.ok:
-            if maven._is_fallbackable_failure(mvn_log):
-                logger.warning("fast-single-cov.sh 失败, 降级到 mvn test jacoco:report")
-                maven.clean_jacoco_dirs(project_root, [module])
-                result = maven.run_mvn_test_with_jacoco(
-                    project_root, module, test_simple, state.jacoco_version, mvn_log, state=state)
-            else:
-                logger.error("fast-single-cov.sh 失败且降级无意义(编译/测试问题), 详见 %s", mvn_log)
+        # 降级(含快速路径日志备份)封装在 maven.run_single_cov_with_fallback,
+        # 与 batch 副本/init_coverage 同口径(内联版不备份失败证据)
+        result, _fast_cov_log = maven.run_single_cov_with_fallback(
+            project_root, module, state.target_class, test_simple, mvn_log,
+            no_am=True, jacoco_version=state.jacoco_version, state=state)
         if not result.ok:
             # P0-6 修复: 区分编译失败与环境/依赖失败
             # 编译失败 -> 记录观测(轮次+1)并路由到 write_code 自愈
@@ -187,7 +180,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             method_round_bonus=state.method_round_bonus,
             global_round_bonus=state.global_round_bonus,
             mvn_log=mvn_log,
-            surefire_report_dir=str(surefire.report_paths(project_root, module)),
+            surefire_report_dir=str(surefire.report_dir(project_root, module)),
             test_simple=test_simple, test_class_file=state.test_class_file)
         decision = decisions.decide_after_verify(ctx)
 

@@ -744,11 +744,28 @@ def test_is_fallbackable_compilation_failure(tmp_path):
     assert maven._is_fallbackable_failure(str(log)) is False
 
 
-def test_is_fallbackable_mvn_exec_failure(tmp_path):
-    """mvn 执行失败(测试报错) -> 不可降级。"""
+def test_is_fallbackable_mvn_level_failure_line(tmp_path):
+    """mvn 层失败锚点文案(F18: 脚本对 rc!=0 且 exec 未生成且测试从未跑的
+    输出, 如插件/提供程序解析失败) -> 不可降级。
+
+    旧契约『mvn 执行失败』prose 是死文本(脚本早已不输出), F18 后脚本
+    捕获退出码并输出完整锚点"mvn surefire:test 执行失败", 模式随之替换。"""
     log = tmp_path / "mvn.log"
-    log.write_text("some output\n❌ mvn 执行失败(退出码 1)。\n")
+    log.write_text(
+        "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test"
+        " (default-cli) on project demo: plugin resolution failure\n"
+        "❌ mvn surefire:test 执行失败(退出码 1): mvn 层失败(插件/提供程序解析等), 测试从未运行\n")
     assert maven._is_fallbackable_failure(str(log)) is False
+
+
+def test_is_fallbackable_assertion_failure_tests_already_ran(tmp_path):
+    """测试已跑且断言失败(无 mvn 层失败锚点, exec 未生成的 argLine 写死类)
+    -> 可降级(降级方案 jacoco-maven-plugin 自行注入 agent, 正是此类的解药)。"""
+    log = tmp_path / "mvn.log"
+    log.write_text(
+        "[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0\n"
+        "[ERROR]   FooTest.testBar:24 expected: <1> but was: <2>\n")
+    assert maven._is_fallbackable_failure(str(log)) is True
 
 
 def test_is_fallbackable_mvn_compilation_error(tmp_path):
