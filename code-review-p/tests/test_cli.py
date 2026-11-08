@@ -171,3 +171,39 @@ def test_p11_next别名进日志前置名单(tmp_path):
         assert cli._prehandler_run_dir("resume", ns) is not None
     finally:
         os.chdir(cwd)
+
+
+# ── F27 根修回归: ask 待决的单一记账点(2026-11-09 全仓审查) ──────────
+def test_f27_待决键提取只认可答复询问():
+    """F27 根修: gates 询问由纯路由器发出、原从不记录 pending_question ——
+    陈旧守卫只能维护四份按键特定公式(P10 c015/c033 两次咬人)。单一记账点
+    从 ask_user Decision 提取键: 只有 resume 走 `answer` 的询问占键。"""
+    from crp import handlers
+    from crp.models import Decision, ResumeOption, Route
+
+    def ask(resume, status="needs_input", route=Route.ASK_USER):
+        return Decision(status=status, exit_code=config.EXIT_CONTINUE,
+                        summary="s", reason="r", route=route, resume=resume)
+
+    gates = ask([ResumeOption("approve_all", "全部批准", config.ENTRY_FILENAME,
+                              ["answer", "--run-dir", "/x", "--key", "gates",
+                               "--choice", "approve_all"])])
+    assert handlers._pending_ask_key(gates) == "gates"
+    # 纯路由询问(resume 直达)不占键
+    run_ask = ask([ResumeOption("resume_run", "续跑", config.ENTRY_FILENAME,
+                                ["resume", "--run-dir", "/x"])])
+    assert handlers._pending_ask_key(run_ask) is None
+    # 错误提示(无 resume)不占键 —— 不得覆写在途待决
+    assert handlers._pending_ask_key(ask([])) is None
+    assert handlers._pending_ask_key(ask([], status="failed")) is None
+    # 非 ask 路由不占键
+    assert handlers._pending_ask_key(ask([], route=Route.DO_WORK)) is None
+
+    # 记账: 有键写入, 无键不动(在途 drift 不被错误提示抹掉)
+    from crp.models import State
+    st = State(mode="quick", phase="gates")
+    handlers._record_ask(st, gates)
+    assert st.pending_question == {"key": "gates", "at": st.pending_question["at"]}
+    st.pending_question = {"key": "drift", "at": "t"}
+    handlers._record_ask(st, run_ask)
+    assert st.pending_question["key"] == "drift", "非可答复询问不得覆写待决键"

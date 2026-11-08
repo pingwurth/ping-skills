@@ -64,20 +64,15 @@ def porcelain_z(cwd: str | Path) -> list[dict]:
 
     -z 以 NUL 分隔记录, 可安全处理含空格/引号/非 ASCII 的路径(Windows 引号
     包裹问题); 每条记录 XY<sp>path 或 XY<sp>path<NUL>origpath(重命名)。
+    F52 回修: 改走 run_argv —— 原版内联 subprocess.run 是 P6 docstring 自己
+    记录的反模式(下一个 run_argv 级修复到不了这份副本); 行为不变
+    (utf-8/replace、超时、失败返回空列表)。
     """
-    try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain", "-z", "-uall"],
-            cwd=str(cwd), capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=config.GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if proc.returncode != 0:
+    ok, out = run_argv(["git", "status", "--porcelain", "-z", "-uall"], cwd)
+    if not ok:
         return []
     entries: list[dict] = []
-    fields = proc.stdout.split("\0")
+    fields = out.split("\0")
     i = 0
     while i < len(fields):
         rec = fields[i]

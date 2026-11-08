@@ -393,3 +393,90 @@ def test_p12_z模式重命名取新路径(tmp_path):
     repo.stage("src/old_name.txt"); repo.stage("src/new_name.txt")
     sc = scope_mod.resolve_scope(repo.root)
     assert sc["diff_files"] == ["src/a.py", "src/new_name.txt"]
+
+
+# ── F8/F16/F52 回修回归(2026-11-09 全仓审查) ─────────────────────────
+def test_f8_仅untracked范围scope_command非空(tmp_path):
+    """F8 回归: 仅 untracked 的 scope 原存 scope_command="" —— 转发
+    deep-review.js 作必需 args.scope 时被硬拒, carrier1 死路。合成与
+    whole-file 同款的非空表达。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"README.md": "hi\n"}, "init")
+    repo.untracked({"src/brand_new.py": "x = 1\n"})
+    sc = scope_mod.resolve_scope(repo.root)
+    assert sc["kind"] == "worktree" and not sc.get("escape_hatch")
+    assert sc["scope_command"] == "(untracked) cat src/brand_new.py"
+    assert sc["untracked"] == ["src/brand_new.py"] and sc["stats"]["files"] == 1
+
+
+def test_f16_显式PR目标取真实增删统计(tmp_path, monkeypatch):
+    """F16 回归: 两个 PR rung 原恒传字面量 (0,0)(gh pr diff --name-only 无
+    统计)—— 行数扇出规则对 PR 失效、账本报 0 行。改走 gh pr view。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"README.md": "hi\n"}, "init")
+    orig = gitops.run_argv
+
+    def fake_gh(argv, cwd):
+        if argv[:2] == ["gh", "pr"] and "diff" in argv:
+            return True, "src/a.py\nsrc/b.py\n"
+        if argv[:2] == ["gh", "pr"] and "view" in argv:
+            return True, '{"additions": 4000, "deletions": 800}'
+        return orig(argv, cwd)
+
+    monkeypatch.setattr(scope_mod.gitops, "run_argv", fake_gh)
+    sc = scope_mod.resolve_scope(repo.root, "42")
+    assert sc["kind"] == "pr" and sc["pr_number"] == 42 and sc["rung"] == 1
+    assert sc["stats"] == {"files": 2, "insertions": 4000, "deletions": 800}
+
+
+def test_f16_隐式pr_rung2同样取统计_失败回退0(tmp_path, monkeypatch):
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"README.md": "hi\n"}, "init")
+    orig = gitops.run_argv
+    view_calls: list[tuple] = []
+
+    def fake_gh(argv, cwd):
+        if argv[:2] == ["gh", "pr"] and "diff" in argv:
+            return True, "src/a.py\n"
+        if argv[:2] == ["gh", "pr"] and "view" in argv:
+            view_calls.append(tuple(argv))
+            return False, ""  # gh pr view 失败 → 回退 (0,0), 不阻塞范围解析
+        return orig(argv, cwd)
+
+    monkeypatch.setattr(scope_mod.gitops, "run_argv", fake_gh)
+    sc = scope_mod.resolve_scope(repo.root)  # 无显式目标 → 阶梯 rung 2 命中
+    assert sc["kind"] == "pr" and sc["rung"] == 2
+    assert any("additions,deletions" in " ".join(a) for a in view_calls), \
+        "PR rung 必须尝试 gh pr view --json additions,deletions"
+    assert sc["stats"] == {"files": 1, "insertions": 0, "deletions": 0}
+
+    # view 成功路径: 隐式 rung 2 同样填真实统计
+    def fake_gh_ok(argv, cwd):
+        if argv[:2] == ["gh", "pr"] and "view" in argv:
+            return True, '{"additions": 120, "deletions": 30}'
+        return fake_gh(argv, cwd)
+
+    monkeypatch.setattr(scope_mod.gitops, "run_argv", fake_gh_ok)
+    sc2 = scope_mod.resolve_scope(repo.root)
+    assert sc2["kind"] == "pr" and sc2["stats"]["insertions"] == 120
+    assert sc2["stats"]["deletions"] == 30
+
+
+def test_f52_porcelain_z走run_argv(tmp_path, monkeypatch):
+    """F52 回修: porcelain_z 原内联 subprocess.run —— run_argv 级修复
+    (编码/超时/日志)到不了副本, 下个修复静默漏掉本站点。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"README.md": "r\n"}, "init")
+    repo.untracked({"new.py": "n = 1\n"})
+    seen: list[tuple] = []
+    orig = gitops.run_argv
+
+    def spy(argv, cwd):
+        seen.append(tuple(argv))
+        return orig(argv, cwd)
+
+    monkeypatch.setattr(gitops, "run_argv", spy)
+    entries = gitops.porcelain_z(repo.root)
+    assert any(a[:3] == ("git", "status", "--porcelain") and "-z" in a for a in seen), \
+        "porcelain_z 必须经 run_argv 执行"
+    assert [e["path"] for e in entries if e["xy"] == "??"] == ["new.py"]

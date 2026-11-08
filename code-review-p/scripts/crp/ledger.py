@@ -105,12 +105,18 @@ def overlap_toks(a: set[str], b: set[str]) -> bool:
     return hit >= max(1, min(config.OVERLAP_CAP, (min(len(a), len(b)) + 1) // 2))
 
 
-def find_dup(seen: list[dict], cand: dict) -> Optional[dict]:
+def find_dup(seen: list[dict], cand: dict,
+             token_cache: Optional[dict] = None) -> Optional[dict]:
     """在曾见台账中找同缺陷条目: 同 file + 行号 ±DEDUP_LINE_BAND + 摘要重叠。
 
     P7 回修: status=='dup' 的台账行不作锚 —— JS 的 seen 只收 fresh(非传递),
     原版 Python 把 dup 行也当锚(传递), 渐进漂移链(10/12/14)两载体分类不同;
     对齐为非传递(dup 行已由其锚代表), 共享 fixture 链式用例锁死。
+
+    F32 回修: token_cache(按候选 id)由调用方在批量入账时传入 —— 原版对每
+    传入候选 × 每台账行重算 tokens_of(逐字符 unicodedata 扫描), 深度摄取在
+    独占提交锁内重复标记数十万次摘要; 与 journal._match_pool 的调用方缓存
+    同模式。语义不变(缓存按 id 懒填, 新入账行下次查找时现算)。
     """
     toks = tokens_of(cand.get("summary", ""))
     cline = cand.get("line") or 0
@@ -121,7 +127,14 @@ def find_dup(seen: list[dict], cand: dict) -> Optional[dict]:
             continue
         if abs((p.get("line") or 0) - cline) > config.DEDUP_LINE_BAND:
             continue
-        if overlap_toks(toks, tokens_of(p.get("summary", ""))):
+        if token_cache is not None:
+            ptoks = token_cache.get(p.get("id"))
+            if ptoks is None:
+                ptoks = tokens_of(p.get("summary", ""))
+                token_cache[p.get("id")] = ptoks
+        else:
+            ptoks = tokens_of(p.get("summary", ""))
+        if overlap_toks(toks, ptoks):
             return p
     return None
 
@@ -228,6 +241,8 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
     acc = state.accounting
     fresh_for_round = 0
     dup_for_round = 0
+    # F32: 一次提交内的摘要 token 缓存 —— 台账行摘要不可变, 按 id 懒填
+    token_cache: dict = {}
 
     for item in data.get("items", []):
         angle = item.get("angle", "?")
@@ -244,7 +259,7 @@ def ingest_candidates(state, data: dict, *, origin: str, round_no: int) -> Inges
         for c in cands:
             c = dict(c)
             c["file"] = norm_file(c.get("file"), root)
-            dup = find_dup(state.candidates, c)
+            dup = find_dup(state.candidates, c, token_cache=token_cache)
             if dup is not None:
                 result.dup_count += 1
                 dup_for_round += 1

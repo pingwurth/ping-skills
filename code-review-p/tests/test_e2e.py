@@ -961,6 +961,30 @@ def test_p4_carrier1空文件是执行错误而非内部错误(tmp_path, quick_r
     assert "重试" in p["next_step"]["question"]
 
 
+def test_f15_transcript_dir无journal且无file是引导错误(tmp_path, quick_repo):
+    """F15 回归: --transcript-dir 模式 args.file 合法为 None(cli default=None)
+    —— 幂等摘要回退原 `Path(args.file)` 的 TypeError 逃过捕获, 变 cli 兜底
+    '脚本内部错误'(exit-2), 重新引入 P4 注释记录的故障类。应走 :415-418 的
+    引导重试分支。复现: workflow 崩溃在写 journal.jsonl 之前, 操作员只传
+    --transcript-dir 补投。"""
+    d, payload = _driver(quick_repo, tmp_path / "home", "standard")
+    payload = _drive_to_carrier1(d, payload)
+    assert payload["next_step"]["type"] == "do_work"
+    dead_transcript = tmp_path / "crashed-workflow-transcript"
+    dead_transcript.mkdir()  # 无 journal.jsonl, 也未携带 --file
+    p, rc = d.run_argv(["submit", "--kind", "carrier1",
+                        "--transcript-dir", str(dead_transcript),
+                        "--run-dir", str(d.run_dir)])
+    assert rc == config.EXIT_ERROR
+    assert "载体 1 journal 摄取失败" in p["summary"], \
+        "应为可重试执行错误(原版: Path(None) TypeError → 脚本内部错误)"
+    assert "脚本内部错误" not in p["summary"]
+    assert "重试" in p["next_step"]["question"]
+    # 路由不变: resume 仍等待载体 1 产物(自愈而非终结)
+    p2, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert p2["next_step"]["type"] == "do_work"
+
+
 def test_p4_非UTF8的brief整份拒收exit3(tmp_path, quick_repo):
     """P4 回归: brief 的 strict 解码在 try 之外 —— 非 UTF-8 brief 得 exit-2
     内部错误, 与 JSON 路径同类错误的 exit-3 处理不一致。"""
@@ -1423,3 +1447,61 @@ def test_p12_new_scope重置计数器并翻页幂等(tmp_path):
     assert "重复提交已吸收" not in p2["summary"], "跨范围同字节是新工作, 不得误吞"
     st = json.loads(sp.read_text(encoding="utf-8"))
     assert st["phase"] == "brief", "重提取真实发生"
+
+
+# ── F27 根修回归: ask 待决单一记账(2026-11-09 全仓审查) ──────────────
+def test_f27_gates发问记录待决键(tmp_path):
+    """F27 根修: gates 询问由纯路由器(decisions.gates_question)发出、原从不
+    记录 pending_question —— 陈旧守卫只能按键特定公式四份(P10 c015/c033
+    两次咬人)。现在单一记账点(_record_ask)覆盖每个发出的可答复询问。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    while payload["next_step"]["type"] == "do_work":  # overlay → brief → gates ask
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "ask_user"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert (state.get("pending_question") or {}).get("key") == "gates", \
+        "gates 询问发出时必须记录待决键(原版从不记账)"
+    # 待决键在 → 答复被接受; 落地后清账
+    approve = next(o for o in payload["next_step"]["resume"]
+                   if o["option"] == "approve_all")
+    payload, _ = d.run_argv(approve["params"])
+    assert payload["next_step"]["type"] == "do_work"
+    state = json.loads((d.run_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["pending_question"] is None, "答复落地后待决键须清账"
+
+
+def test_f27_旧state无gates待决记录自愈(tmp_path):
+    """F27: 修复前入库的 state(phase=gates 且 pending 无记录)首次答复被拒
+    一次 —— resume 重问后记账, 再答即被接受(协议的错序自愈路径)。"""
+    repo = RepoBuilder.init(tmp_path)
+    repo.commit({"src/a.py": "x = 1\n", "Makefile": "check:\n\techo ok\n"}, "init")
+    repo.edit({"src/a.py": "x = 2\n"})
+    d, payload = _driver(repo, tmp_path / "home", "quick")
+    while payload["next_step"]["type"] == "do_work":
+        ns = payload["next_step"]
+        d._note_run_dir(ns)
+        d.fabricate(ns)
+        payload, _ = d.run_argv(ns["submit"]["params"])
+    assert payload["next_step"]["type"] == "ask_user"
+    # 模拟修复前的 state: 抹掉待决记录(老引擎发出的 gates 询问)
+    sp = d.run_dir / "state.json"
+    state = json.loads(sp.read_text(encoding="utf-8"))
+    state["pending_question"] = None
+    sp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    p, rc = d.run_argv(["answer", "--run-dir", str(d.run_dir), "--key", "gates",
+                        "--choice", "approve_all"])
+    assert rc == config.EXIT_STATE and "错序答复" in p["summary"]
+    # resume 重问(记账)后再答 → 接受
+    p2, _ = d.run_argv(["resume", "--run-dir", str(d.run_dir)])
+    assert p2["next_step"]["type"] == "ask_user"
+    state = json.loads(sp.read_text(encoding="utf-8"))
+    assert state["pending_question"]["key"] == "gates"
+    approve = next(o for o in p2["next_step"]["resume"] if o["option"] == "approve_all")
+    p3, rc3 = d.run_argv(approve["params"])
+    assert rc3 == config.EXIT_CONTINUE and p3["next_step"]["type"] == "do_work"

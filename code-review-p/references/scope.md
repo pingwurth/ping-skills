@@ -27,7 +27,9 @@ git rev-parse -q --verify master
 - **范围 2–4 叠加工作树改动**: porcelain 有暂存/未暂存改动时追加
   `git diff HEAD`(评审通常发生在提交前)。
 - **untracked 累积**: `??` 对一切 `git diff` 形态不可见; 仅由 untracked 构成
-  的 diff 不是空 diff。
+  的 diff 不是空 diff —— 此时 `scope_command` 为合成表达
+  `(untracked) cat <files…>`(与 whole-file 的 `(whole-file) cat …` 同款约定),
+  载体参数永远拿到非空 scope。
 - **全空逃逸口**: 全部梯级失败/为空且无 untracked → ask_user, 附完整探测表;
   绝不静默空审, 绝不从记忆重构文件清单。
 

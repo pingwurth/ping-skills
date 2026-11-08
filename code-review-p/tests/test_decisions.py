@@ -280,3 +280,97 @@ def test_p10_载体23指令携带总预算(monkeypatch):
     stv.cursor["pending_verify"] = [{"id": "c001", "lenses": ["correctness"]}]
     dv = decisions.verify_work(stv, CTX)
     assert "总预算 ≤ 30" in dv.instructions, "验证指令必须携带生效总预算"
+
+
+# ── F4 回修回归: 门禁白名单按批复(非来源)下发(2026-11-09 全仓审查) ────
+def _gated_state(**kw) -> State:
+    st = _state(**kw)
+    st.overlay = {"gates": [
+        {"command": "make check", "source": "overlay", "semantics": "read_only",
+         "approval": "approved"},
+        {"command": "make gen", "source": "overlay", "semantics": "write",
+         "approval": "denied"},
+        {"command": "npm run build", "source": "heuristic", "semantics": "read_only",
+         "approval": "denied"},
+    ]}
+    return st
+
+
+def test_f4_白名单只含用户批准的门禁():
+    """F4 回归: 59925ab 删 approval='auto' 后, denied(用户拒绝/write 语义)
+    从不下发 —— 原三执行器按"来源"定键, 用户明确拒绝的门禁仍被子代理执行。"""
+    st = _gated_state(phase="sweep", carrier={"carrier": 1, "reason": "wf"})
+    assert decisions.approved_gate_commands(st) == ["make check"]
+    d = decisions.sweep_work(st, CTX)
+    # 载体 1 args 携带白名单: approved 在, 两个 denied 不在
+    assert 'gates: ["make check"]' in d.instructions
+    assert "make gen" not in d.instructions and "npm run build" not in d.instructions
+    assert d.context["gates"] == ["make check"]
+
+
+def test_f4_白名单随载体23与验证指令下发():
+    """F4 回归: 载体 2/3 的扫描指令与验证批次指令同样逐字下发白名单。"""
+    st2 = _gated_state(phase="sweep", carrier={"carrier": 2, "reason": "spawn"})
+    st2.cursor["pending_angles"] = ["A"]
+    d2 = decisions.sweep_work(st2, CTX)
+    assert "make check" in d2.instructions and "make gen" not in d2.instructions
+
+    stv = _gated_state(phase="verify")
+    stv.candidates = [{"id": "c001", "file": "a.py", "line": 1, "summary": "s",
+                       "failure_scenario": "f", "severity": "P2"}]
+    stv.cursor["pending_verify"] = [{"id": "c001", "lenses": ["correctness"]}]
+    dv = decisions.verify_work(stv, CTX)
+    assert "make check" in dv.instructions and "make gen" not in dv.instructions
+    assert "npm run build" not in dv.instructions
+
+
+def test_f4_空白名单显式下发fail_closed():
+    """F4 回归: 无已批准门禁时也必须显式下发空集(fail-closed), 而非留白让
+    子代理自行从 brief/来源推断。"""
+    st = _state(phase="sweep", carrier={"carrier": 1, "reason": "wf"})
+    st.overlay = {"gates": [{"command": "make gen", "source": "overlay",
+                             "semantics": "write", "approval": "denied"}]}
+    assert decisions.approved_gate_commands(st) == []
+    d = decisions.sweep_work(st, CTX)
+    assert "gates: []" in d.instructions and "无可运行门禁" in d.instructions
+    assert "make gen" not in d.instructions
+
+
+# ── F8 回修回归: 仅 untracked 的范围可下发载体 1(2026-11-09 全仓审查) ──
+def test_f8_仅untracked范围载体1参数非空():
+    """F8 回归: 仅 untracked 的 scope 原存 scope_command="" —— 作为必需
+    args.scope 转发 deep-review.js 被硬拒('args.scope required'), ladder
+    承诺合法的范围形状走入死路。旧 state(空 scope_command)由 untracked
+    清单兜底合成非空表达。"""
+    st = _state(phase="sweep", carrier={"carrier": 1, "reason": "wf"})
+    st.scope = {"scope_command": "", "untracked": ["src/new.py", "docs/guide.md"],
+                "diff_files": ["src/new.py", "docs/guide.md"], "stats": {"files": 2}}
+    expr = decisions.carrier_scope_expr(st.scope)
+    assert expr == "(untracked) cat src/new.py docs/guide.md"
+    d = decisions.sweep_work(st, CTX)
+    assert f'scope: "{expr}"' in d.instructions, "载体 1 args.scope 必须非空"
+
+
+def test_f8_有scope_command时原样透传():
+    st = _state(phase="sweep", carrier={"carrier": 1, "reason": "wf"})
+    st.scope = {"scope_command": "git diff HEAD", "untracked": [], "stats": {"files": 1}}
+    assert decisions.carrier_scope_expr(st.scope) == "git diff HEAD"
+    d = decisions.sweep_work(st, CTX)
+    assert 'scope: "git diff HEAD"' in d.instructions
+
+
+# ── F39 回修回归: max_concurrent 缺省单一来源(2026-11-09 全仓审查) ────
+def test_f39_max_concurrent缺省单一来源(monkeypatch):
+    """F39 回归: 缺省逻辑原在 carrier_work 与 effective_limits 逐字重复 ——
+    收敛到 plan_max_concurrent 后, 通告值与执行值必须同源一致。"""
+    monkeypatch.delenv(config.CRP_MAX_CONCURRENT_ENV, raising=False)
+    assert decisions.plan_max_concurrent({}) == config.max_concurrent_agents()
+    st = _state(phase="sweep", carrier={"carrier": 2, "reason": "r"})
+    st.sweep_plan.pop("max_concurrent")  # 旧 state.json 无该键
+    st.cursor["pending_angles"] = ["A"]
+    d = decisions.sweep_work(st, CTX)
+    mc = decisions.effective_limits(st)[1]
+    assert f"≤ {mc}" in d.instructions, "carrier_work 通告值须与 effective_limits 同源"
+    # carrier_work 的 context 通告同值
+    dc = decisions.carrier_work(st, CTX)
+    assert dc.context["max_concurrent"] == mc

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import re
 from pathlib import Path
@@ -91,6 +92,27 @@ def _pr_diff_files(cwd: str | Path, pr_number: Optional[int] = None) -> Optional
     if not ok:
         return None
     return [f for f in out.splitlines() if f and not f.startswith(("Draft:", "Title:"))]
+
+
+def _pr_stats(cwd: str | Path, pr_number: Optional[int] = None) -> tuple[int, int]:
+    """`gh pr view --json additions,deletions` 取 PR 真实增删行数。
+
+    F16 回修: 两个 PR rung 原恒传字面量 (0, 0)(gh pr diff --name-only 无统计)
+    —— 行数扇出规则对 PR 范围失效、账本报 0 行。gh 原生提供该统计;
+    gh 缺失/失败/字段畸形回退 (0, 0)(继续按文件数口径, 不阻塞范围解析)。
+    """
+    args = ["pr", "view"]
+    if pr_number is not None:
+        args.append(str(pr_number))
+    args += ["--json", "additions,deletions"]
+    ok, out = gitops.run_argv(["gh", *args], cwd)
+    if not ok:
+        return 0, 0
+    try:
+        data = json.loads(out)
+        return (int(data.get("additions") or 0), int(data.get("deletions") or 0))
+    except (ValueError, TypeError):
+        return 0, 0
 
 
 def _diff_stat(cwd: str | Path, diff_args: list[str]) -> tuple[Optional[list[str]], int, int]:
@@ -261,7 +283,9 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool,
                      commit_log_cmd="gh pr view")
         files, secondary = accumulate_working_tree(2, files)
         scope["secondary_commands"] = secondary
-        return _finish_scope(cwd, scope, files, untracked_in_scope(), (0, 0))
+        # F16: gh pr diff --name-only 无统计 —— 真实增删行数走 gh pr view
+        ins, dele = _pr_stats(cwd)
+        return _finish_scope(cwd, scope, files, untracked_in_scope(), (ins, dele))
 
     # ── rung 3: 未推送提交 ──
     files, ins, dele = _diff_stat(cwd, restricted(["@{upstream}...HEAD"]))
@@ -315,7 +339,11 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool,
         return _finish_scope(cwd, scope, [target], [], (0, 0))
     if in_scope_untracked:
         scope = _base_scope(cwd, "worktree")
-        scope.update(rung=5, scope_command="", commit_log_cmd="git log --oneline -5")
+        # F8 回修: 原 scope_command="" —— 阶梯契约明确"仅 untracked 构成的
+        # diff 不是空 diff", 但该值作为必需 args.scope 转发 deep-review.js 时
+        # 被硬拒(carrier1 死路)。合成与 whole-file 同款的等价非空表达。
+        scope.update(rung=5, scope_command=untracked_scope_command(in_scope_untracked),
+                     commit_log_cmd="git log --oneline -5")
         return _finish_scope(cwd, scope, [], in_scope_untracked, (0, 0))
     scope = _base_scope(cwd, "empty")
     scope["escape_hatch"] = {"probes": probes}
@@ -324,6 +352,13 @@ def _ladder(cwd: Path, target: Optional[str], path_restricted: bool,
 
 def _display(cmd: str, target: Optional[str], path_restricted: bool) -> str:
     return f"{cmd} -- {target}" if (path_restricted and target) else cmd
+
+
+def untracked_scope_command(files: list[str]) -> str:
+    """仅 untracked 范围的 scope 表达(与 whole-file 的 `(whole-file) cat …`
+    同款约定): 这些文件对一切 git diff 形态不可见, 全文即审查对象。
+    decisions.carrier_scope_expr 对旧 state.json 的空 scope_command 复用。"""
+    return f"(untracked) cat {' '.join(files)}"
 
 
 def _as_root_relative(cwd0: Path, root: Path, target: str) -> str:
@@ -390,7 +425,9 @@ def resolve_scope(cwd: str | Path, target: Optional[str] = None,
         scope.update(rung=1, target=target, pr_number=int(target),
                      scope_command=f"gh pr diff {target}",
                      commit_log_cmd=f"gh pr view {target}")
-        return _finish_scope(cwd, scope, files, untracked, (0, 0))
+        # F16: 显式 PR 目标同样取真实统计(原恒 (0, 0))
+        ins, dele = _pr_stats(cwd, int(target))
+        return _finish_scope(cwd, scope, files, untracked, (ins, dele))
 
     if kind == "range":
         files, ins, dele = _diff_stat(cwd, [target])

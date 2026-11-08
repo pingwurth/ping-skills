@@ -170,3 +170,55 @@ def test_p8_路径归一根用仓库顶层():
     # 旧 state(无 root)回退 cwd —— 降级同旧版, 不崩
     st_old = State(mode="standard", repo={"cwd": "/repo/src"})
     assert ledger.norm_root(st_old) == "/repo/src"
+
+
+# ── F32 回修回归: find_dup 的摘要 token 缓存(2026-11-09 全仓审查) ──────
+def test_f32_find_dup缓存语义不变():
+    """F32 回归: token_cache 按 id 懒填, 结果与无缓存逐点一致(含漂移链)。"""
+    seen = [
+        {"id": "c001", "file": "a.py", "line": 10, "summary": "missing await on fetch user",
+         "status": "fresh"},
+        {"id": "c002", "file": "a.py", "line": 12, "summary": "missing await on fetch user again",
+         "status": "fresh"},
+        {"id": "c003", "file": "a.py", "line": 40, "summary": "unrelated off-by-one bound",
+         "status": "fresh"},
+    ]
+    # (候选行号, 期望锚 id 或 None): 带内首个重叠行命中; 14 落在 c001 带外;
+    # 43 带内但摘要无重叠 → 不并(缓存不得改变重叠判定)
+    for line, expect_id in ((11, "c001"), (13, "c001"), (14, "c002"),
+                            (43, None), (60, None)):
+        cand = {"file": "a.py", "line": line, "summary": "missing await on fetch user"}
+        cache: dict = {}
+        for _ in range(2):  # 第二遍全走缓存
+            hit = ledger.find_dup(seen, cand, token_cache=cache)
+            got_id = hit.get("id") if hit else None
+            assert got_id == expect_id, f"line={line}: {got_id} != {expect_id}"
+
+
+def test_f32_入账缓存只算一次tokens(monkeypatch):
+    """F32 回归: 原版在同一提交内对每候选×每台账行重算 tokens_of(逐字符
+    unicodedata 扫描, 提交锁内)—— 缓存后同提交内台账锚摘要只算一次。"""
+    calls: dict[str, int] = {}
+    orig = ledger.tokens_of
+
+    def counting(s):
+        calls[s] = calls.get(s, 0) + 1
+        return orig(s)
+
+    monkeypatch.setattr(ledger, "tokens_of", counting)
+    st = State(mode="standard", repo={"cwd": "/repo"},
+               sweep_plan={"keep": config.KEEP_CONFIRMED_P01})
+    summary = "dup cache token counting defect"
+    anchor = {"file": "a.py", "line": 10, "summary": summary,
+              "failure_scenario": "f", "confidence": 0.9, "severity": "P2",
+              "category": "correctness"}
+    # 一份提交: 1 锚 + 5 个带内重投(深度摄取同文件聚类的典型形状)
+    cands = [dict(anchor)] + [dict(anchor, line=10 + i % 3) for i in range(5)]
+    r = ledger.ingest_candidates(
+        st, {"items": [{"angle": "A", "coverage": {"ran": True}, "candidates": cands}]},
+        origin="sweep", round_no=1)
+    assert r.dup_count == 5 and len(r.fresh_ids) == 1
+    # 7 = 锚自身 1 + 首个重投查锚行 1(入缓存) + 其余 4 重投各自身 1;
+    # 原版无缓存 = 6 次候选自身 + 5 次锚行重算 = 11
+    assert calls[summary] == 7, \
+        f"同提交内锚摘要必须只算一次(实际 {calls[summary]} 次, 原版 11 次)"

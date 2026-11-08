@@ -425,3 +425,20 @@ def test_p10_js尊重下传maxAgents():
     )
     r = json.loads(run_node(js))
     assert r["maxAgents"] == 5, f"下传 5 必须生效(原版被 Math.max(12,…) 抬到 12): {r}"
+
+
+# ── F4 回修回归: 门禁白名单按批复(非来源)定键(2026-11-09 全仓审查) ────
+def test_f4_gate_whitelist_markers():
+    """F4 回归: 引擎按用户批复下发白名单(args.gates), 载体 1 提示只认白名单
+    —— 来源(overlay/heuristic)不是授权; 无白名单 = 不运行任何门禁(fail-closed)。
+    原版按"来自 diff 新增的 overlay 或启发式"定键, 用户明确拒绝(denied)的
+    门禁仍被子代理执行。"""
+    src = script_src()
+    assert "gates?: array<string>" in src, "args 注释缺少 gates 白名单参数"
+    assert "approvedGates" in src, "缺少白名单变量"
+    assert "(none — run no gates)" in src, "缺少 fail-closed 空白名单文案"
+    # 两个 prompt(finder/refuter)都携带 gateRule
+    assert src.count("${gateRule}") == 2, "finder/refuter 提示都必须携带白名单规则"
+    # 旧的按来源定键指令必须移除
+    assert "comes from an overlay the diff itself added" not in src, \
+        "来源定键的旧指令必须删除(来源≠批准)"

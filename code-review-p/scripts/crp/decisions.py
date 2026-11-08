@@ -9,11 +9,13 @@ cap/下限全部在此固化 —— SKILL.md 的数字只在这里出现一次�
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from . import config
+from . import scope as scope_mod
 from .models import Decision, NextCommand, ResumeOption, Route, State
 
 
@@ -44,6 +46,42 @@ def sweep_angles(mode: str, overlay: dict) -> list[str]:
             angles.append("K")
         return angles
     return list(config.FULL_ANGLE_KEYS)
+
+
+def approved_gate_commands(state: State) -> list[str]:
+    """已获用户批准的门禁白名单(载体侧唯一可运行的命令集合)。
+
+    F4 回修: 59925ab 删除 approval='auto' 后, state.overlay.gates 里的
+    denied(用户拒绝, 或 write 语义)从不下发, 而三个执行器(deep-review.js /
+    review-finder.md / review-refuter.md)原按"来源"(overlay/heuristic)定键
+    —— 用户明确拒绝的门禁仍被子代理执行。来源不是授权: 只有用户批复
+    (approval=='approved')是。白名单外的门禁一律记 "unverified by gate"。
+    """
+    gates = (state.overlay or {}).get("gates") or []
+    return [g.get("command") for g in gates
+            if g.get("approval") == "approved" and str(g.get("command") or "").strip()]
+
+
+def carrier_scope_expr(sc: dict) -> str:
+    """载体 1 的 args.scope 表达式(非空保证)。
+
+    F8 回修: 仅 untracked 构成的范围在旧 state.json 里 scope_command 为空
+    (新范围已由 scope.untracked_scope_command 合成非空表达), 而
+    deep-review.js 对空 args.scope 硬拒 —— 此处兜底合成, 阶梯契约
+    "仅 untracked 的 diff 不是空 diff" 承诺的范围形状永远可下发。
+    """
+    cmd = (sc or {}).get("scope_command") or ""
+    if cmd:
+        return cmd
+    files = (sc or {}).get("untracked") or []
+    return scope_mod.untracked_scope_command(files) if files else "(untracked only)"
+
+
+def _gate_whitelist_line(gates_wl: list[str]) -> str:
+    """扫描/验证指令共用的门禁白名单行(白名单外一律不跑)。"""
+    listing = "、".join(f"`{g}`" for g in gates_wl) if gates_wl else "无 —— 一切门禁命令不得运行"
+    return (f"门禁白名单(引擎按用户批复下发, 唯一可运行): {listing}; "
+            '白名单外/写语义门禁一律不跑, 记 "unverified by gate"。')
 
 
 def build_sweep_plan(mode: str, overlay: dict, scope: dict) -> dict:
@@ -217,8 +255,8 @@ def gates_question(state: State, ctx: RouteCtx) -> Decision:
 def carrier_work(state: State, ctx: RouteCtx) -> Decision:
     plan = state.sweep_plan or {}
     angles = plan.get("angles") or []
-    # 旧 state.json 的 sweep_plan 无 max_concurrent(2026-11 并发治理新增) —— 缺省回退
-    max_conc = plan.get("max_concurrent") or config.max_concurrent_agents()
+    # F39: 缺省回退收敛到 plan_max_concurrent 单一来源(原与 effective_limits 逐字重复)
+    max_conc = plan_max_concurrent(plan)
     parts = [
         "选择并行载体并留痕(3 选 1, 首个可用者胜):",
         "1. Workflow 脚本(仅主会话有 Workflow 工具) —— scriptPath 调 workflows/deep-review.js;",
@@ -244,6 +282,18 @@ def carrier_work(state: State, ctx: RouteCtx) -> Decision:
 # --------------------------------------------------------------------------- #
 # 扫描与验证 do_work
 # --------------------------------------------------------------------------- #
+def plan_max_concurrent(plan: dict) -> int:
+    """sweep_plan.max_concurrent 的缺省回退(单一来源)。
+
+    F39 回修: 原版在 carrier_work 与 effective_limits 两处逐字重复
+    `plan.get('max_concurrent') or config.max_concurrent_agents()` —— 两表达式
+    一旦只改一处, carrier_work 通告的并发上限就与 effective_limits 执行的
+    不同(静默 desync)。旧 state.json 的 sweep_plan 无该键(2026-11 并发治理
+    之前), 缺省回退引擎默认。
+    """
+    return (plan or {}).get("max_concurrent") or config.max_concurrent_agents()
+
+
 def _cap(plan_val, override):
     """override 为合法正整数时取 min(只收紧不放宽), 否则用 plan 值。"""
     if isinstance(override, int) and not isinstance(override, bool) and override >= 1:
@@ -261,7 +311,7 @@ def effective_limits(state: State) -> tuple[Optional[int], int]:
     """
     plan = state.sweep_plan or {}
     carrier = state.carrier or {}
-    mc_plan = plan.get("max_concurrent") or config.max_concurrent_agents()
+    mc_plan = plan_max_concurrent(plan)
     return (_cap(plan.get("max_agents"), carrier.get("max_agents")),
             _cap(mc_plan, carrier.get("max_concurrent")))
 
@@ -310,12 +360,15 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
     # 初扫(fix_review 也是一轮全角度 quick 语义扫描)
     angles = pending or plan.get("angles") or []
     max_agents_eff, max_conc = effective_limits(state)
+    # F4: 门禁白名单随扫描指令下发 —— 子代理只认白名单, 不再按来源推断
+    gates_wl = approved_gate_commands(state)
     common = (
         "逐角度生成候选: 生成自由、不做过滤(置信度/严重度只记录不拦截); "
         "同一行不同机制 = 两条候选; 每角度上限 8 条。\n"
         f"角度章程: {ctx.refs('angles.md')} · brief 已存 {ctx.run_dir / config.IN_SUBDIR}/02-brief.md。\n"
         "候选 file 一律仓库相对路径(正斜杠); cleanup(I)/altitude(J)/conventions(K) 的 "
         "failure_scenario 写具体成本而非崩溃。\n"
+        f"{_gate_whitelist_line(gates_wl)}\n"
         f"spawn 子代理(载体 2)必须分波: 同时在飞 ≤ {max_conc}"
         "(限流保护), 一个完成再补一个 —— 不要一次扇出全部角度; "
         f"总 spawn 预算 ≤ {max_agents_eff} 个 agent(含 refuter)。"
@@ -329,13 +382,18 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
         # 被多跑一整轮 gap); quick 传 verify:false 免对抗验证(引擎 floor-only
         # 摄取, 反驳预算不再白烧)。
         quick_arg = ", verify: false" if state.mode == "quick" else ""
+        # F8: scope 表达保证非空(仅 untracked 的旧 state 兜底合成);
+        # F4: gates 白名单下发 —— JS 侧子代理只运行白名单内命令
         instructions = (
             "载体 1(Workflow 工具, 仅主会话): 以 scriptPath 调用已安装的 "
             "workflows/deep-review.js, args 携带 "
-            "{brief: <02-brief.md 全文>, scope: <scope_command>, cwd: <仓库绝对路径>, "
+            "{brief: <02-brief.md 全文>, cwd: <仓库绝对路径>, "
+            f"scope: {json.dumps(carrier_scope_expr(state.scope or {}), ensure_ascii=False)}, "
             f"angles: {angles}, maxRounds: {plan.get('max_rounds')}, "
             f"dryRequired: {plan.get('dry_required')}, "
-            f"maxAgents: {max_agents_eff}, concurrency: {max_conc}{quick_arg}}}。\n"
+            f"maxAgents: {max_agents_eff}, concurrency: {max_conc}, "
+            f"gates: {json.dumps(gates_wl, ensure_ascii=False)}{quick_arg}}}。\n"
+            "gates 为引擎按用户批复下发的唯一可运行门禁白名单(空数组 = 无可运行门禁)。\n"
             + ("quick 模式: verify:false —— workflow 不跑对抗验证, 引擎按 floor-only 摄取。\n"
                if state.mode == "quick" else "")
             + "运行结束后, 把工具结果中的 transcriptDir 路径原样写入 output 文件(单行)。\n"
@@ -346,7 +404,8 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
             summary="等待载体 1 运行(Workflow)", route=Route.DO_WORK,
             reason="phase=sweep, 载体 1", instructions=instructions,
             context={"angles": angles, "carrier": 1,
-                     "scope_command": (state.scope or {}).get("scope_command")},
+                     "scope_command": (state.scope or {}).get("scope_command"),
+                     "gates": gates_wl},
             output=output,
             shape="<单行>: Workflow 工具结果中的 transcriptDir 绝对路径",
             submit=_submit_cmd(ctx, "carrier1", Path(output)),
@@ -358,7 +417,8 @@ def sweep_work(state: State, ctx: RouteCtx) -> Decision:
     return _do_work(
         "candidates", instructions, ctx,
         context={"round": round_no, "round_kind": round_kind, "angles": angles,
-                 "scope_command": (state.scope or {}).get("scope_command")},
+                 "scope_command": (state.scope or {}).get("scope_command"),
+                 "gates": gates_wl},
         shape=SHA_CANDIDATES, summary=f"等待第 {round_no} 轮候选({len(angles)} 角度)",
         seq=f"{round_no:02d}")
 
@@ -383,12 +443,14 @@ def verify_work(state: State, ctx: RouteCtx) -> Decision:
             "severity": c.get("severity"), "lenses": lenses,
         })
     max_agents_eff, max_conc = effective_limits(state)
+    # F4: 白名单逐字下发 —— 验证者只认引擎批复, 不从 brief/来源自行推断
+    gates_wl = approved_gate_commands(state)
     instructions = (
         "对抗验证: 逐候选逐透镜尝试**反驳**。读真实代码并引证原文; 检查别处守卫"
         "(调用方/包装器/框架默认/类型系统); 能否精确命名触发输入态; 可廉价实证则实证"
         "(5 行复现 > 一切阅读; 但 oracle 必须独立于被审代码)。\n"
-        "brief 中已获批准的只读门禁可运行并引用输出; 未批准/写语义门禁一律不跑, 记 "
-        '"unverified by gate"。无引证不下裁决。\n'
+        f"{_gate_whitelist_line(gates_wl)}\n"
+        "白名单内门禁的输出可引用进 evidence。无引证不下裁决。\n"
         f"透镜: correctness=代码是否如 finding 所称 / reproduction=构造具体触发 / "
         f"security=真实信任边界与影响。\n"
         f"spawn 子代理分波进行: 同时在飞 ≤ {max_conc}"

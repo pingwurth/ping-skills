@@ -58,6 +58,53 @@ def _ctx(state: State, run_dir: Path) -> decisions.RouteCtx:
     return decisions.RouteCtx(run_dir=run_dir)
 
 
+# --------------------------------------------------------------------------- #
+# ask 待决的单一记账点(F27 根修, 2026-11-09 全仓审查)
+# --------------------------------------------------------------------------- #
+def _pending_ask_key(decision: Decision) -> Optional[str]:
+    """从 ask_user Decision 提取可答复键: resume 选项里走 `answer` 的 --key 值。
+
+    纯路由询问(start 防覆盖/run 续跑 —— resume 直达, 不经 answer)与错误提示
+    (StepError, 无 resume)不占键; answerable 询问(scope/gates/drift)恰占一键。
+    """
+    if decision.route != Route.ASK_USER:
+        return None
+    for opt in decision.resume or []:
+        params = opt.params or []
+        if params[:1] == ["answer"] and "--key" in params and params.index("--key") + 1 < len(params):
+            return params[params.index("--key") + 1]
+    return None
+
+
+def _record_ask(state: State, decision: Decision) -> None:
+    """ask 待决的单一记账点: 一切可答复 ask_user 在返回前经此记录
+    pending_question。
+
+    原版 gates 询问由纯路由器(decisions.gates_question)发出、从不记账, 陈旧
+    守卫只能维护四份按键特定的公式(P10 c015/c033 两次咬人); 现在每个发出的
+    可答复询问都在这里入账, 下一个 ask 种类不再重新引入"发问不记账 → 守卫
+    公式再抄一份"的丢标记类。清账仍在各 answer 处理分支(P10 的在途 drift
+    保护不变)。
+    """
+    key = _pending_ask_key(decision)
+    if key is not None:
+        state.pending_question = {"key": key, "at": _now()}
+
+
+def _save_routed(store: StateStore, state: State, run_dir: Path, decision: Decision):
+    """decide_next 产物的统一落盘出口: 先记 ask 待决再保存。"""
+    _record_ask(state, decision)
+    _touch(state)
+    store.save(state)
+    return decision, EmitContext(run_dir=run_dir, state=state)
+
+
+def _routed(store: StateStore, state: State, run_dir: Path):
+    """路由 + 落盘的统一出口(cmd_* 各 return decisions.decide_next(...) 站点)。"""
+    return _save_routed(store, state, run_dir,
+                        decisions.decide_next(state, _ctx(state, run_dir)))
+
+
 def _touch(state: State) -> None:
     state.updated_at = _now()
 
@@ -153,8 +200,10 @@ def _drift_gate(state: State, run_dir: Path) -> Optional[Decision]:
     current = scope_mod.current_signature(cwd)
     drift = scope_mod.drift_between(scope_mod.signature_of(state.repo), current)
     if drift == "head_moved":
-        state.pending_question = {"key": "drift", "at": _now()}
-        return _drift_ask(state.repo.get("head"), current.get("head"), run_dir)
+        # F27: 待决键经 _record_ask 单一记账(原手写 {"key": "drift"})
+        d = _drift_ask(state.repo.get("head"), current.get("head"), run_dir)
+        _record_ask(state, d)
+        return d
     if drift == "working_tree_changed":
         state.repo["wt_drift_note"] = "工作树在运行期间有新改动(范围基准不变)"
     return None
@@ -219,9 +268,10 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
         sc = {"escape_hatch": {"probes": [
             {"cmd": "git rev-parse --is-inside-work-tree", "rc": 1, "empty": True}]}}
         state = _new_state(cwd, mode, fix_requested, target, sc)
-        state.pending_question = {"key": "scope", "at": _now()}
         run_dir = _place_state(args, state)
-        return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
+        # F27: 待决键经 _record_ask 单一记账(原手写 {"key": "scope"})
+        return _save_routed(StateStore(run_dir), state, run_dir,
+                            _scope_escape_ask(sc, run_dir))
 
     # 未完成运行防覆盖(429 中断后重跑是验收实测过的失败模式)
     if not args.force and not args.run_dir:
@@ -235,18 +285,18 @@ def cmd_start(args) -> tuple[Decision, EmitContext]:
     porcelain = gitops.porcelain_z(cwd)
     sc = scope_mod.resolve_scope(cwd, target, porcelain=porcelain)
     state = _new_state(cwd, mode, fix_requested, target, sc, porcelain=porcelain)
-    if sc.get("escape_hatch"):
-        # P2 回修: 逃逸口 ask 落 pending_question(resume 侧据此重问, 见 cmd_resume)
-        state.pending_question = {"key": "scope", "at": _now()}
     run_dir = _place_state(args, state)
 
     if sc.get("escape_hatch"):
-        return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
+        # P2 回修: 逃逸口 ask 落 pending_question(resume 侧据此重问, 见 cmd_resume)
+        # F27: 记账收敛到 _save_routed 单一点
+        return _save_routed(StateStore(run_dir), state, run_dir,
+                            _scope_escape_ask(sc, run_dir))
 
     _init_overlay_state(state, cwd)
     _touch(state)
     StateStore(run_dir).save(state)
-    return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
+    return _routed(StateStore(run_dir), state, run_dir)
 
 
 def _new_state(cwd: Path, mode: str, fix_requested: bool, target: Optional[str], sc: dict,
@@ -304,24 +354,21 @@ def cmd_resume(args) -> tuple[Decision, EmitContext]:
                         store.save(state)
                 except (OSError, ValueError):
                     pass
-            return decisions.decide_next(state, _ctx(state, run_dir)), \
-                EmitContext(run_dir=run_dir, state=state)
+            return _routed(store, state, run_dir)
         # P2 回修: 范围逃逸口存活时不得继续 —— 原版 resume 只看 phase, 一条普通
         # resume 即绕过 '禁止静默空审' 门禁在空范围上跑完整场审查
         if state.scope.get("escape_hatch"):
-            state.pending_question = {"key": "scope", "at": _now()}
-            _touch(state); store.save(state)
-            return _scope_escape_ask(state.scope, run_dir), EmitContext(run_dir=run_dir, state=state)
+            return _save_routed(store, state, run_dir,
+                                _scope_escape_ask(state.scope, run_dir))
         drift = _drift_gate(state, run_dir)
         if drift is not None:
-            store.save(state)
-            return drift, EmitContext(run_dir=run_dir, state=state)
+            return _save_routed(store, state, run_dir, drift)
         if not state.is_done:
             state.interrupted["count"] = state.interrupted.get("count", 0) + 1
             state.interrupted["last_at"] = _now()
         _touch(state)
         store.save(state)
-        return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
+        return _routed(store, state, run_dir)
 
 
 cmd_next = cmd_resume
@@ -341,8 +388,7 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
 
         drift = _drift_gate(state, run_dir)
         if drift is not None:
-            store.save(state)
-            return drift, EmitContext(run_dir=run_dir, state=state)
+            return _save_routed(store, state, run_dir, drift)
 
         # ── 种类核对(路由器派生期待, 不看历史 → 错序自愈) ──
         expected = state.cursor.get("awaiting", "")
@@ -387,8 +433,18 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                 # 字节重投 = 孤儿结果吸收, 不得双重入账(原版 sha256 恒空绕开) ──
                 if transcript_dir is not None and (transcript_dir / "journal.jsonl").is_file():
                     digest_src = transcript_dir / "journal.jsonl"
+                elif compact_file is not None:
+                    digest_src = compact_file
+                elif args.file:
+                    digest_src = Path(args.file)
                 else:
-                    digest_src = compact_file if compact_file is not None else Path(args.file)
+                    # F15 回修: --transcript-dir 模式 args.file 合法为 None(cli
+                    # default=None), 原 `Path(args.file)` 的 TypeError 逃过下方
+                    # except 捕获落 cli 兜底 exit-2 内部错误 —— 重新引入 P4 注释
+                    # 记录的故障类。此处抛 ValueError 走既有的引导重试分支。
+                    raise ValueError(
+                        f"transcript 目录无 journal.jsonl 且未携带 --file(压缩 "
+                        f"journal): {transcript_dir}")
                 digest = hashlib.sha256(digest_src.read_bytes()).hexdigest()
                 # P11(c004): carrier1 幂等键不含 round —— 常规种类含 round 防
                 # 连续空 gap 轮误吞, 但 carrier1 的同一 journal 字节无论在哪个
@@ -403,8 +459,7 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
                 if dup is not None:
                     decision = decisions.decide_next(state, _ctx(state, run_dir))
                     decision.summary = f"重复提交已吸收(carrier1, sha256 相同) —— {decision.summary}"
-                    store.save(state)
-                    return decision, EmitContext(run_dir=run_dir, state=state)
+                    return _save_routed(store, state, run_dir, decision)
 
                 if transcript_dir is not None and (transcript_dir / "journal.jsonl").is_file():
                     note = journal.ingest_transcript(state, transcript_dir,
@@ -423,7 +478,7 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
             })
             _touch(state)
             store.save(state)
-            return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
+            return _routed(store, state, run_dir)
 
         # ── 常规种类: 读文件 + 幂等 + 校验(全有或全无) + 应用 ──
         if not args.file:
@@ -444,8 +499,7 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
             # 字节相同的重投 = 无操作成功(孤儿结果幂等吸收)
             decision = decisions.decide_next(state, _ctx(state, run_dir))
             decision.summary = f"重复提交已吸收({kind}, sha256 相同) —— {decision.summary}"
-            store.save(state)
-            return decision, EmitContext(run_dir=run_dir, state=state)
+            return _save_routed(store, state, run_dir, decision)
 
         if kind == "brief":
             # P4 回修: strict 解码原版在 try 之外 —— 非 UTF-8 brief 得 exit-2
@@ -472,7 +526,7 @@ def cmd_submit(args) -> tuple[Decision, EmitContext]:
         })
         _touch(state)
         store.save(state)
-        return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
+        return _routed(store, state, run_dir)
 
 
 def _validate_kind(state: State, kind: str, data: object):
@@ -697,22 +751,17 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
         key, choice = args.key, args.choice
 
         # ── 错序守卫(P1 回修): 陈旧 ask_user 答复不得重放传送状态机 ──
-        # 每类答复只在对应待决问题存活时合法; 与 submit 的错序自愈对齐,
-        # 拒绝时交回路由器(429 中断后重贴旧命令是最常见的触发方式)。
-        if key == "scope":
-            stale = (not state.scope.get("escape_hatch")
-                     or (state.pending_question or {}).get("key") == "drift")
-        elif key == "gates":
-            # P10 回修(c015/c033): gates 问题不入 pending_question, 守卫原只查
-            # 相位 —— drift 待决在途时重放的 gates 答复被放行并抹掉漂移标记
-            stale = (state.phase != "gates"
-                     or (state.pending_question or {}).get("key") == "drift")
-        elif key == "drift":
-            stale = (state.pending_question or {}).get("key") != "drift"
-        elif key == "run":
-            stale = False  # run 答复仅交回路由器(resume 幂等), 无状态可传送
-        else:
+        # F27 根修: 待决键由单一记账点(_record_ask)在每个可答复 ask_user
+        # 发出时写入 —— 含原从不记账的 gates 询问(P10 c015/c033 双重记账
+        # 两次咬人的根), 守卫收敛为一条公式, 不再维护四份按键特定的陈旧
+        # 判定。旧 state(无 pending 记录)的首次答复会被拒一次, resume 重问
+        # 即自愈。run 答复仅交回路由器(resume 幂等), 无状态可传送, 恒不陈旧。
+        if key == "run":
+            stale = False
+        elif key not in config.QUESTION_KEYS:
             raise StepError.state_error(f"未知 answer key: {key}")
+        else:
+            stale = (state.pending_question or {}).get("key") != key
         if stale:
             # return 而非 raise: raise 会丢掉 EmitContext, RESUME 路由解析不了 run_dir
             store.save(state)
@@ -736,9 +785,8 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                 state.target = args.value
                 state.scope = sc
                 if sc.get("escape_hatch"):
-                    state.pending_question = {"key": "scope", "at": _now()}
-                    _touch(state); store.save(state)
-                    return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
+                    return _save_routed(store, state, run_dir,
+                                        _scope_escape_ask(sc, run_dir))
                 _init_overlay_state(state, cwd_a)
                 # P11(c037): 刷新 head/wt 签名(与 drift 分支对齐)—— 原版不刷,
                 # 下一次 submit 对用户刚裁决过的移动再发漂移询问, 误答
@@ -750,8 +798,7 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                 if (state.pending_question or {}).get("key") != "drift":
                     state.pending_question = None
                 _touch(state); store.save(state)
-                d = decisions.decide_next(state, _ctx(state, run_dir))
-                return d, EmitContext(run_dir=run_dir, state=state)
+                return _routed(store, state, run_dir)
             raise StepError.state_error("scope 答复需要 --value <目标>")
 
         if key == "gates":
@@ -791,7 +838,7 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             else:
                 state.phase, state.cursor["awaiting"] = "brief", "brief"
             _touch(state); store.save(state)
-            return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
+            return _routed(store, state, run_dir)
 
         if key == "drift":
             cwd = state.repo.get("cwd", str(Path.cwd()))
@@ -807,9 +854,8 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
                     # P2 回修: 重导后全空 → 逃逸口重问(scope-answer 分支同款),
                     # 不得在零文件范围上静默空审
                     state.scope = sc
-                    state.pending_question = {"key": "scope", "at": _now()}
-                    _touch(state); store.save(state)
-                    return _scope_escape_ask(sc, run_dir), EmitContext(run_dir=run_dir, state=state)
+                    return _save_routed(store, state, run_dir,
+                                        _scope_escape_ask(sc, run_dir))
                 state.scope = sc
                 # P12 回修(c016): 重导范围 = 新一轮审查 —— 收敛计数器/验证队列/
                 # 修复状态归零(原版沿用旧范围计数: 新 diff 以 round 3 撞轮顶单轮
@@ -849,7 +895,7 @@ def cmd_answer(args) -> tuple[Decision, EmitContext]:
             state.repo.pop("wt_drift_note", None)
             state.pending_question = None
             _touch(state); store.save(state)
-            return decisions.decide_next(state, _ctx(state, run_dir)), EmitContext(run_dir=run_dir, state=state)
+            return _routed(store, state, run_dir)
 
         if key == "run":
             # 回修 c009: 交回路由器逐字执行(单出口)。注: locked() 已支持
