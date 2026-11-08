@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -79,6 +80,18 @@ class TestNormalizeFilePath:
         ("../../file.java", "file.java"),
     ])
     def test_normalize(self, raw, expected):
+        assert text.normalize_file_path(raw) == expected
+
+    @pytest.mark.parametrize("raw,expected", [
+        # git quotePath 的 C 引号形态：剥去首尾双引号（F05 兜底）
+        ('"src/main/java/demo/\\344\\270\\255.java"', "src/main/java/demo/\\344\\270\\255.java"),
+        ('"plain.java"', "plain.java"),
+        # 非引号包裹的普通路径不受影响
+        ("normal/path/file.java", "normal/path/file.java"),
+        # 单个引号字符不构成包裹形态
+        ('"unterminated.java', '"unterminated.java'),
+    ])
+    def test_c_quote_stripped(self, raw, expected):
         assert text.normalize_file_path(raw) == expected
 
 
@@ -256,3 +269,249 @@ class TestValidateRef:
     def test_branch_re_pattern(self):
         assert git_utils.BRANCH_RE.match("master")
         assert not git_utils.BRANCH_RE.match("--help")
+
+
+# ---------------------------------------------------------------------------
+# git_utils 真实临时仓库单测（F05 中文路径 / F33 批量新增行缓存 / F43 超时）
+# ---------------------------------------------------------------------------
+
+CJK_REL = "src/main/java/demo/中文测试.java"
+
+
+def _git(repo, *args):
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        check=True, capture_output=True,
+    )
+
+
+@pytest.fixture
+def cjk_repo(tmp_path):
+    """master 基线 + feature 分支修改中文命名 Java 文件的仓库。"""
+    repo = tmp_path / "repo"
+    java_file = repo / CJK_REL
+    java_file.parent.mkdir(parents=True)
+    java_file.write_text(
+        "public class C {\n    void m() {\n        log.info(\"start\");\n    }\n}\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init", "-b", "master")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "feature")
+    java_file.write_text(
+        "public class C {\n    void m() {\n        log.info(\"start\");\n"
+        "        log.info(\"pwd: {}\", password);\n    }\n}\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add sensitive log")
+    return repo
+
+
+class TestGetChangedFilesCjkPaths:
+    """F05: -z + core.quotepath=false，中文路径原样返回、可被文件系统命中。"""
+
+    def test_cjk_path_returned_raw_and_exists(self, cjk_repo):
+        changed = git_utils.get_changed_files(cjk_repo, "master")
+        # 旧版（无 -z）返回 '"src/main/java/demo/\\344\\270\\255...java"' 带 C 引号，
+        # (repo / path).exists() 为 False → 文件被下游门禁静默剔除
+        assert changed == [CJK_REL]
+        assert '"' not in changed[0]
+        assert (cjk_repo / changed[0]).is_file()
+
+    def test_added_lines_cache_hits_cjk_file(self, cjk_repo):
+        cache = git_utils.AddedLinesCache(cjk_repo, "master")
+        added = cache.get(CJK_REL)
+        assert 'log.info("pwd: {}", password);' in added
+        # 基线已有行不在新增行中
+        assert cache.get(CJK_REL).count("log.info") == 1
+
+
+@pytest.fixture
+def multi_repo(tmp_path):
+    """master 基线 + feature 分支同时修改两个 Java 文件的仓库。"""
+    repo = tmp_path / "repo"
+    for rel in ("src/A.java", "src/B.java"):
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("public class X {}\n", encoding="utf-8")
+    _git(repo, "init", "-b", "master")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "src/A.java").write_text(
+        "public class A {\n    void m() {\n        log.info(\"a\");\n    }\n}\n",
+        encoding="utf-8",
+    )
+    (repo / "src/B.java").write_text(
+        "public class B {\n    void m() {\n        log.info(\"b\");\n    }\n}\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "change both")
+    return repo
+
+
+class TestAddedLinesCacheBatch:
+    """F33: 一次树级 diff 建表，per-file 查表语义与逐文件 git diff 等价。"""
+
+    def test_matches_per_file_git_diff(self, multi_repo):
+        cache = git_utils.AddedLinesCache(multi_repo, "master")
+        for rel in ("src/A.java", "src/B.java"):
+            expected = git_utils.get_added_lines(multi_repo, "master", rel)
+            assert cache.get(rel) == expected
+            assert cache.get(rel) != ""
+
+    def test_only_own_file_lines_returned(self, multi_repo):
+        cache = git_utils.AddedLinesCache(multi_repo, "master")
+        added_a = cache.get("src/A.java")
+        assert 'log.info("a")' in added_a
+        assert 'log.info("b")' not in added_a
+
+    def test_absolute_path_resolved(self, multi_repo):
+        # 扫描器产物写绝对路径：剥去仓库根前缀后命中（对齐旧版 git 接受绝对 pathspec）
+        cache = git_utils.AddedLinesCache(multi_repo, "master")
+        assert 'log.info("a")' in cache.get(str(multi_repo / "src" / "A.java"))
+
+    def test_backslash_path_normalized(self, multi_repo):
+        cache = git_utils.AddedLinesCache(multi_repo, "master")
+        assert 'log.info("a")' in cache.get("src\\A.java")
+
+    def test_unknown_file_returns_empty(self, multi_repo):
+        cache = git_utils.AddedLinesCache(multi_repo, "master")
+        assert cache.get("src/NoSuch.java") == ""
+
+    def test_single_git_invocation_regardless_of_files(self, multi_repo, monkeypatch):
+        """多个文件查询只 fork 一次 git（旧版每文件一次）。"""
+        calls = []
+        real_git = git_utils.git
+
+        def counting_git(repo, *args, **kwargs):
+            calls.append(args)
+            return real_git(repo, *args, **kwargs)
+
+        monkeypatch.setattr(git_utils, "git", counting_git)
+        cache = git_utils.AddedLinesCache(multi_repo, "master")
+        for rel in ("src/A.java", "src/B.java", "src/Unknown.java"):
+            cache.get(rel)
+        assert calls == [("diff", "-U0", "master", "--")]
+
+
+class TestGitWrapper:
+    """F43: git 包装器带挂起防护超时，并关闭 quotepath 转义。"""
+
+    def _capture_run(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(git_utils.subprocess, "run", fake_run)
+        return captured
+
+    def test_timeout_and_quotepath_applied(self, tmp_path, monkeypatch):
+        captured = self._capture_run(monkeypatch)
+        git_utils.git(tmp_path, "status")
+        cmd = captured["cmd"]
+        assert cmd[0] == "git" and cmd[1] == "-C" and cmd[2] == str(tmp_path)
+        assert "-c" in cmd and "core.quotepath=false" in cmd
+        assert captured["kwargs"]["timeout"] == git_utils.GIT_TIMEOUT_SECONDS
+
+    def test_timeout_expired_propagates(self, tmp_path, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+
+        monkeypatch.setattr(git_utils.subprocess, "run", fake_run)
+        with pytest.raises(subprocess.TimeoutExpired):
+            git_utils.git(tmp_path, "status")
+
+    def test_get_changed_files_timeout_propagates(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(git_utils, "git", lambda *a, **k: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(["git"], 30)))
+        with pytest.raises(subprocess.TimeoutExpired):
+            git_utils.get_changed_files(tmp_path, "master")
+
+    def test_added_lines_cache_init_timeout_propagates(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(git_utils, "git", lambda *a, **k: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(["git"], 30)))
+        with pytest.raises(subprocess.TimeoutExpired):
+            git_utils.AddedLinesCache(tmp_path, "master")
+
+    def test_resolve_repo_timeout_exits_2(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(git_utils, "git", lambda *a, **k: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(["git"], 30)))
+        with pytest.raises(SystemExit) as exc_info:
+            git_utils.resolve_repo(str(tmp_path))
+        assert exc_info.value.code == 2
+        assert "执行超时" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# text.match_changed_files（F34 索引化，check_log_print / check_sensitive_word 共用）
+# ---------------------------------------------------------------------------
+
+class TestMatchChangedFilesShared:
+    """F34: 索引化匹配与旧版"变更数 × 行数"全行子串扫描语义等价。"""
+
+    @staticmethod
+    def _reference_impl(changed_files, list_lines):
+        """旧版实现（O(变更数x行数) 全行子串扫描），作等价性参照。"""
+        normalized_lines = [(line, text.normalize_for_matching(line)) for line in list_lines]
+        matched = []
+        for file_path in changed_files:
+            normalized_file = text.normalize_for_matching(file_path)
+            for line, normalized_line in normalized_lines:
+                if normalized_file in normalized_line:
+                    matched.append(line)
+        return matched
+
+    def test_equivalent_to_legacy_full_line_scan(self):
+        changed = [
+            "src/main/java/com/demo/UserService.java",
+            "src/main/java/com/demo/entity/UserDO.java",
+            "src/main/java/demo/中文测试.java",
+            "UserService.java",
+        ]
+        lines = [
+            "/home/ci/repo/src/main/java/com/demo/UserService.java#3: log.info(a)",
+            r"C:\work\repo\src\main\java\com\demo\UserService.java#4 [LOW:phone] x",
+            "/home/ci/repo/src/main/java/com/demo/entity/UserDO.java#2: name",
+            "/home/ci/repo/src/main/java/demo/中文测试.java#2 [C:password] cardNo",
+            "/other/OrderService.java#9: unrelated",
+            "see src/main/java/com/demo/UserService.java changed",  # 不可解析行兜底
+        ]
+        assert (text.match_changed_files(changed, lines)
+                == self._reference_impl(changed, lines))
+
+    def test_same_filename_different_dirs(self):
+        changed = ["a/User.java", "b/User.java"]
+        lines = ["/repo/a/User.java#1: x", "/repo/b/User.java#2: y"]
+        matched = text.match_changed_files(changed, lines)
+        assert matched == self._reference_impl(changed, lines)
+        assert matched == ["/repo/a/User.java#1: x", "/repo/b/User.java#2: y"]
+
+    def test_duplicate_changed_files_duplicate_output(self):
+        # 同一行被两个变更路径命中 → 按旧版语义输出两次
+        changed = ["demo/A.java", "demo/A.java"]
+        lines = ["/repo/src/demo/A.java#1: x"]
+        assert (text.match_changed_files(changed, lines)
+                == ["/repo/src/demo/A.java#1: x"] * 2)
+
+    def test_mid_path_substring_still_matches(self):
+        # 子串（而非仅后缀）命中：仓库根与清单根不一致的场景
+        changed = ["main/java/com/demo/UserService.java"]
+        lines = ["/ci/repo/src/main/java/com/demo/UserService.java#3: x"]
+        assert text.match_changed_files(changed, lines) == lines
+
+    def test_empty_changed_file_matches_everything(self):
+        # 空串子串恒命中（保留旧版行为）
+        lines = ["/repo/A.java#1: x", "garbage without parser"]
+        assert text.match_changed_files([""], lines) == lines
+
+    def test_no_match_returns_empty(self):
+        changed = ["src/main/java/com/demo/UserService.java"]
+        lines = [r"C:\repo\src\main\java\com\demo\OrderService.java#3: x"]
+        assert text.match_changed_files(changed, lines) == []

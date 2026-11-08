@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import functools
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -90,6 +91,16 @@ class SensitiveDicts:
     extended: set[str] = field(default_factory=set)
     blacklist: set[str] = field(default_factory=set)
     whitelist: set[str] = field(default_factory=set)
+
+    @functools.cached_property
+    def core_phrases(self) -> tuple[str, ...]:
+        """core 中含空格的多词短语，首次访问时预计算一次并缓存（F35）。
+
+        交付词典不含空格条目时为空元组，调用方（java_log_scanner 的
+        行级短语检查）据此整段跳过，避免每行日志的无谓拷贝与全词典迭代；
+        用户词典加入 "bank account" 类短语后判定逻辑不变。
+        """
+        return tuple(phrase for phrase in self.core if " " in phrase)
 
     def classify(self, words: set[str], identifier: str = "") -> tuple[str, str] | None:
         """对一组拆分后的单词做敏感级别判定。

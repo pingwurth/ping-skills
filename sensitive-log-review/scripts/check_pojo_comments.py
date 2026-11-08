@@ -38,6 +38,10 @@ POJO_CONFIG_FILE = SCRIPT_DIR / "rules" / "pojo.config"
 CHECKSTYLE_DIR = SCRIPT_DIR / "checkstyle"
 JAR_NAME = "checkstyle-13.7.0-all.jar"
 
+# checkstyle JVM 子进程挂起防护（F44）：超时按执行错误（退出码 2）处理，
+# 不再让病态输入/损坏 classpath 无限阻塞整条流水线
+CHECKSTYLE_TIMEOUT_SECONDS = 120
+
 
 def locate_dependencies() -> tuple[Path, Path]:
     """定位 checkstyle jar 与 pojo-field-doc.xml，缺失时 SystemExit(2)。"""
@@ -121,10 +125,16 @@ def run_checkstyle(jar: Path, config: Path, java_files: list[Path], output_file:
             f"@{argfile_path}",
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True)
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=CHECKSTYLE_TIMEOUT_SECONDS)
         except FileNotFoundError:
             # 结构化错误提示（E002），仅影响步骤6 POJO 注释检查
             print_error(ErrorCode.E002_JAVA_NOT_FOUND, location="java")
+            return 2, ""
+        except subprocess.TimeoutExpired:
+            # 超时按执行错误处理（F44）：返回 2 由 main() 以退出码 2 结束
+            print(f"错误: checkstyle 执行超时({CHECKSTYLE_TIMEOUT_SECONDS}s)，"
+                  f"共 {len(java_files)} 个文件", file=sys.stderr)
             return 2, ""
     finally:
         Path(argfile_path).unlink(missing_ok=True)
@@ -215,6 +225,10 @@ def main() -> int:
         return 2
     except subprocess.CalledProcessError as exc:
         print(f"错误: git diff 执行失败: {exc.stderr.strip()}", file=sys.stderr)
+        return 2
+    except subprocess.TimeoutExpired as exc:
+        # git 挂起防护超时按执行错误处理（F43）
+        print(f"错误: git diff 执行超时({exc.timeout}s)", file=sys.stderr)
         return 2
 
     print(f"找到 {len(pojo_files)} 个变更的 POJO Java 文件")

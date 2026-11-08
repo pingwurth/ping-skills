@@ -124,3 +124,37 @@ class TestParameterErrors:
         result = _run_script(pojo_repo, tmp_path / "out", "--run-id", "../evil")
         assert result.returncode == 2
         assert "错误[E005]" in result.stderr
+
+
+class TestCheckstyleTimeout:
+    """F44: checkstyle JVM 子进程带挂起防护，超时按执行错误（退出码 2）处理。"""
+
+    def test_timeout_kwarg_passed_to_subprocess(self, tmp_path, monkeypatch):
+        captured = {}
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return _FakeCompleted()
+
+        monkeypatch.setattr(check_pojo_comments.subprocess, "run", fake_run)
+        check_pojo_comments.run_checkstyle(
+            tmp_path / "jar", tmp_path / "config.xml", [], tmp_path / "out.txt")
+        assert captured["timeout"] == check_pojo_comments.CHECKSTYLE_TIMEOUT_SECONDS
+
+    def test_timeout_returns_execution_error(self, tmp_path, monkeypatch, capsys):
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd, check_pojo_comments.CHECKSTYLE_TIMEOUT_SECONDS)
+
+        monkeypatch.setattr(check_pojo_comments.subprocess, "run", fake_run)
+        exit_code, output_text = check_pojo_comments.run_checkstyle(
+            tmp_path / "jar", tmp_path / "config.xml",
+            [tmp_path / "A.java"], tmp_path / "out.txt")
+        assert exit_code == 2
+        assert output_text == ""
+        assert "执行超时" in capsys.readouterr().err

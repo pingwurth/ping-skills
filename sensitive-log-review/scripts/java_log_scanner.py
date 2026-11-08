@@ -103,21 +103,37 @@ def build_log_call_pattern(logger_names: list[str]) -> re.Pattern:
 
 
 def is_parentheses_closed(text: str) -> bool:
-    """检查文本中的括号是否完全闭合。"""
+    """检查文本中的括号是否完全闭合。
+
+    F03: 同时跟踪双引号字符串与单引号字符字面量（含 ``'\\''``/``'"'`` 等
+    转义形态）。旧版只跟踪双引号，日志参数里的 ``'('``/``')'`` 字符字面量
+    会打坏括号深度，多行拼接吞噬后续所有日志语句导致漏报。
+    """
     depth = 0
     in_string = False
+    in_char = False
     escape_next = False
     for ch in text:
         if escape_next:
             escape_next = False
             continue
-        if ch == '\\' and in_string:
+        if ch == '\\' and (in_string or in_char):
+            # 转义只在字符串/字符字面量内生效（如 '\'' 、 "\\"" ）
             escape_next = True
             continue
-        if ch == '"':
-            in_string = not in_string
-            continue
         if in_string:
+            if ch == '"':
+                in_string = False
+            continue
+        if in_char:
+            if ch == "'":
+                in_char = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "'":
+            in_char = True
             continue
         if ch == '(':
             depth += 1
@@ -197,13 +213,19 @@ def detect_violations(
     elif low_hit is not None:
         violations.append(f"LOW:{low_hit}")
 
-    # 多词敏感短语（如 "bank account"），在行级（排除字符串常量）检查
-    line_without_strings = STRING_LITERAL_PATTERN.sub('', line).lower()
-    for phrase in dicts.core:
-        if ' ' in phrase and phrase in line_without_strings:
-            if not any(t.startswith("SENSITIVE:") for t in violations):
-                violations.append(f"SENSITIVE:{phrase}")
-            break
+    # 多词敏感短语（如 "bank account"），在行级（排除字符串常量）检查。
+    # F35: 含空格短语子集在词典加载时预计算（SensitiveDicts.core_phrases），
+    # 交付词典无空格条目时为空元组 → 整段跳过，避免每行无谓的
+    # regex-sub/lower 拷贝与全部词典条目的 ' ' in phrase 迭代；
+    # 用户词典加入 "bank account" 类短语后此检查仍生效。
+    core_phrases = dicts.core_phrases
+    if core_phrases:
+        line_without_strings = STRING_LITERAL_PATTERN.sub('', line).lower()
+        for phrase in core_phrases:
+            if phrase in line_without_strings:
+                if not any(t.startswith("SENSITIVE:") for t in violations):
+                    violations.append(f"SENSITIVE:{phrase}")
+                break
 
     if detect_system_out and SYSTEM_OUT_PATTERN.search(line):
         violations.append("SYSOUT")

@@ -49,11 +49,17 @@ def normalize_file_path(file_path: str) -> str:
     如果路径中存在连续两个点，则从开始位置到最后一处连续两个点的内容截断，
     只保留后面的部分。
 
+    兼容 git quotePath 的 C 引号形态：首尾为双引号时剥去引号（F05 兜底；
+    git_utils 已统一 ``-z`` + ``core.quotepath=false``，正常流程不应再出现）。
+
     示例:
         "some/path/../actual/file.java" -> "actual/file.java"
         "normal/path/file.java" -> "normal/path/file.java"
         "../../file.java" -> "file.java"
+        '"src/main/java/\\344\\270\\255.java"' -> 'src/main/java/\\344\\270\\255.java'
     """
+    if len(file_path) >= 2 and file_path.startswith('"') and file_path.endswith('"'):
+        file_path = file_path[1:-1]
     last_double_dot = file_path.rfind("..")
 
     if last_double_dot != -1:
@@ -92,3 +98,60 @@ def parse_list_line(line: str) -> tuple[str, int, list[str], str] | None:
         return None
     tags = [t.strip() for t in (match.group("tags") or "").split(",") if t.strip()]
     return match.group("path"), int(match.group("line")), tags, match.group("content")
+
+
+def match_changed_files(changed_files: list[str], list_lines: list[str]) -> list[str]:
+    """找出路径命中变更文件集合的清单行（F34 索引化，check_log_print /
+    check_sensitive_word 共用）。
+
+    匹配语义与旧版一致：路径分隔符统一规范化（反斜杠→正斜杠）后，
+    变更文件路径（git 返回仓库相对路径）作为**子串**出现在清单行中
+    （扫描器写绝对路径，因此实践中是"清单行路径以 /<相对路径> 结尾"）
+    即命中；命中行按变更文件顺序、清单行顺序输出，同一行可被多个
+    变更文件重复命中。
+
+    实现差异（相对旧版"变更数 × 行数"的全行子串扫描）：
+      - 每行经 parse_list_line 解析一次，按**路径字段**的末段文件名
+        建立索引后再做子串验证，复杂度降为近似线性；
+      - 无法解析的行（罕见）退回旧版全行子串匹配；
+      - 匹配目标收窄到路径字段，不再覆盖行内容中的巧合命中
+        （Java 源码内容不可能含 .java 路径，实际结果等价）。
+    """
+    from collections import defaultdict
+
+    # rows: (原始行, 规范化路径或 None, 匹配目标文本), 保持清单行序
+    rows: list[tuple[str, str | None, str]] = []
+    by_filename: dict[str, list[int]] = defaultdict(list)  # 路径末段 -> 行序号
+    has_unparsable = False
+    for line in list_lines:
+        parsed = parse_list_line(line)
+        if parsed is None:
+            rows.append((line, None, normalize_for_matching(line)))
+            has_unparsable = True
+        else:
+            path = normalize_for_matching(parsed[0])
+            rows.append((line, path, path))
+            by_filename[path.rsplit("/", 1)[-1]].append(len(rows) - 1)
+
+    matched: list[str] = []
+    for file_path in changed_files:
+        normalized_file = normalize_for_matching(file_path)
+        if not normalized_file:
+            # 空串子串恒命中（保留旧版行为，正常流程不会出现）
+            matched.extend(line for line, _p, _m in rows)
+            continue
+        candidates = by_filename.get(normalized_file.rsplit("/", 1)[-1], ())
+        if has_unparsable:
+            # 存在不可解析行: 保持行序需全量走一遍（不可解析行无法索引）
+            candidate_set = set(candidates)
+            for index, (line, path, match_target) in enumerate(rows):
+                if path is None or index in candidate_set:
+                    if normalized_file in match_target:
+                        matched.append(line)
+        else:
+            # 常规路径: 候选桶内已按行序排列，仅对候选做子串验证
+            for index in candidates:
+                line, _path, match_target = rows[index]
+                if normalized_file in match_target:
+                    matched.append(line)
+    return matched

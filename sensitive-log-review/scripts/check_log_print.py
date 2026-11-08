@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common.git_utils import AddedLinesCache, get_changed_files, resolve_repo, validate_ref  # noqa: E402
 from common.failures import FailureRecorder  # noqa: E402
 from common.paths import LOG_OK, LOG_VIOLATION, artifact, get_output_dir  # noqa: E402
-from common.text import normalize_for_matching, parse_list_line  # noqa: E402
+from common.text import match_changed_files, parse_list_line  # noqa: E402
 
 
 def is_low_only(tags: list[str]) -> bool:
@@ -53,22 +53,6 @@ def load_list_lines(file_path: Path, recorder: FailureRecorder | None = None) ->
         if recorder is not None:
             recorder.record(file_path, exc)
         return []
-
-
-def match_changed_files(
-    changed_files: list[str],
-    list_lines: list[str],
-) -> list[str]:
-    """找出路径命中变更文件集合的清单行(子串匹配, 路径分隔符统一规范化)。"""
-    matched: list[str] = []
-    # 清单行规范化只做一次, 避免 变更文件数x清单行数 量级的重复 replace
-    normalized_lines = [(line, normalize_for_matching(line)) for line in list_lines]
-    for file_path in changed_files:
-        normalized_file = normalize_for_matching(file_path)
-        for line, normalized_line in normalized_lines:
-            if normalized_file in normalized_line:
-                matched.append(line)
-    return matched
 
 
 def filter_by_git_diff(
@@ -162,6 +146,10 @@ def main() -> int:
     except subprocess.CalledProcessError as exc:
         print(f"错误: git diff 执行失败: {exc.stderr.strip()}", file=sys.stderr)
         return 2
+    except subprocess.TimeoutExpired as exc:
+        # git 挂起防护超时按执行错误处理（F43）
+        print(f"错误: git diff 执行超时({exc.timeout}s)", file=sys.stderr)
+        return 2
 
     if not changed_files:
         print("未发现变更文件。")
@@ -179,10 +167,15 @@ def main() -> int:
     violation_lines = match_changed_files(changed_files, load_list_lines(artifact(out_dir, LOG_VIOLATION), recorder))
     recorder.flush()
 
-    # 第三步：git diff 新增行过滤
-    cache = AddedLinesCache(repo, branch)
-    filtered_ok = filter_by_git_diff(ok_lines, cache, args.verbose)
-    filtered_violation = filter_by_git_diff(violation_lines, cache, args.verbose)
+    # 第三步：git diff 新增行过滤（AddedLinesCache 一次树级 diff 批量建表，F33）
+    try:
+        cache = AddedLinesCache(repo, branch)
+        filtered_ok = filter_by_git_diff(ok_lines, cache, args.verbose)
+        filtered_violation = filter_by_git_diff(violation_lines, cache, args.verbose)
+    except subprocess.TimeoutExpired as exc:
+        # git 挂起防护超时按执行错误处理（F43）
+        print(f"错误: git diff 执行超时({exc.timeout}s)", file=sys.stderr)
+        return 2
 
     # 第四步：区分常规违规与低置信（LOW）违规
     blocking: list[str] = []

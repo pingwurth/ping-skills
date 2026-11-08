@@ -36,12 +36,22 @@ python scripts/main.py --doctor -r .
 |-------|------|------|
 | 0 | 通过 | 审查完成且未触发门禁 |
 | 1 | 门禁拦截 | 审查完成，但命中 `--fail-on` 指定的类别（默认 `violation,sensitive`） |
-| 2 | 执行错误 | 环境/参数/依赖错误（非 git 仓库、规则文件损坏、jar 校验失败等） |
+| 2 | 执行错误 | 任一子扫描器执行失败（含被信号杀死、超时、非契约返回码），或环境/参数/依赖错误（非 git 仓库、规则文件损坏、jar 校验失败等） |
 
-门禁类别（与 main.py 的 GATE_KEYS 一致，共 7 项）：`violation`（日志违规）、`sensitive`（敏感字段）、
-`unqualified`（命名不规范）、`tostring`（@ToString 缺失）、`analyze`（深度分析命中）、
-`miss_comments`（POJO 注释问题）、`low`（低置信提示总数）。可用 `--fail-on violation,sensitive` 自定义，
-`--fail-on ""` 关闭门禁（始终返回 0）。
+**执行失败的统一判定**：子扫描器返回码不在其契约正常集合内即失败——判定类脚本
+（check_log_print / check_sensitive_word / check_pojo_comments）的正常集合为 {0=干净, 1=有发现}，
+其余脚本为 {0}；负数返回码（被信号杀死，如 OOM -9）、超时与意外返回码一律按执行错误处理。
+`tostring`/`miss_comments` 等 warn-only 类别"检查没跑成"时同样以退出码 2 拦截，
+不会因计数为 0 而"干净"通过。
+
+**挂起防护**：所有 git 调用统一带 30s 超时，checkstyle JVM 子进程带 120s 超时；
+超时按执行错误（退出码 2）处理，流水线不会无限挂起。
+
+门禁类别（与 main.py 的 GATE_KEYS 一致，由步骤表 STEP_SPECS 派生，共 8 项）：
+`violation`（日志违规）、`sensitive`（敏感字段）、`unqualified`（命名不规范）、
+`tostring`（@ToString 缺失）、`tostring_sensitive`（@ToString 含敏感字段）、
+`analyze`（深度分析命中）、`miss_comments`（POJO 注释问题）、`low`（低置信提示总数）。
+可用 `--fail-on violation,sensitive` 自定义，`--fail-on ""` 关闭门禁（始终返回 0）。
 
 `low` 的来源：步骤2（变更文件日志检查）与步骤5（敏感词检查）中带 `[LOW]` 标签的记录总数，
 默认不纳入 `--fail-on`，可显式加入（如 `--fail-on violation,sensitive,low`）。
@@ -161,7 +171,9 @@ python scripts/main.py --doctor -r .
 
 - **Java Runtime** - 用于运行Checkstyle
 - **Python 3.10+** - 运行所有脚本（使用 `X | None` 类型标注）
-- **Git** - 获取代码变更（所有 git 调用经 `git -C <repo>` 贯通，分支名经注入校验）
+- **Git** - 获取代码变更（所有 git 调用经 `git -C <repo>` 贯通，分支名经注入校验；
+  统一 30s 超时挂起防护；文件清单用 `-z` + `core.quotepath=false` 解析，
+  中文等非 ASCII 路径原样返回不被 C 引号转义）
 - **pytest** - 运行单测（仅开发需要）
 
 ### 内部依赖文件
@@ -171,7 +183,7 @@ scripts/
 ├── common/                  # 公共模块（所有脚本共享，禁止重复实现）
 │   ├── paths.py             # 输出目录策略 + 产物文件名常量
 │   ├── text.py              # 字段名拆分 / 清单行解析
-│   ├── git_utils.py         # git -C 贯通 / 分支名校验 / 变更行缓存
+│   ├── git_utils.py         # git -C 贯通 / 分支名校验 / 超时防护 / 变更行批量缓存
 │   ├── pojo_config.py       # POJO 识别统一配置（pojo.config 唯一解析器）
 │   ├── dictionary.py        # 分层词典加载与判定
 │   ├── errors.py            # 统一错误码（E001-E007）与修复建议模板

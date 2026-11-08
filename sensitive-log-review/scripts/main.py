@@ -15,10 +15,14 @@
 退出码（P0-1 门禁契约）:
   0: 通过（--fail-on 指定的计数项全部为 0）
   1: 触发门禁（--fail-on 任一计数项 > 0，默认 violation,sensitive）
-  2: 执行错误（关键步骤 1/2/4/5/7/8 失败；步骤 3/6 仅警告）
+  2: 执行错误（任一子扫描器执行失败，F07/F09 统一判定：返回码不在该子脚本
+     契约的正常集合内即失败——含返回码 2、被信号杀死的负数返回码与其他意外
+     返回码；rc=1 仅表示"有发现"不算失败。warn-only 类别（tostring/
+     miss_comments）的**执行错误**同样拦截，不再"干净"通过）
 
-可选门禁计数项: violation, sensitive, unqualified, tostring, tostring_sensitive,
-               analyze, miss_comments, low
+可选门禁计数项: 由 STEP_SPECS 步骤表派生（GATE_KEYS），当前为
+               violation, low, tostring, tostring_sensitive,
+               sensitive, unqualified, miss_comments, analyze
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -49,7 +54,13 @@ from common.dictionary import (  # noqa: E402
 )
 from common.errors import ErrorCode, print_error  # noqa: E402
 from common.failures import clear_failure_shards, merge_failure_shards  # noqa: E402
-from common.git_utils import get_changed_files, resolve_repo, validate_ref  # noqa: E402
+from common.git_utils import (  # noqa: E402
+    GIT_TIMEOUT_SECONDS,
+    get_changed_files,
+    git,
+    resolve_repo,
+    validate_ref,
+)
 from common.paths import (  # noqa: E402
     ANALYZE_RESULT,
     FAILED_FILES_LIST,
@@ -76,8 +87,121 @@ CHECKSTYLE_JAR = SCRIPT_DIR / "checkstyle" / "checkstyle-13.7.0-all.jar"
 
 SUMMARY_RE = re.compile(r"^SUMMARY:\s*(?P<body>.+)$", re.MULTILINE)
 
-# 门禁可选计数项
-GATE_KEYS = ("violation", "sensitive", "unqualified", "tostring", "tostring_sensitive", "analyze", "miss_comments", "low")
+
+# ---------------------------------------------------------------------------
+# 步骤表（单一数据源，F31/F45）
+#
+# 显示名、命令构造、返回码契约、门禁计数键全部收敛到这一张表：
+#   - stdout 步骤标签 = spec.name（[OK] 步骤N: xxx 行，保持旧版文案不变）
+#   - 门禁计数键 = 各 spec 的 gate_keys / artifact_counts（GATE_KEYS 由此派生）
+#   - 失败判定 = 返回码不在 spec.ok_rcs 内（F07，子脚本契约 0=干净/1=有发现/2=错误）
+# 修改/新增步骤只改这张表，杜绝"改显示名漏改 counts 行"式失配
+# （失配的后果是 counts.get 永远读 0、门禁静默放行）。
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ArtifactCount:
+    """由产物文件非空行数得出的门禁计数。"""
+
+    key: str                       # 门禁计数键
+    artifact_name: str             # 产物文件名（common.paths 常量）
+    exclude_prefix: str | None = None  # 排除行前缀（如 [LLM]）
+
+
+@dataclass(frozen=True)
+class StepSpec:
+    """扫描步骤描述。"""
+
+    name: str                       # 步骤标签（stdout 显示 + 结果索引键）
+    script: str                     # scripts/ 下脚本文件名
+    fail_label: str                 # 执行错误文案（附 rc 与 stderr 摘要）
+    root_arg: str = "none"          # 根目录传参形态: positional / flag(--repo) / none
+    files_manifest: str | None = None  # --changed-only 追加 --files 的清单: java / pojo
+    with_branch: bool = False       # 追加 -b <branch>
+    with_verbose: bool = False      # verbose 时追加 -v
+    ok_rcs: frozenset[int] = frozenset({0})  # 子脚本契约正常返回码（1=有发现）
+    summary_from_stdout: bool = False   # 解析 stdout 末尾 SUMMARY 行
+    gate_keys: tuple[str, ...] = ()      # 该步骤供 --fail-on 的 SUMMARY 计数键
+    artifact_counts: tuple[ArtifactCount, ...] = field(default=())
+
+
+# 步骤显示名（stdout [OK] 标签与结果索引键，与旧版逐字一致）
+STEP1_NAME = "步骤1: 扫描日志输出"
+STEP2_NAME = "步骤2: 检查变更文件日志"
+STEP3_NAME = "步骤3: 检查@ToString注解"
+STEP4_NAME = "步骤4: 提取Java字段"
+STEP5_NAME = "步骤5: 检查敏感词"
+STEP6_NAME = "步骤6: 检查POJO注释"
+STEP7_NAME = "步骤7: 深度敏感性分析"
+
+# 子脚本返回码契约（SKILL.md「退出码契约」: 0=干净, 1=有发现, 2=执行错误）:
+#   判定类脚本（check_log_print / check_sensitive_word / check_pojo_comments）
+#   发现违规返回 1，属正常完成；纯扫描/产出类脚本只返回 0 或 2。
+_RC_CLEAN_OR_FOUND = frozenset({0, 1})
+_RC_CLEAN = frozenset({0})
+
+STEP_SPECS: tuple[StepSpec, ...] = (
+    StepSpec(
+        name=STEP1_NAME, script="java_log_scanner.py",
+        fail_label="日志扫描失败", root_arg="positional", files_manifest="java",
+        ok_rcs=_RC_CLEAN,
+    ),
+    StepSpec(
+        name=STEP2_NAME, script="check_log_print.py",
+        fail_label="变更日志检查执行错误", root_arg="flag", with_branch=True,
+        with_verbose=True, ok_rcs=_RC_CLEAN_OR_FOUND, summary_from_stdout=True,
+        gate_keys=("violation", "low"),
+    ),
+    StepSpec(
+        name=STEP3_NAME, script="check_tostring_annotation.py",
+        fail_label="@ToString检查失败", root_arg="positional", files_manifest="pojo",
+        ok_rcs=_RC_CLEAN,
+        artifact_counts=(
+            ArtifactCount("tostring", TOSTRING_MISSING),
+            ArtifactCount("tostring_sensitive", TOSTRING_SENSITIVE_VIOLATIONS),
+        ),
+    ),
+    StepSpec(
+        name=STEP4_NAME, script="extract_java_fields.py",
+        fail_label="字段提取失败", root_arg="positional", files_manifest="pojo",
+        ok_rcs=_RC_CLEAN,
+    ),
+    StepSpec(
+        name=STEP5_NAME, script="check_sensitive_word.py",
+        fail_label="敏感词检查执行错误", root_arg="flag", with_branch=True,
+        with_verbose=True, ok_rcs=_RC_CLEAN_OR_FOUND, summary_from_stdout=True,
+        gate_keys=("sensitive", "low", "unqualified"),
+    ),
+    StepSpec(
+        name=STEP6_NAME, script="check_pojo_comments.py",
+        fail_label="POJO注释检查执行错误", root_arg="flag", with_branch=True,
+        ok_rcs=_RC_CLEAN_OR_FOUND, summary_from_stdout=True,
+        gate_keys=("miss_comments",),
+    ),
+    StepSpec(
+        name=STEP7_NAME, script="analyze_sensitive_fields.py",
+        fail_label="深度分析失败", with_verbose=True, ok_rcs=_RC_CLEAN,
+        artifact_counts=(ArtifactCount("analyze", ANALYZE_RESULT, exclude_prefix="[LLM]"),),
+    ),
+)
+
+_SPEC_BY_NAME: dict[str, StepSpec] = {spec.name: spec for spec in STEP_SPECS}
+
+
+def _derive_gate_keys() -> tuple[str, ...]:
+    """从步骤表派生门禁可选计数项（保持首次出现顺序）。"""
+    seen: dict[str, None] = {}
+    for spec in STEP_SPECS:
+        for key in spec.gate_keys:
+            seen.setdefault(key)
+        for counter in spec.artifact_counts:
+            seen.setdefault(counter.key)
+    return tuple(seen)
+
+
+# 门禁可选计数项（单一数据源派生，不再手写第二份清单）
+GATE_KEYS = _derive_gate_keys()
 
 
 class Context:
@@ -181,92 +305,57 @@ def base_cmd(script_name: str, ctx: Context) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# 步骤实现
+# 步骤实现（表驱动 runner，F45：七个复制粘贴步骤函数收敛为单一参数化实现）
 # ---------------------------------------------------------------------------
 
-def step1_scan_logs(ctx: Context) -> StepResult:
-    result = StepResult("步骤1: 扫描日志输出")
-    cmd = base_cmd("java_log_scanner.py", ctx) + [str(ctx.root)]
-    if ctx.changed_only:
-        cmd += ["--files", str(ctx.changed_java_manifest)]
-    rc, _stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    if rc != 0:
-        return result.fail(f"日志扫描失败(rc={rc}): {stderr.strip()[:200]}")
-    return result
-
-
-def step2_check_log_print(ctx: Context) -> StepResult:
-    result = StepResult("步骤2: 检查变更文件日志")
-    cmd = base_cmd("check_log_print.py", ctx) + ["--repo", str(ctx.root), "-b", ctx.branch]
-    if ctx.verbose:
+def build_step_cmd(spec: StepSpec, ctx: Context) -> list[str]:
+    """按步骤表构造子脚本命令行。"""
+    cmd = base_cmd(spec.script, ctx)
+    if spec.root_arg == "positional":
+        cmd.append(str(ctx.root))
+    elif spec.root_arg == "flag":
+        cmd += ["--repo", str(ctx.root)]
+    if spec.with_branch:
+        cmd += ["-b", ctx.branch]
+    if spec.files_manifest is not None and ctx.changed_only:
+        manifest = (ctx.changed_java_manifest if spec.files_manifest == "java"
+                    else ctx.changed_pojo_manifest)
+        cmd += ["--files", str(manifest)]
+    if spec.with_verbose and ctx.verbose:
         cmd.append("-v")
-    rc, stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    result.summary = parse_summary(stdout)
-    if rc == 2:
-        return result.fail(f"变更日志检查执行错误: {stderr.strip()[:200]}")
+    return cmd
+
+
+def run_scanner_step(spec: StepSpec, ctx: Context) -> StepResult:
+    """统一步骤 runner：命令构造 / 执行 / 失败判定 / 计数汇总。
+
+    F07 失败判定：返回码不在 spec.ok_rcs（子脚本契约正常集合）内即失败——
+    被信号杀死（负数返回码，如 OOM -9）、意外返回码与执行错误（2）统一
+    视为失败；rc=1 仅表示"有发现"，不算失败。
+
+    F09：失败结果不再因步骤类别（旧版 warn-only 的步骤 3/6）被排除出
+    critical_errors——扫描器没跑成时对应计数缺失，必须以执行错误
+    （退出码 2）暴露，而非让 --fail-on 在"检查从未执行"下"干净"通过。
+    """
+    result = StepResult(spec.name)
+    cmd = build_step_cmd(spec, ctx)
+    rc, stdout, stderr = run_script(cmd, ctx.verbose, spec.name)
+    if spec.summary_from_stdout:
+        result.summary = parse_summary(stdout)
+    if rc not in spec.ok_rcs:
+        return result.fail(f"{spec.fail_label}(rc={rc}): {stderr.strip()[:200]}")
+    # 产物行数型门禁计数（成功后并入 summary，供 aggregate_counts 统一汇总）
+    for counter in spec.artifact_counts:
+        result.summary[counter.key] = count_lines(
+            artifact(ctx.out_dir, counter.artifact_name),
+            exclude_prefix=counter.exclude_prefix,
+        )
     return result
 
 
-def step3_check_tostring(ctx: Context) -> StepResult:
-    result = StepResult("步骤3: 检查@ToString注解")
-    cmd = base_cmd("check_tostring_annotation.py", ctx) + [str(ctx.root)]
-    if ctx.changed_only:
-        cmd += ["--files", str(ctx.changed_pojo_manifest)]
-    rc, _stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    if rc != 0:
-        return result.fail(f"@ToString检查失败(rc={rc}): {stderr.strip()[:200]}")
-    result.summary = {
-        "tostring": count_lines(artifact(ctx.out_dir, TOSTRING_MISSING)),
-        "tostring_sensitive": count_lines(artifact(ctx.out_dir, TOSTRING_SENSITIVE_VIOLATIONS)),
-    }
-    return result
-
-
-def step4_extract_fields(ctx: Context) -> StepResult:
-    result = StepResult("步骤4: 提取Java字段")
-    cmd = base_cmd("extract_java_fields.py", ctx) + [str(ctx.root)]
-    if ctx.changed_only:
-        cmd += ["--files", str(ctx.changed_pojo_manifest)]
-    rc, _stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    if rc != 0:
-        return result.fail(f"字段提取失败(rc={rc}): {stderr.strip()[:200]}")
-    return result
-
-
-def step5_check_sensitive_word(ctx: Context) -> StepResult:
-    result = StepResult("步骤5: 检查敏感词")
-    cmd = base_cmd("check_sensitive_word.py", ctx) + ["--repo", str(ctx.root), "-b", ctx.branch]
-    if ctx.verbose:
-        cmd.append("-v")
-    rc, stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    result.summary = parse_summary(stdout)
-    if rc == 2:
-        return result.fail(f"敏感词检查执行错误: {stderr.strip()[:200]}")
-    return result
-
-
-def step6_check_pojo_comments(ctx: Context) -> StepResult:
-    result = StepResult("步骤6: 检查POJO注释")
-    cmd = base_cmd("check_pojo_comments.py", ctx) + ["--repo", str(ctx.root), "-b", ctx.branch]
-    if ctx.verbose:
-        cmd.append("-v")
-    rc, stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    result.summary = parse_summary(stdout)
-    if rc == 2:
-        return result.fail(f"POJO注释检查执行错误: {stderr.strip()[:200]}")
-    return result
-
-
-def step7_analyze_fields(ctx: Context) -> StepResult:
-    result = StepResult("步骤7: 深度敏感性分析")
-    cmd = base_cmd("analyze_sensitive_fields.py", ctx)
-    if ctx.verbose:
-        cmd.append("-v")
-    rc, _stdout, stderr = run_script(cmd, ctx.verbose, result.name)
-    if rc != 0:
-        return result.fail(f"深度分析失败(rc={rc}): {stderr.strip()[:200]}")
-    result.summary = {"analyze": count_lines(artifact(ctx.out_dir, ANALYZE_RESULT), exclude_prefix="[LLM]")}
-    return result
+def run_step(name: str, ctx: Context) -> StepResult:
+    """按步骤名执行（name 必须在步骤表中）。"""
+    return run_scanner_step(_SPEC_BY_NAME[name], ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -274,27 +363,47 @@ def step7_analyze_fields(ctx: Context) -> StepResult:
 # ---------------------------------------------------------------------------
 
 def group_a(ctx: Context) -> list[StepResult]:
-    step1 = step1_scan_logs(ctx)
+    step1 = run_step(STEP1_NAME, ctx)
     if not step1.ok:
         return [step1]
-    return [step1, step2_check_log_print(ctx)]
+    return [step1, run_step(STEP2_NAME, ctx)]
 
 
 def group_b(ctx: Context) -> list[StepResult]:
-    return [step3_check_tostring(ctx)]
+    return [run_step(STEP3_NAME, ctx)]
 
 
 def group_c(ctx: Context) -> list[StepResult]:
-    step4 = step4_extract_fields(ctx)
+    step4 = run_step(STEP4_NAME, ctx)
     if not step4.ok:
         return [step4]
-    return [step4, step5_check_sensitive_word(ctx)]
+    return [step4, run_step(STEP5_NAME, ctx)]
 
 
 def group_d(ctx: Context) -> list[StepResult]:
-    step6 = step6_check_pojo_comments(ctx)
-    step7 = step7_analyze_fields(ctx)
+    step6 = run_step(STEP6_NAME, ctx)
+    step7 = run_step(STEP7_NAME, ctx)
     return [step6, step7]
+
+
+def aggregate_counts(all_results: list[StepResult]) -> dict[str, int]:
+    """从步骤结果汇总门禁计数（F31：以步骤表为单一数据源）。
+
+    每个门禁键 = 该键全部来源步骤的 summary 求和（如 low = 步骤2 + 步骤5
+    的 low 之和）；来源键 = spec.gate_keys（子脚本 SUMMARY）+ 各
+    artifact_counts.key（产物行数，已由 runner 并入 summary）。步骤缺位
+    （前置步骤失败被跳过，如步骤2 依赖步骤1）或 summary 缺键时按 0 计。
+    """
+    by_name = {step.name: step for step in all_results}
+    counts: dict[str, int] = {key: 0 for key in GATE_KEYS}
+    for spec in STEP_SPECS:
+        result = by_name.get(spec.name)
+        if result is None:
+            continue
+        contributed = spec.gate_keys + tuple(c.key for c in spec.artifact_counts)
+        for key in contributed:
+            counts[key] += result.summary.get(key, 0)
+    return counts
 
 
 def prepare_changed_manifests(ctx: Context) -> bool:
@@ -600,12 +709,17 @@ def run_doctor(args: argparse.Namespace) -> int:
     if not root.is_dir():
         record("FAIL", "-r 目录为 git 仓库", f"目录不存在: {root}")
     elif git_ok:
-        r = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-dir"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if r.returncode == 0:
-            record("OK", "-r 目录为 git 仓库", str(root))
+        # F43: 收敛为调用统一 git 包装器（带挂起防护），不再内联手写子进程
+        try:
+            r = git(root, "rev-parse", "--git-dir")
+        except subprocess.TimeoutExpired:
+            record("FAIL", "-r 目录为 git 仓库",
+                   f"git rev-parse 超时({GIT_TIMEOUT_SECONDS}s)")
         else:
-            record("FAIL", "-r 目录为 git 仓库", f"{root}（git rev-parse 失败，参考 E001）")
+            if r.returncode == 0:
+                record("OK", "-r 目录为 git 仓库", str(root))
+            else:
+                record("FAIL", "-r 目录为 git 仓库", f"{root}（git rev-parse 失败，参考 E001）")
     else:
         record("FAIL", "-r 目录为 git 仓库", "git 不可用，无法验证")
 
@@ -788,23 +902,12 @@ def main() -> int:
         mark = "OK" if step.ok else "!!"
         print(f"[{mark}] {step.name}" + (f" - {step.error}" if step.error else ""))
 
-    # 汇总计数
-    by_name = {step.name: step for step in all_results}
-    counts: dict[str, int] = {
-        "violation": by_name.get("步骤2: 检查变更文件日志", StepResult("")).summary.get("violation", 0),
-        "sensitive": by_name.get("步骤5: 检查敏感词", StepResult("")).summary.get("sensitive", 0),
-        "unqualified": by_name.get("步骤5: 检查敏感词", StepResult("")).summary.get("unqualified", 0),
-        "tostring": by_name.get("步骤3: 检查@ToString注解", StepResult("")).summary.get("tostring", 0),
-        "tostring_sensitive": by_name.get("步骤3: 检查@ToString注解", StepResult("")).summary.get("tostring_sensitive", 0),
-        "analyze": by_name.get("步骤7: 深度敏感性分析", StepResult("")).summary.get("analyze", 0),
-        "miss_comments": by_name.get("步骤6: 检查POJO注释", StepResult("")).summary.get("miss_comments", 0),
-        "low": (by_name.get("步骤2: 检查变更文件日志", StepResult("")).summary.get("low", 0)
-                + by_name.get("步骤5: 检查敏感词", StepResult("")).summary.get("low", 0)),
-    }
+    # 汇总计数（单一数据源：步骤表，F31）
+    counts = aggregate_counts(all_results)
 
-    # 关键步骤失败 -> 退出码 2（步骤3/6 仅警告）
-    warn_only = {"步骤3: 检查@ToString注解", "步骤6: 检查POJO注释"}
-    critical_errors = [s for s in all_results if not s.ok and s.name not in warn_only]
+    # 任一步骤执行失败 -> 退出码 2（F09: warn-only 类别的执行错误同样拦截，
+    # "有发现"（rc=1）在 runner 内已按契约视为正常完成，不会进入此列表）
+    critical_errors = [s for s in all_results if not s.ok]
 
     # 门禁判定（P0-1）
     fail_on = {key.strip() for key in args.fail_on.split(",") if key.strip()}
