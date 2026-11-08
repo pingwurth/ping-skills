@@ -45,7 +45,7 @@ Scripts are Python 3 stdlib-only (pytest only for tests); each `tests/conftest.p
 
 ## Testing Guidelines
 
-Use pytest, matching existing frameworks and conventions. Add focused tests beside related ones, name cases `test_<behavior>`, and cover failure paths, exit codes, and protocol `next_step` blocks. `sensors-analyze`'s suite is its `tests/test_p0..p3_regressions.py` + `tests/test_artifact_dir.py` (37 tests).
+Use pytest, matching existing frameworks and conventions. Add focused tests beside related ones, name cases `test_<behavior>`, and cover failure paths, exit codes, and protocol `next_step` blocks. `sensors-analyze`'s suite is its `tests/test_p0..p3_regressions.py` + `tests/test_artifact_dir.py` (37 tests). `sensitive-log-review`, `pwiki`, and `code-review-p` also carry suites; `claude-review` and the `code-review-p` subagent prompts have no tests/ directory.
 
 ## Architecture & Agent Notes
 

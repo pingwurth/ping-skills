@@ -35,7 +35,7 @@ python3 -m pytest tests/test_cli.py           # one file
 python3 -m pytest tests/test_cli.py::test_x   # one test
 ```
 
-Scripts are Python stdlib-only (pytest is needed only for tests). Each `tests/conftest.py` puts that skill's `scripts/` on `sys.path`. `sensors-analyze`'s suite (37 regression tests: `tests/test_p0..p3_regressions.py`, `tests/test_artifact_dir.py`) covers its 2026-10-12 fix round; `code-review-p`'s suite includes the protocol-engine tests (scope ladder, ledger dedup parity vs the JS workflow script, routing matrix, e2e protocol driver) and gates its Workflow script through node (skipped when node is absent).
+Scripts are Python stdlib-only (pytest is needed only for tests). Each `tests/conftest.py` puts that skill's `scripts/` on `sys.path`. `sensors-analyze`'s suite (37 regression tests: `tests/test_p0..p3_regressions.py`, `tests/test_artifact_dir.py`) covers its 2026-10-12 fix round; `code-review-p`'s suite includes the protocol-engine tests (scope ladder, ledger dedup parity vs the JS workflow script, routing matrix, e2e protocol driver) and gates its Workflow script through node (skipped when node is absent). `claude-review` has no tests/ directory.
 
 Per-skill CLI entry points accept `--help` for full flags (e.g. `python scripts/main.py --help` in sensitive-log-review, `python scripts/select_worktree.py --help` in the unit-test skills).
 
