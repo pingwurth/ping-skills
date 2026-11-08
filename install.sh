@@ -14,7 +14,7 @@ TOOLS=("claude" "qwen" "qoder" "opencode")
 # ── 可安装 skill 显式 allowlist ──────────────────────────────────
 # c007/c058: 旧实现"任何含 SKILL.md 的目录都算 skill"会把仓内非发布脚手架
 # 静默装进目标项目; 新增 skill 必须显式登记在此(与 CLAUDE.md/AGENTS.md 的
-# eight-skills 技能表保持同步)。
+# nine-skills 技能表保持同步)。
 INSTALLABLE_SKILLS=(
     "java-unit-test-generator"
     "batch-unit-test-generator"
@@ -24,6 +24,7 @@ INSTALLABLE_SKILLS=(
     "code-review-p"
     "claude-review"
     "pwiki"
+    "design-doc-writer"
 )
 
 # ── 按 allowlist 发现本仓库的可安装 skill ────────────────────────
