@@ -36,7 +36,8 @@ discover_skills() {
         }
         skills+=("$name")
     done
-    echo "${skills[@]}"
+    # set -u 下空数组裸展开会误报 unbound(bash<4.4)
+    echo ${skills[@]+"${skills[@]}"}
 }
 
 # ── 解析工具入参，返回选中的工具列表 ──────────────────────────────
