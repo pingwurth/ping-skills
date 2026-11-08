@@ -1,0 +1,428 @@
+{
+  "review": {
+    "date": "2026-11-09",
+    "mode": "code-review max --max-findings all (全量仓库审查)",
+    "scope": "整仓：8 个 skill + install.sh + 根级文件（分支 dev @ acd3c27）",
+    "pipeline": "10 个查找角度 → 56 个原始候选 → 去重 → 23 个验证代理 + 主审直接对照源码确认 → 4 个被驳回 → gap sweep 补扫 +4（均经主审确认）",
+    "result": "52 个发现（50 confirmed / 2 plausible），其中 12 个有实证复现",
+    "effort": "229 次工具调用，约 35 分钟"
+  },
+  "findings": [
+    {
+      "id": "F01",
+      "file": "batch-unit-test-generator/scripts/make_plan.py",
+      "line": 318,
+      "tier": "bug-confirmed",
+      "summary": "批处理技能的 make_plan 硬编码了 {S}Test 命名（decisions.test_class_relpath/test_simple_name），并且从未调用五变体探测 —— e7dff8b 的 'c061 双副本一致性' 修复仅应用到了 java 副本；批处理中的 jaut/testcollect.py 甚至没有定义 existing_test_class_simple/test_file_for。",
+      "failure_scenario": "用户现有的测试套件是 FooTests.java（或 FooIT/FooTestCase/TestFoo）：batch_init 正确地对它进行了基准测试，但被委托的 batch-class-writer 从 make_plan 开始，它设置了 state.test_class_file=FooTest.java（不存在）→ 提示词告知写入者要创建它 → 创建了一个重复的并行测试类，-Dtest=FooTest 执行了错误的类，真实套件的覆盖率从未被测量（方法被错误地判定为 pending → 浪费轮次 → 预算自动跳过）。此外，没有任何共享 fixture 锁定这两个 jaut 副本 —— 一致性仅通过头文件注释来强制执行。"
+    },
+    {
+      "id": "F02",
+      "file": "install.sh",
+      "line": 240,
+      "tier": "bug-confirmed",
+      "summary": "opencode agents/tools-strip pass 在整个共享 .opencode/agents/ 目录上运行 find，因此安装任何带有 agents/ 的 skill 都会静默地从安装程序不拥有的、预先存在的用户 agent 文件中剥离 tools: frontmatter 限制。",
+      "failure_scenario": "用户拥有 proj/.opencode/agents/my-agent.md 并带有 `tools: Read, Grep`（他们自己的 agent）；./install.sh opencode code-review-p proj → 第 240 行的 find 匹配了每个 *.md，包括 my-agent.md → remove_first_tools_line 删除了它的 tools 行 → 用户的 agent 静默失去了其工具限制，现在可以调用所有工具。"
+    },
+    {
+      "id": "F03",
+      "file": "sensitive-log-review/scripts/java_log_scanner.py",
+      "line": 117,
+      "tier": "bug-reproduced",
+      "summary": "is_parentheses_closed 仅跟踪双引号字符串（第 117 行 `if ch == '\"':` 是唯一的切换；单引号 Java 字符字面量从未被处理），因此日志调用中的 '(' 或 ')' 字符字面量会损坏括号深度，多行连接（第 276-282 行）会吞噬所有后续日志语句，这些语句从未被扫描。",
+      "failure_scenario": "实证复现：包含 `log.info(\"start\"); log.info('(', x); log.info(\"after one\"); log.info(\"after two\");` 的文件报告 '共 2 条日志调用' —— 'after' 调用在 log-print-ok.list 和 log-print-violation.list 中均未出现；带有被吞噬的 `log.info(\"cardNo=622260011234\");` 的运行产生了 0 个违规且没有条目，即在审计关卡下，银行日志审计关卡对真实敏感泄漏的汇报不足。"
+    },
+    {
+      "id": "F04",
+      "file": "code-review-p/workflows/deep-review.js",
+      "line": 235,
+      "tier": "bug-confirmed",
+      "summary": "在 59925ab 移除了 approval='auto' 路径后，gate-approval 状态（state.overlay.gates 中的 approval='denied'）从未被传递到任何载体提示中，并且所有三个执行器仍然基于来源而不是批准来确定键：被拒绝的受信任覆盖 gate 仍然被执行，这与 SKILL.md 中的 '未经批准的 gate 永远不运行' 相矛盾。",
+      "failure_scenario": "基线 overlay 声明了 gate '(read-only) ./scripts/check.sh'；用户在 A4 批量询问中选择 skip_all → approval='denied' 被存储，但 decisions.py:334-338 处构建的载体参数不携带 gate 数据，deep-review.js:235 和 review-refuter.md:30/review-finder.md:32 仍然指示子 agent 运行任何非来自 diff/启发式的只读 gate → 被拒绝的命令以审查者权限执行。"
+    },
+    {
+      "id": "F05",
+      "file": "sensitive-log-review/scripts/common/git_utils.py",
+      "line": 68,
+      "tier": "bug-reproduced",
+      "summary": "git 输出在没有 -z / core.quotepath=false 的情况下被解析（第 68/78 行），因此非 ASCII 路径以 C-quote 形式到达；唯一的归一化器（normalize_file_path/normalize_for_matching）从不去除引号 —— CJK 命名的 Java 文件被静默地从两个下游 gate 中排除。",
+      "failure_scenario": "实证复现：在一个包含 src/main/java/demo/中文测试.java（带有 log.info(\"cardNo=...\")) 的分支上，get_changed_files 返回 '\"src/...\\344\\270\\255...java\"'，(repo/path).exists() 为 False，AddedLinesCache 返回 '' → match_changed_files (check_log_print.py:66) 和 filter_by_git_diff (:89, check_sensitive_word.py:175) 都丢弃了该文件的所有发现 —— 正是该技能所针对的银行仓库中的敏感泄漏遗漏。"
+    },
+    {
+      "id": "F06",
+      "file": "pwiki/scripts/pwiki_lib/snapshot.py",
+      "line": 335,
+      "tier": "bug-confirmed",
+      "summary": "cmd_update 的样式漂移重标记分支调用了 ctx.db.set_page_style(pid, ...)，但 pid 从未在 cmd_update 的作用域中绑定（仅在嵌套的 check_item 第 249 行和一个第 307 行的推导式中，这在 Python 3 中不会泄漏）→ NameError；预期参数是 part[\"id\"]。",
+      "failure_scenario": "在 style=deep 下发布 wiki，编辑 wiki_plan.yaml 为 concise，运行 `pwiki update`：style_drift=True 并且第一个通过新样式 gate 的已发布页面（通过 gate 的分支，测试从未覆盖此分支）引发 NameError: name 'pid' is not defined → 更新在创建运行之前因裸 traceback 崩溃；样式漂移永远无法收敛。"
+    },
+    {
+      "id": "F07",
+      "file": "sensitive-log-review/scripts/main.py",
+      "line": 205,
+      "tier": "bug-confirmed",
+      "summary": "步骤 2/5/6 仅将 rc==2 视为失败（第 205/243/255 行），而步骤 1/3/4/7 使用 rc != 0 —— 被信号杀死（OOM -9 → rc=-9）或以意外代码退出的子扫描器被通过 rc==1-is-findings 约定视为成功，因此从未运行的扫描在绿色关卡中产生计数 0。",
+      "failure_scenario": "check_sensitive_word.py 在扫描中途被 OOM 杀死：step5 被标记为 OK，parse_summary 从 stdout 没有 SUMMARY 行中返回 {} → counts['sensitive']=0 → 'sensitive' 是一个默认的 --fail-on 键 → gate_triggered 为空 → main() 退出 0 '门禁通过' — CI 推广了一个敏感字段扫描从未运行的更改（通过 SystemExit(2) 包装器，普通 Python 崩溃确实映射到 rc=2；在线漏洞是信号死亡，负 rc）。"
+    },
+    {
+      "id": "F08",
+      "file": "code-review-p/scripts/crp/scope.py",
+      "line": 318,
+      "tier": "bug-confirmed",
+      "summary": "仅未跟踪的 scope 存储 scope_command=\"\"（第 318 行），但 decisions.py:335/349 将其作为必需的 args.scope 转发到 deep-review.js，该脚本以硬错误拒绝了空 scope（deep-review.js:101-103）—— 对于 ladder 契约明确合法化的 scope 形状（'仅由 untracked 构成的 diff 不是空 diff'），载体 1 工作流永远无法运行。",
+      "failure_scenario": "带有预先记录的载体 1 的 deep/standard 模式；工作树仅包含未跟踪文件 → rungs 2-4 和 git diff HEAD 全为空 → worktree scope 携带 scope_command=\"\" → 工作流调用返回 {error: 'args.scope … required'} → 没有 journal，carrier1 提交没有内容可摄取，运行在 ladder 承诺支持的 scope 上走入死胡同。"
+    },
+    {
+      "id": "F09",
+      "file": "sensitive-log-review/scripts/main.py",
+      "line": 806,
+      "tier": "bug-reproduced",
+      "summary": "仅警告步骤（步骤 3 tostring，步骤 6 miss_comments）中的扫描器失败被排除在 critical_errors 之外（第 806-807 行），其计数默认为 0（第 797-800 行），因此 --fail-on tostring/miss_comments 在从未执行的检查上以 'clean' 通过。",
+      "failure_scenario": "使用 --fail-on tostring 运行；check_tostring_annotation.py 错误（rc=2，规则文件不可读）→ step3 result.fail 但不在 critical 中 → counts['tostring']=0 → gate_triggered 为空 → 退出 0 '门禁通过'，告诉 CI @ToString 检查是 clean 的，而实际上它从未运行（已实证复现）。"
+    },
+    {
+      "id": "F10",
+      "file": "java-unit-test-generator/references/UnitTestRules.md",
+      "line": 159,
+      "tier": "bug-confirmed",
+      "summary": "规则 e 仍然硬编码 '测试类路径为 <模块>/src/test/java/<同包>/<类名>Test.java；不存在时按下述骨架创建'（在两个副本中逐字相同），而 e7dff8b 使引擎采用 FooTests/FooIT/FooTestCase/TestFoo 变体 —— 权威层（规则优先级高于 SKILL.md 和提示词）现在与 state.test_class_file 相矛盾。",
+      "failure_scenario": "现有的 com.foo.UserServiceTests.java 被采用：提示词将写入者指向 UserServiceTests.java，但遵守规则 e 字面文本的 LLM 也会创建记录的骨架 UserServiceTest.java（规则 d 的机器 gate 仅阻止 src/main/java，因此重复项通过验证） → 重复的空测试文件在运行中途拆分覆盖率/surefire 归因；在批处理中，相同的确定性结果来自未移植的 make_plan。"
+    },
+    {
+      "id": "F11",
+      "file": "batch-unit-test-generator/scripts/batch_diff.py",
+      "line": 282,
+      "tier": "bug-reproduced",
+      "summary": "每个文件的统计数据由原始 numstat 第三列（第 282 行）作为键，通过 --name-only（第 269 行，也没有 -z/-c core.quotepath=false）连接，所以 (a) 重命名发出大括号形式 src/{old => new}.java 且从不匹配 → +0/-0，以及 (b) 在第 363 行 filepath.replace(\"\\\\\", \"/\") 损坏了 CJK 路径的 C-quoting 转义 → 路径不存在 → _is_interface_or_enum/_count_methods 静默返回 False/0。",
+      "failure_scenario": "实证复现：git mv + 200 行编辑的编辑 → numstat '200\\t0\\tsrc/{Old.java => New.java}' vs name-only 'src/New.java' → diff_add=0 → 类失去了 [大类] 标签（:441）和双重探索预算（batch_init.py:239-240，method>=30 OR-fallback 是唯一的逃生口）；对于名为 支付.java 的文件，被损坏的转义路径静默地将方法计数归零。crp/scope.py:106 有已修复的 -z 形式（P12）。"
+    },
+    {
+      "id": "F12",
+      "file": "sensors-analyze/scripts/locate_call_sites.py",
+      "line": 74,
+      "tier": "bug-reproduced",
+      "summary": "两个 rg 调用都使用没有 encoding='utf-8', errors='replace' 的 text=True（locate_call_sites.py:74-78 和 extract_entries.py:36-39），所以 ripgrep 的 UTF-8 输出用区域设置编解码器解码 —— repo 在 crp/gitops (c012), jaut/proc 和 pwiki/util 中修复的完全相同的漂移类。",
+      "failure_scenario": "实证复现：在中文内容文件上，LC_ALL=C PYTHONUTF8=0 python3 → subprocess.run 本身引发 UnicodeDecodeError: 'ascii' codec can't decode byte 0xe4，被 blanket except (第 411 行) 吞噬 → 整个 locate_call_sites 步骤退出 1 '执行失败'；在 cp936 Windows 上，它反而将乱码路径/片段解码到 call_sites.json 中。"
+    },
+    {
+      "id": "F13",
+      "file": "sensors-analyze/scripts/extract_entries.py",
+      "line": 42,
+      "tier": "bug-reproduced",
+      "summary": "_rg 在 rg 退出代码不在 (0,1) 时返回 [] 且没有警告或回退（第 42-43 行），与 rg_search 不同，它在 exit 2（例如 Rust regex 拒绝的 LLM 编写的 lookahead/backref）时会警告并回退到纯 Python 搜索；_rg 也缺少 _RG_EXCLUDE_ARGS，所以审计和步骤 3 扫描比较了不可通约的文件集。",
+      "failure_scenario": "实证复现：模式 'sensors\\.track(?=.*事件)' 使 rg 以 2 退出；在 --audit 中，audit_sdk_coverage 将该模式的覆盖范围喂为空 → 每个 SDK-API 调用点落在 uncovered_apis 中 → 虚假 audit_issues=True，exit 3，用户返回步骤 1，没有任何日志行解释原因；在带有 dist/bundle.js 的树上，_rg 形式的命令看到了 step-3 rg_search 被排除的文件。"
+    },
+    {
+      "id": "F14",
+      "file": "sensors-analyze/scripts/review_report.py",
+      "line": 284,
+      "tier": "bug-reproduced",
+      "summary": "步骤 5.5 在弹出 __extra__（第 284 行）后原地重写 sensors.csv（第 336 行以 \"w\" 打开，无备份），截断畸形行末尾的溢出值 —— illegal_reason 告诉人工修复的证据被销毁了，并且 report_manager 随后将截断的值归档为已验证。",
+      "failure_scenario": "实证复现：带有未加引号的 'src/a.js:1,1' 的 CSV → 重写后 '首页,…,pageView,src/a.js:1,1' 变成了 'src/a.js:1' + 注入的原因；尾部的 ',1'（5.6 人工必须恢复的结束行值，以及唯一存在的完整保真副本）消失了；步骤 6 用退出 0 归档了截断的 'src/a.js:1'（'首次归档完成'），恰好是 report_manager.py:89-94 加薪以避免的 '把损坏行静默修剪后固化进归档历史'。"
+    },
+    {
+      "id": "F15",
+      "file": "code-review-p/scripts/crp/handlers.py",
+      "line": 391,
+      "tier": "bug-reproduced",
+      "summary": "carrier1 幂等摘要回退到 compact_file if compact_file is not None else Path(args.file) —— 在 --transcript-dir 模式下 args.file 合法地为 None（cli.py:76 default=None; guard :363 允许仅 transcript-dir），所以 Path(None) 引发的 TypeError 逃过了捕获的 (ValueError, OSError, KeyError, IndexError) (:415) 并作为通用的 exit-2 到达。",
+      "failure_scenario": "实证复现：工作流运行在写入 journal.jsonl 之前崩溃；操作员运行 crp.py submit --kind carrier1 --transcript-dir <dir>（未传 --file 时没有 journal/compact 可用）→ Path(None) TypeError → cli.py:170 broad except 发出 '脚本内部错误: argument should be a str or an os.PathLike object…'，而不是预期在 :416-418 处的引导重试 —— 该漏洞重新引入了 P4 注释 (:372-373) 所记录的故障类，即嗅探被移动用来防止的故障类。"
+    },
+    {
+      "id": "F16",
+      "file": "code-review-p/scripts/crp/scope.py",
+      "line": 264,
+      "tier": "bug-confirmed",
+      "summary": "两个 PR rungs（:264 隐式，:393 显式 --target <PR>）都为插入/删除传递了字面量 (0, 0)，因为 gh pr diff --name-only 产量没有统计信息 —— 对于 PR scope，基于行的扇出规则在 decisions.build_sweep_plan 中是失效的。",
+      "failure_scenario": "标准模式审查具有 6 个文件和 +4000/-800 行的 PR：stats={files:6, insertions:0, deletions:0} → lines=0 < FANOUT_LINE_THRESHOLD → fanout_recommended 保持 false → 完整的 13-angle 扫描运行，而规则意图缩小到 STANDARD_FANOUT_ANGLES，且记录的计划/账本报告 ~4800 行 diff 的插入为 0（只有具有 >8 个文件的 PR 通过文件计数分支逃脱）。"
+    },
+    {
+      "id": "F17",
+      "file": "batch-unit-test-generator/scripts/batch_finish.py",
+      "line": 283,
+      "tier": "bug-confirmed",
+      "summary": "缺少 state.json 的类被重新排队为 'recheck'，声称 'make_plan 在类 workdir 重建 state.json 后自愈'，但这种自愈并不存在：make_plan.py:94-98 以 3 退出，batch_init 在 batch_state.json 存在时拒绝运行，且 agents/batch-class-writer.md:48 禁止委托 agent 运行 init_coverage.py。",
+      "failure_scenario": "classes/com.foo.Bar/state.json 因崩溃而截断 → batch_finish 标记为 recheck → batch_next 委托（尝试递增，无上限） → 子 agent 的第一次 make_plan 以 3 退出（'state.json 不存在…需先运行 init_coverage.py'） → 循环仅通过 batch_update.py:121-124 回退到终端 'failed: state.json 不存在' 而终止，消耗了一整轮完整的委托，并在失败中结束，而不是已记录的重建和自愈。"
+    },
+    {
+      "id": "F18",
+      "file": "batch-unit-test-generator/scripts/jacoco/fast-single-cov.sh",
+      "line": 147,
+      "tier": "bug-reproduced",
+      "summary": "9e0d621 移除了 'set -e' 和 mvn 退出代码检查（java 副本:143-148 历史上没有检查），因此 surefire:test 特定的预测试失败（插件/提供程序解析，插件描述符解析 —— test-compile 无法捕获的类）落入误导性的 'exec 文件未生成 (argLine 写死/System.exit)' 分支，匹配没有 _NON_FALLBACKABLE_PATTERNS 条目，并触发一个相同的失败全 mvn 回退。",
+      "failure_scenario": "实证验证：带有 'Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin…: plugin resolution failure' 的模拟日志在批处理（maven.py:449-454）和 java（:448-454，其 'mvn 执行失败' 条目是其自身脚本不再发出的死文本）中都与模式列表不匹配 → _is_fallbackable_failure=True → 整个 'mvn test jacoco:report' 回退再次需要 surefire 并再次相同地失败 → 用户得到 argLine/System.exit 错误诊断加上双倍 mvn 挂钟时间，而不是旧的立即 'mvn 执行失败(退出码 N)'。"
+    },
+    {
+      "id": "F19",
+      "file": "install.sh",
+      "line": 69,
+      "tier": "bug-reproduced",
+      "summary": "parse_tools_arg 以一个纯粹的 echo \"${selected[@]}\" 结束且没有零选择防护（与 c6f6e36 下获得 set -u 防护的 discover_skills 不同）；空/仅空格/未知工具参数产生零工具，父级吞下的子 shell exit 1（第 255 行 $(…)）意味着脚本打印 '✅ 安装完成！' 并以 0 退出且未安装任何内容。",
+      "failure_scenario": "实证复现：./install.sh \"\" sensors-analyze /tmp/proj 和 ./install.sh \" \" … 都以带有空工具列表的成功横幅退出 0；逗号-only ',' 和未知名称 'foo' 触发第 66 行错误分支，但其 exit 1 在 $(parse_tools_arg) 子 shell 内运行，所以父级也静默成功 —— 在 CI 调用中，脚本空跑（macOS bash 3.2 变体：改为死于 unbound variable）。"
+    },
+    {
+      "id": "F20",
+      "file": "install.sh",
+      "line": 178,
+      "tier": "bug-reproduced",
+      "summary": "target-exists 覆盖提示 read -rp … overwrite </dev/tty 缺少其第 227 行孪生兄弟所拥有的无 tty 加固（overwrite=\"\" + || true + 注释 '无 tty（CI/脚本调用）时 read 失败不致命'），所以在 set -euo pipefail 下，没有 tty 的重新安装会中止而不是采取跳过路径。",
+      "failure_scenario": "实证复现：在现有的 .claude/skills/sensors-analyze 上重新运行 ./install.sh claude sensors-analyze /tmp/proj </dev/null → 'line 178: /dev/tty: No such device or address'，退出 1，没有 '跳过（已存在）' 路径；在 ./install.sh claude,qwen … 中，claude 期间的中止杀死了整个调用，并且没有创建任何 qwen 目录，而行 227 处的相同条件继续进行并跳过。"
+    },
+    {
+      "id": "F21",
+      "file": "claude-review/SKILL.md",
+      "line": 45,
+      "tier": "bug-confirmed",
+      "summary": "Phase 0 diff 收集对未跟踪文件视而不见（git diff HEAD 无法看到它们），硬编码了 main 回退（在仅 master 的 repo 上出错），使用任意的 HEAD~1 第三 rung，且没有逃逸口 —— 完全是同属的 code-review skill 记录并修复的 v1.0 故障模式（DESIGN.md v1.1：未跟踪是 'falls through every rung' 的常见 'review-what-I-just-wrote' 情况）。",
+      "failure_scenario": "用户编写了 3 个全新的从未暂存文件并运行 /claude-review：@{upstream}...HEAD 为空，main...HEAD 为空（或仅在 master 的 repo 上出错），HEAD~1 审查了一个任意的最后提交，git diff HEAD 看不到未跟踪文件 → 该 skill 静默什么都没审查（或者错误的提交），没有逃逸口。"
+    },
+    {
+      "id": "F22",
+      "file": "install.sh",
+      "line": 196,
+      "tier": "bug-reproduced",
+      "summary": "strip 列表没有覆盖 skill 根开发工件：sensors-analyze 的 问题.txt（全完成的内部需求积压）和 trigger-eval.json 被逐字 cp -r 进每个目标项目。",
+      "failure_scenario": "实证复现：./install.sh claude sensors-analyze /tmp/proj </dev/null 产生 .claude/skills/sensors-analyze/问题.txt 和 trigger-eval.json —— 开发者的私有中文检查表（包含诸如 'entry.txt 没有人工确认复核' 之类的历史需求说明）被运送到下游/用户项目，甚至可能在那里提交 —— 正是 install.sh 自己的防护注释说要防止的 c007/c058 类。"
+    },
+    {
+      "id": "F23",
+      "file": "CLAUDE.md",
+      "line": 62,
+      "tier": "bug-confirmed",
+      "summary": "CLAUDE.md 仍然记录着 'Full user docs live in its README.md and SKILL.md'，但是 sensitive-log-review/README.md —— 496 行主要用户文档（JR/T 0171 C2/C3 分类，CI exit-code 契约，五维流水线）—— 被一个名为 'add code-review skill' 的无关 commit 删除（abd3992，通过 merge acd3c27 采用）且从未恢复。",
+      "failure_scenario": "用户安装该 skill 并按照已记录的指针查找 README → 文件不存在；丢失的使用文档（--run-id 并行隔离，gate 配置）仅剩下简短的 SKILL.md，破坏了 repo 自己的约定 'Skill READMEs… are the user-facing contract — keep them in sync'（删除隐藏在无关 commit 中，因此没有人审查丢失它）。"
+    },
+    {
+      "id": "F24",
+      "file": "java-unit-test-generator/scripts/jaut/state.py",
+      "line": 148,
+      "tier": "latent",
+      "summary": "两个 jaut 副本中的 StateStore.locked() 都是无防护的原始 fcntl.flock(LOCK_EX)（java :148→:34，批处理 :183→:40 —— 没有重入防护，超时或 LOCK_NB），而 crp 副本添加了线程作用域防护，正是因为原始版本 'blocks hang on its own flock'。",
+      "failure_scenario": "潜在（验证器在两个 skill 中都没有发现当前的 .locked() 嵌套 —— batch_init 的 全程持锁使用不同的锁文件）：今天在另一个 locked() 块内获取 store.locked() 的任何 helper 都会永远挂起整个 skill 运行，没有错误、超时或日志 —— crp/state.py:62,361-366 的修复记录了它是实践中的（'内层对自身 flock 永久阻塞(实测)'）；jaut 副本也缺少 crp 的 c015/c018 配套修复。"
+    },
+    {
+      "id": "F25",
+      "file": "java-unit-test-generator/scripts/verify_coverage.py",
+      "line": 102,
+      "tier": "latent",
+      "summary": "java skill 在 verify_coverage.py:102-113 和 init_coverage.py:252-262 中手动内联了 fast-single-cov→mvn-test-jacoco 回退，进入了私有的 maven._is_fallbackable_failure，而批处理副本提取了 maven.run_single_cov_with_fallback (batch maven.py:485-554)，它还备份了失败的快速路径日志 —— java 的内联没有备份，所以回退的 'w'-mode 日志写入 (proc.py:220) 破坏了证据。",
+      "failure_scenario": "不稳定的 fast-single-cov 失败（例如 surefire 停顿）在 java skill 中：回退运行在 verify_coverage.py:108 处仅用一行警告截断 mvn.log，并且 'fast-single-cov.log' 在 java-unit-test-generator/ 中没有命中 —— 与备份完整日志加上 30 行尾部 (batch maven.py:522-546) 的批处理不同，快速路径失败的原因没有留下任何证据；回退标准现在存在于 3 个地方且已经不一致（java 保留了死 'mvn 执行失败' 模式，:450）。"
+    },
+    {
+      "id": "F26",
+      "file": "code-review-p/scripts/crp/journal.py",
+      "line": 232,
+      "tier": "latent",
+      "summary": "裁决聚合/升级机制存在三种并行实现 —— verify.py:24-39 aggregate_verdict/apply_votes，journal.py:232-270 _finalize_all（重复了带有 'same mechanism' 注释的单票升级过程），以及 deep-review.js:207-217/266-273 aggregateVerdict —— 加上仅在 node 安装时运行的 fixture 锁保持对齐。",
+      "failure_scenario": "镜像已经破坏了两次，这从逐字 incident 注释中可以看出：verify.py:36-38 记录了 'deep-review.js 同公式同错(已同步)'（even-vote quorum bug 在双修复之前存在于两者中），journal.py:264-268 记录了 P9，其中 multi-vote upgrades 被判为 single-vote 'JS 侧三透镜 quorum 与 Python 双向分歧(实证回归)'；在没有 node 的机器上，JS-parity 断言被跳过（test_workflow_script.py:25），因此未来的 quorum 调整会静默地改变载体 1 与 载体 2/3 在相同投票下的结果。"
+    },
+    {
+      "id": "F27",
+      "file": "code-review-p/scripts/crp/handlers.py",
+      "line": 705,
+      "tier": "latent",
+      "summary": "陈旧答案防护需要四个特定于密钥的陈旧公式（scope 检查 escape_hatch :702-704，gates 检查 phase!=\"gates\" :705-709，drift 检查 pending_question.key :710-711，run :712-713），因为 gates ask_user 是由一个从不记录 state.pending_question 的纯路由器（decisions.py:181-214）发出的。",
+      "failure_scenario": "双重记账在 incident 注释中产生了两次 bites：handlers.py:706-707 记录了 P10 c015/c033（'drift 待决在途时重放的 gates 答复被放行并抹掉漂移标记'），并且 _drift_gate (:149-152) 特判了 escape_hatch 加上 :749-751/:783-785 的 guards 以停止对 in-flight drift/scope 标记的覆写；下一个 ask 种类，或任何第二个并发 ask，重新引入了完全相同的丢失标记类 —— 根本修复是在单一的 save/emit 点从每个发出的 ASK_USER 记录 pending_question。"
+    },
+    {
+      "id": "F28",
+      "file": "code-review-p/scripts/crp/decisions.py",
+      "line": 326,
+      "tier": "latent",
+      "summary": "carrier-1 契约（仅服务初始扫描轮次，无引擎间隙循环，不带轮次的 idem 密钥）被编码为跨三个模块的通用引擎代码中分散的字面 carrier==1/'carrier1' 检查（decisions.py:326/348/352, handlers.py:350/361/400/420/625, cli.py:75-78），而不是在 _apply_carrier (handlers.py:567-577) 中设置一次的功能记录。",
+      "failure_scenario": "scatter 已经产生了一个现存的协议级 bug，记录在 decisions.py:323-325（'fix_review 轮下发 carrier1 会因 submit 的种类核对只认 phase==sweep 而无限错序 exit-3 循环(LLM 逐字执行协议永远无法满足引擎)'）加上几个 P11/P12 near-miss 注释；更改工作流契约或添加第四个轮次拥有的载体需要跨三个文件寻找每个字面量 —— 错过一个，引擎和载体再次不同意轮次拓扑。"
+    },
+    {
+      "id": "F29",
+      "file": "code-review/references/calibration.md",
+      "line": 53,
+      "tier": "latent",
+      "summary": "code-review 和 code-review-p 发送了近重复的 calibration.md/angles.md 副本，这些副本 drifted 到了矛盾：code-review-p 添加了 whole-file/whole-repo 'nothing is pre-existing' 例外 (:55-58) 和 Angle L 在 8b8bd4f（从未 backported），而 code-review —— 其自己的 SKILL.md:10/51 接受一个 path 目标 —— 仍然只有三个基于 diff 的 pre-existing 例外。",
+      "failure_scenario": "在一个干净的提交文件上运行 /code-review <path>：每一行都是 'untouched code' 且没有 diff 例外可以触发 → 项目 9 作为 'pre-existing' 杀死了所有发现，而 code-review-p 在输入相同的情况下进入 whole-file 模式（scope.py:47 '既有问题豁免解除'） —— 相同的审查，根据选择的同属 skill 产生相反的结果；code-review 的 SKILL.md 甚至没有记录 clean-file→whole-file 回退。"
+    },
+    {
+      "id": "F30",
+      "file": "pwiki/scripts/pwiki_lib/layers.py",
+      "line": 279,
+      "tier": "latent",
+      "summary": "图层实现提示将 deep preset 事实硬编码在 else-arm 中（'结尾自带 <cite> 引用块…全文配 5-8 张 mermaid 图'，:279-281），而不是从 STYLE_PRESETS 派生（styles.py:42 mermaid (5,8), :56 cite_block_required=True） —— gates.py:302-346 执行预设，所以编辑预设会使提示词过时。",
+      "failure_scenario": "layers.py:271-273 处的 incident 注释记录了 past bite（'曾整段禁顶部引用清单, 而 deep 的 cite_block_required=True —— 默认风格下整 run 的页全缺 <cite>, finish LINING 整批拒绝'）；今天收紧 deep 的 mermaid band（例如 (7,10)）使 writers 产生 5-8，而 gates 硬失败 LINING（deep 的 size_hard=True），未来的第三种样式静默继承了 deep prose —— 确切的 anti-pattern gates.py:304 说预设被引入以停止。"
+    },
+    {
+      "id": "F31",
+      "file": "sensitive-log-review/scripts/main.py",
+      "line": 80,
+      "tier": "latent",
+      "summary": "GATE_KEYS (:80)，counts construction (:793-803，与步骤显示名称字符串如 '步骤2: 检查变更文件日志' 匹配的硬编码)，warn_only (:806)，以及每个扫描器的 SUMMARY 密钥名称构成了一种四向字符串同步，消费 counts.get(key, 0) (:816) 将任何不匹配掩盖为永久的 0，且没有测试锁定它。",
+      "failure_scenario": "潜在（所有 8 个密钥当前同步，通过验证器）：添加第九个 GATE_KEYS 条目或重命名步骤标题而没有其 counts 行 → --fail-on <key> 通过验证然后永远读取 0 → CI gate 在非零违规计数的情况下通过，使 exit-code 契约失败；对 tests/ 的 grep 显示零引用到 GATE_KEYS 或 counts 构建。"
+    },
+    {
+      "id": "F32",
+      "file": "code-review-p/scripts/crp/ledger.py",
+      "line": 124,
+      "tier": "efficiency",
+      "summary": "find_dup 为每个传入候选者的每一行账本行重新计算 tokens_of(p['summary'])（每次都是每个字符的 unicodedata 扫描），在独占提交锁内（handlers.py:337 store.locked → journal ingest → ledger.ingest_candidates → find_dup each）；同一包已经拥有该模式 —— journal.py _match_pool 的调用者构建的 token_cache (:78-121)。",
+      "failure_scenario": "深度审查摄取集中在同一更改文件上的角度（DEDUP_LINE_BAND=3 预过滤器）：~500 个候选者 × 同一文件集群中数百个账本行在 submit 命令下按运行 flock 重新标记了数十万个摘要，每次提交重复 —— CPU 延迟加宽了锁窗口；验证器指出典型的 tokenization 量小于全账本最坏情况，但结构性冗余和缺失的 cache 是真实的。"
+    },
+    {
+      "id": "F33",
+      "file": "sensitive-log-review/scripts/common/git_utils.py",
+      "line": 106,
+      "tier": "efficiency",
+      "summary": "AddedLinesCache.get 在每个不同的文件上分配一个 `git diff <branch> -- <file>` 子进程（:106→:72-82），且 check_log_print.py (step2) 和 check_sensitive_word.py (step5) 每个都构建自己的 cache 作为单独的 OS 进程 —— 2×N 个顺序 git forks，其中一个树形范围的 `git diff -U0` 按 +++ 头分割就足够了。",
+      "failure_scenario": "一个触及 200 个 Java 文件且带有日志/字段命中的分支 → ~400 个顺序 tree-diff-with-pathspec forks（每次在大型 repo 上 50-150ms）= 几十秒的纯子进程开销，违背了该工具声明的 <60s CI 关键路径；get_changed_files 已经运行了一次树形范围 diff，所以批量形式是一半存在的。"
+    },
+    {
+      "id": "F34",
+      "file": "sensitive-log-review/scripts/check_log_print.py",
+      "line": 58,
+      "tier": "efficiency",
+      "summary": "match_changed_files 是 O(changed_files × list_lines) 子字符串扫描完整列表行（check_sensitive_word.py:58-68 中的相同副本），由每个脚本调用两次，而不是每个列表行解析一次路径（parse_list_line 已存在）并进行以路径为键的查找。",
+      "failure_scenario": "在具有 400 个更改文件的 50k+ 行 log-print-ok.list 的大型 repo 上进行 --full-scan = 每次调用 ~20M 个 `in` 检查（× 两个脚本中的 4 个调用点）= 每个扫描几秒钟的二次匹配，dict 将其减少为线性（注意：当前语义是子字符串，所以修复必须对齐规范化，因为扫描器写入 abs 路径而 git 返回 repo-relative）。"
+    },
+    {
+      "id": "F35",
+      "file": "sensitive-log-review/scripts/java_log_scanner.py",
+      "line": 201,
+      "tier": "efficiency",
+      "summary": "多字短语检查运行 STRING_LITERAL.sub + lower() 复制每一行日志调用，然后每一行迭代所有 81 个核心字典条目，检查 ' ' in phrase，尽管没有交付的字典包含空格 —— 短语子集可以在字典加载时计算一次并在为空时跳过。",
+      "failure_scenario": "在具有 ~50k 个日志调用行的 repo 上进行全扫描 = 50k × 81 个死迭代加上 50k 个不需要的 regex-sub/lower 复制（在 step1 中有几秒钟的 CPU，它通过 group A 控制流水线）；只有当用户将 'bank account' 风格的行添加到 sensitive-core.txt 时，该检查才起作用，即便如此，每行的 ' ' in phrase 循环应该是预计算列表 —— 该形状在两种情况下都是浪费的。"
+    },
+    {
+      "id": "F36",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 276,
+      "tier": "efficiency",
+      "summary": "publish_run 在 autocommit 模式下（db.py:222-230 isolation_level=None）每保持/完成行发出一个 INSERT OR REPLACE —— 两个循环触及每一行，包括字节相同的行（:276, :282）—— 而同级 queue_jobs/publish_modules/unpublish_pages 全部在单个 BEGIN IMMEDIATE 内批量处理；文件树路径已经有了 '先比后写…未变不落盘' 修复 (publish.py:314-321) 但 DB 行路径从未做。",
+      "failure_scenario": "触及 5 个页面的 400 页 wiki 上的稳态 `pwiki finish` 仍然发出 400 个单独的 fsync'd 写入事务（每个拖动 10-30KB 内容 blob）≈ SSD 上 0.5-2s，外加 ~400 个写锁获取，并发 next/submit claimers 必须重新竞争（busy_timeout 等待它们而不是失败）；一个包装的事务是微不足道的，因为循环不触及 leases/claim tokens。"
+    },
+    {
+      "id": "F37",
+      "file": "pwiki/scripts/pwiki_lib/search.py",
+      "line": 67,
+      "tier": "efficiency",
+      "summary": "cmd_search 在每次查询时通过正则表达式标记化 + 每页标题/正文的完整内容 .lower() 重新标记化每个已发布页面的完整内容；page 表已经携带 content_hash（在每个写入路径上维护），它为持久化的 tf/df/length 缓存做好了无效键准备。",
+      "failure_scenario": "在交互式 CLI 命令上每次 `pwiki search` 调用 ~500 页 × 10-30KB ≈ 5-15MB 的正则表达式扫描（CPython 中 1-3s），重新计算仅在页面重新发布时更改的统计信息 —— 记录为故意的 qwiki-port 权衡（search.py:3-5），因此这是一个设计决策而非疏忽，但成本是真实的且反复发生。"
+    },
+    {
+      "id": "F38",
+      "file": "sensors-analyze/scripts/locate_call_sites.py",
+      "line": 357,
+      "tier": "efficiency",
+      "summary": "一次 ripgrep 进程每个模式（for pat in patterns: rg_search(pat, root)） —— entry.txt 通常持有 10-40 个已确认的正则表达式，所以这是 10-40 个顺序的全树扫描；单个带有多个 -e 参数的 rg（通过 --json pattern_index 或已编译的每个模式正则表达式归因）做得一次。",
+      "failure_scenario": "在 100k 文件 monorepo 上，每次 rg 扫描需要 1-4s → 20 个模式 = 20-80s 的顺序全树遍历，其中一次扫描就足够了；纯 Python 回退更糟（每个模式一个 entire-repo read_text）；一个 wrinkle：一个被拒绝的模式使整个组合调用失败，所以 exit-2 回退需要根据 rg 的错误进行拆分。"
+    },
+    {
+      "id": "F39",
+      "file": "code-review-p/scripts/crp/decisions.py",
+      "line": 221,
+      "tier": "latent",
+      "summary": "sweep_plan.max_concurrent defaulting 在两个函数中重复（carrier_work :221 和 effective_limits :264，都是 `plan.get('max_concurrent') or config.max_concurrent_agents()`），而 crp 的规范化流水线（state._migrate_v1_to_v2 在 :290 处 setdefaults 密钥, _normalize_state_types :244-259）正是为了结束 scattered or-fallbacks 而存在的。",
+      "failure_scenario": "潜在 desync：这两个表达式今天是字符相同的，所以没有实时 bug，但 models.py:190 作为原始 dict 传递 sweep_plan，且仅负载创建和 load-migration 保证该密钥 —— 在一个站点中更改默认值（例如 overlay-aware）静默地使 carrier_work 通告的并发性与 effective_limits 执行的不同。"
+    },
+    {
+      "id": "F40",
+      "file": "code-review-p/scripts/crp/protocol.py",
+      "line": 1,
+      "tier": "latent",
+      "summary": "protocol.py 是 jaut 协议块发射器的第三个近乎相同的副本（104 行；java 和 jaut 批处理副本是字节相同的，crp 的仅相差 12 行），因此协议修复必须通过手工应用三次 —— 配置枚举已经分歧（crp 添加了 do_work，删除了 write_code），而 emit/self_check 代码保持复制粘贴。",
+      "failure_scenario": "下一个发射修复（例如 print 上的 BrokenPipeError，一个新的必需密钥）应用于一个 skill，静默留下其他两个发射半契约，只有它们自己滞后的 self_check 才能看到 —— 同样的三次手工应用负担，_REPO 的两个已知重复引擎（jaut×2）在其 P3-5 序列化修复中已经付出了代价，该修复存在于所有三个中。"
+    },
+    {
+      "id": "F41",
+      "file": "java-unit-test-generator/scripts/jaut/jacoco.py",
+      "line": 60,
+      "tier": "latent",
+      "summary": "_tag_endswith 在两个 skill 的 jacoco.py 和 surefire.py 中被定义了四次，外加一个命名陷阱：jacoco.report_paths 返回一个 tuple[Path, Path] 而 surefire.report_paths 返回一个单独的 Path —— 从错误的模块导入会在运行时产生 tuple/Path 不匹配，而不是一个明显的错误。",
+      "failure_scenario": "在 jaut 包中维护四份副本的微小 XML 后缀 helper 加上两个同名的不同签名函数：LLM 或贡献者扩展引擎导入错误的 report_paths 得到一个静默错误的值形状，在调用中产生偏移（tuple unpack vs single path），而不是在审查时产生导入错误。"
+    },
+    {
+      "id": "F42",
+      "file": "sensors-analyze/scripts/report_manager.py",
+      "line": 33,
+      "tier": "latent",
+      "summary": "固定的有序 CSV 头部在三个文件中被硬编码为六个列表字面量，带有 drift（check_report.py:35 7-col，review_report.py:42/49 8/7-col，report_manager.py:33-35 8/7-col）加上 REQUIRED_NONEMPTY 重复两次 —— SKILL.md:250 告诉人类添加的 manual_note 列在它们中都不存在。",
+      "failure_scenario": "实证复现：在按照文档说明进行了人工编辑（添加 manual_note）的 CSV 上运行 report_manager --diff-only 会记录 '[WARNING] CSV 表头 … 与期望 … 不一致'（:87-88，仅警告），所以文档记录的工作流在每次正确执行的编辑上都会产生噪音；任何列添加必须在 3 个文件中复制 6 个列表，否则脚本的接受/拒绝列表静默不一致。"
+    },
+    {
+      "id": "F43",
+      "file": "sensitive-log-review/scripts/common/git_utils.py",
+      "line": 36,
+      "tier": "hygiene",
+      "summary": "git() 是 repo 四个 git 包装器中唯一没有超时的（pwiki util.py timeout=30, crp gitops GIT_TIMEOUT_SECONDS, jaut gitops GIT_COMMAND_TIMEOUT_SECONDS 都带有挂起防护） —— CI-gate skill 的 git 调用可能会永远阻塞，而不是以 exit 2 失败。",
+      "failure_scenario": "git 调用阻塞 —— 凭证/ssh 提示，挂起的 NFS 挂载，陈旧的索引锁 —— subprocess.run 等待无限时间，因此流水线挂起而不是根据 exit-code 契约以 exit 2 失败（0 通过/1 gate/2 错误），在 CI 中没有进展文件或超时杀死；main.py:603 也内联重新实现了 rev-parse repo 检查而不是调用这个包装器。"
+    },
+    {
+      "id": "F44",
+      "file": "sensitive-log-review/scripts/check_pojo_comments.py",
+      "line": 124,
+      "tier": "hygiene",
+      "summary": "checkstyle JVM 子进程 (subprocess.run(cmd, capture_output=True)) 没有超时，与 repo 中其他所有子进程包装器不同。",
+      "failure_scenario": "checkstyle 在病态输入文件或损坏的 jar classpath 上陷入困境：POJO-comment gate 永远挂起而不是以 exit 2 失败，阻止整个 sensitive-log-review 流水线（以及其声明的 60s 延迟预算），没有进展文件或超时杀死。"
+    },
+    {
+      "id": "F45",
+      "file": "sensitive-log-review/scripts/main.py",
+      "line": 198,
+      "tier": "latent",
+      "summary": "step2/5/6 是 93% 相同的函数（step1/3/4 一个第二个近乎相同的变体），仅在脚本名称、步骤标签和错误字符串上有所不同 —— 但每个副本中都埋藏着不同的 rc 契约（rc==2 vs rc!=0），因此复制粘贴块很容易产生一个将执行错误视为成功的步骤。",
+      "failure_scenario": "添加或更改扫描器步骤意味着复制一个块并手动编辑三个字符串，从错误的变体中复制是很容易的，因为 rc==2-vs-rc!=0 的区别在每个副本中都被埋藏（并且已经不一致，见单独的发现） —— 一个参数化的 runner 接收 (script, extra_args, fail_rc, label, errmsg) 加上一个小表替换所有七个。"
+    },
+    {
+      "id": "F46",
+      "file": "java-unit-test-generator/scripts/_p0_3_verify.py",
+      "line": 1,
+      "tier": "hygiene",
+      "summary": "来自初始 commit 的一次性 P0-3 回归脚本在任何地方都有零引用（repo-wide grep：没有代码，测试，SKILL.md，或 references/ 提及），但 install.sh cp -r's 该 skill 且其 strip 列表不涵盖杂散 scripts/ 根文件，因此它落在了每个用户项目中。",
+      "failure_scenario": "在每个已安装项目中作为死重量加上混淆成本：它看起来像流水线的一部分，import jaut.javasrc，并断言 extract_with_helpers 的确切 helper-collection 行为，因此故意的引擎更改使得这个孤儿脚本失败，用户/LLM 跟踪它在调试非契约脚本时浪费了一轮。"
+    },
+    {
+      "id": "F47",
+      "file": "pwiki/scripts/pwiki_lib/db.py",
+      "line": 233,
+      "tier": "hygiene",
+      "summary": "db_meta 加上 meta_set/meta_get 是只写簿记：schema_version/generator_version 在 init (:233-234) 时打戳，meta_get 有零个生产调用者（只有一个测试引用它）—— 没有 pwiki 迁移机制读取 schema_version（与 crp 的 _MIGRATIONS 不同），所以该戳暗示了一个不存在的版本 gate。",
+      "failure_scenario": "pwiki 模式更改实际上通过 CREATE TABLE IF NOT EXISTS 加上 ad-hoc 列默认值发生，所以旧的 wiki.db 得到隐式迁移，同时 db_meta.schema_version 仍然声称旧版本 —— 在此字段上构建真正迁移的未来贡献者将对每个现有数据库都过期的值进行分支；要么将其连接到真正的 open-time 检查，要么删除该表。"
+    },
+    {
+      "id": "F48",
+      "file": "java-unit-test-generator/scripts/jaut/maven.py",
+      "line": 365,
+      "tier": "latent",
+      "summary": "java 副本的 run_fast_single_cov 文档字符串合约 'test_class: 测试类 FQCN(脚本第3参数)' 而 java 的每个调用者（init_coverage.py:253, verify_coverage.py:103）传递一个简单的名称；批处理孪生 (:364) 被纠正为 '测试类简单名' 而 java drifted —— 违反了 CLAUDE.md 的 'diff both copies… do not assume a fix applies to one side only'。",
+      "failure_scenario": "维护者读取 java 的文档字符串在扩展引擎时传递 FQCN，或者 '修复' 一个调用者以遵守它；fast-single-cov.sh 将值直接输入 -Dtest=$TARGET_TEST，其中两种形式选择不同的 surefire 行为（FQCN 需要完全匹配配置），静默更改在 java skill 中执行的测试，而批处理保持简单名称。"
+    },
+    {
+      "id": "F49",
+      "file": "install.sh",
+      "line": 188,
+      "tier": "hygiene",
+      "summary": "安装将每个 skill 树与 cp -r 复制，然后通过添加追加拒绝列表来修剪（tests, __pycache__, .pwiki, .repowise, .claude —— 每个在泄漏后追加的，根据注释）；一个预先排除的复制（rsync --exclude / tar pipeline）将使排除的树永远不会被写入，并且对声明的负载进行包括列表将使未声明的运行时状态永远不会交付。",
+      "failure_scenario": "双倍 I/O：./install.sh all 复制所有 8 个 skill（~35MB pass）到 4 个工具目标 = ~140MB 的写入，其中 ~25-30% 在 NFS/慢速磁盘上引人注意，立即删除；每个新的运行时状态目录都会泄露到目标项目中，直到有人再次编辑 find 行（问题.txt/trigger-eval.json 是当前实况实例），且 INSTALLABLE_SKILLS (:18) 必须在每个第九个 skill 上手动同步。"
+    },
+    {
+      "id": "F50",
+      "file": ".gitignore",
+      "line": 231,
+      "tier": "hygiene",
+      "summary": ".gitignore 以 .qoder 结尾，但 .qoder/repowiki/ 下的 125 个文件（生成的 repowiki 知识库）仍然被跟踪（git ls-files -i -c：全部 125 个）—— 与 8202b55 删除已提交 .repowise 库和 pwiki 的 'never commit .pwiki' 规则属于同一类事故。",
+      "failure_scenario": "每次 qoder 运行时生成且会 diverge 的生成知识文件保持版本控制，因此拉取会产生冲突/无意义的 diff，并且 repo 携带 123 个文件的价值在于生成的工件，其自身的 .gitignore 说不应该提交 —— 修复是 git rm -r --cached .qoder（匹配 8202b55 先例）。"
+    },
+    {
+      "id": "F51",
+      "file": "pwiki/DEVELOPERS.md",
+      "line": 60,
+      "tier": "hygiene",
+      "summary": "未提交的工作树删除了所有五个 pwiki/docs/code-review/*.md 报告，但 pwiki/DEVELOPERS.md:60 ('报告见 docs/code-review/') 和 tests/test_review_fixes{,2,3,4}.py (:3 each) 的出处 docstrings 仍然指向它们。",
+      "failure_scenario": "删除是按原样提交的 → 阅读 DEVELOPERS.md 2026-11-08 max-review 部分的开发人员遵循一个空/缺失目录的指针；维护者追踪哪个审查轮次产生了四个测试文件的防护在任何地方都找不到引用的报告（低严重性 —— 按原样提交删除文件或删除当前悬空指针）。"
+    },
+    {
+      "id": "F52",
+      "file": "code-review-p/scripts/crp/gitops.py",
+      "line": 69,
+      "tier": "hygiene",
+      "summary": "porcelain_z 运行自己的内联 subprocess.run，而不是调用 run_argv (:19)，重复了其 P6 docstring 记录的 anti-pattern（'gitops.run 的修复…到不了副本'） —— 尽管今天副本是当前的（c012 utf-8/replace 和超时都存在），所以这只是未来 drift 的维护风险，而不是实时分歧。",
+      "failure_scenario": "下一个 run_argv 级别的修复（超时调整，环境清理，日志记录）仅到达 run()/run_argv 路径，除非有人记得第二个站点 —— 未跟踪文件检测背后的代码（scope drift checks）静默保留旧的内联副本；价值最低的项目，因为站点目前对齐。"
+    }
+  ]
+}
