@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repo Is
 
-A collection of seven **agent skills** (Claude Code / qwen / qoder / opencode) installed into *other* projects. There is no application here — each top-level directory with a `SKILL.md` is a self-contained skill: prompt/workflow docs (`SKILL.md`, `references/`, `protocol/`), Python driver scripts (`scripts/`), and pytest suites (`tests/`). Docs and comments are largely in Chinese.
+A collection of eight **agent skills** (Claude Code / qwen / qoder / opencode) installed into *other* projects. There is no application here — each top-level directory with a `SKILL.md` is a self-contained skill: prompt/workflow docs (`SKILL.md`, `references/`, `protocol/`), Python driver scripts (`scripts/`), and pytest suites (`tests/`). Docs and comments are largely in Chinese.
 
 | Skill | Purpose |
 |---|---|
@@ -12,6 +12,7 @@ A collection of seven **agent skills** (Claude Code / qwen / qoder / opencode) i
 | `batch-unit-test-generator` | Same engine, batched over **many** classes from a branch diff; delegates each class to the `batch-class-writer` subagent (`agents/batch-class-writer.md`) |
 | `sensitive-log-review` | Audit Java diffs for sensitive data leaking into logs (banking/finance rules); produces an HTML report and CI gate exit codes |
 | `sensors-analyze` | Inventory/verify analytics tracking calls (埋点) in arbitrary codebases → `sensors.csv`. See `sensors-analyze/CLAUDE.md` for its detailed constraints |
+| `code-review` | Lightweight multi-angle diff review (working tree / branch / commit range / PR): candidate sweep → adversarial verify → gap sweep → ranked findings; quick/standard/deep + `--fix`. Prompt-only (no engine scripts) — the simple predecessor of `code-review-p` |
 | `claude-review` | Multi-angle, evidence-verified code review of branch diffs / working-tree changes / PRs / paths; outputs a severity-ranked JSON defect list |
 | `code-review-p` | Review any diff (working tree / branch / PR / path / whole repo) for real bugs: targeted brief → 12-angle sweep → adversarial verify → gap sweep → ranked findings. Protocol-driven (NEXT_STEP) since v2.0: single entry `scripts/crp.py` owns scope/ledger/dedup/verify-aggregation/accounting/report; quick/standard/deep modes; parallel fan-out (Workflow script journal ingest + agents + inline) |
 | `pwiki` | Unified repo-wiki engine (supersedes wiki-plan-gen/qwiki/repowiki): plan→digest→generate→publish lifecycle with theme/layer/seed planners, per-style citation gates (concise/deep), parallel-safe job claiming, snapshot increments, BM25 search, Qoder-IDE plan emit/lint |

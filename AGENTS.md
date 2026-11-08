@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-This repo is a collection of seven **agent skills** (for Claude Code, Qwen, Qoder, OpenCode). There is no application — each top-level directory is a self-contained skill installed into *other* projects.
+This repo is a collection of eight **agent skills** (for Claude Code, Qwen, Qoder, OpenCode). There is no application — each top-level directory is a self-contained skill installed into *other* projects.
 
 ## Project Structure & Module Organization
 
@@ -10,6 +10,7 @@ This repo is a collection of seven **agent skills** (for Claude Code, Qwen, Qode
 | `batch-unit-test-generator/` | Same engine, batched over classes from a branch diff, via the `agents/batch-class-writer.md` subagent |
 | `sensitive-log-review/` | Audit Java diffs for sensitive data leaking into logs; emits an HTML report and CI gate codes |
 | `sensors-analyze/` | Inventory analytics tracking calls (埋点) into `sensors.csv` |
+| `code-review/` | Lightweight multi-angle diff review (working tree / branch / range / PR): sweep → verify → gap sweep → ranked findings; prompt-only, no engine scripts — the simple predecessor of `code-review-p/` |
 | `claude-review/` | Multi-angle, evidence-verified code review of branch diffs / working-tree changes / PRs / paths; severity-ranked JSON defect list |
 | `code-review-p/` | Protocol-driven code review (diff/PR/path/whole repo): targeted brief → 12-angle sweep → adversarial verify → ranked findings; single-entry engine `scripts/crp.py` (NEXT_STEP protocol) owns scope/ledger/dedup/accounting/report |
 | `pwiki/` | Unified repo-wiki engine (supersedes `wiki-plan-gen`/`qwiki`/`repowiki`, kept for reference): single CLI `scripts/pwiki.py` — theme-pack/layered/seed planners, per-style citation gates (concise/deep), parallel-safe job claiming, snapshot increments, BM25 search, Qoder-IDE plan emit/lint |
