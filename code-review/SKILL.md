@@ -10,7 +10,7 @@ description: >-
 argument-hint: "[branch | PR number | path | commit range] [--quick | --deep] [--fix]"
 ---
 
-`quick → 1 pass, no verify → ≤4 · standard → 11 angles → dedup → verify → sweep → ≤10 · deep → parallel finders → adversarial verify → sweep loop → ≤20`
+`quick → 1 pass, no verify → ≤4 · standard → 12 angles → dedup → verify → sweep → ≤10 · deep → parallel finders → adversarial verify → sweep loop → ≤20`
 
 Review a diff the way a staff engineer would: enumerate candidates liberally,
 kill them with quoted evidence, and report only what survives — ranked, each
@@ -133,6 +133,7 @@ The angles:
 | I | **Cleanup trio** | Reuse (re-implementing an existing helper — name it), Simplification (derivable state, copy-paste, dead code), Efficiency (N+1, sequential independent I/O, hot-path blocking, closure-captured scope kept alive) |
 | J | **Altitude** | Root cause vs bandaid: special cases layered on shared infrastructure mean the fix isn't deep enough — name the simpler, more general change |
 | K | **Conventions** | Quotable violations of CLAUDE.md/AGENTS.md rules only |
+| L | **Completeness & wiring** | Claimed behavior never actually delivered: a stage of the feature chain with no implementation or unreachable, new command/API/event missing at one of its three ends (registered/exposed/called), sync pairs that must move together (i18n locales, mocks vs contracts, generated files vs source) with one side moved alone, docs/TODO claiming done what the diff does not do |
 
 Cleanup (I), altitude (J), and conventions (K) candidates state the concrete
 cost (duplicated, wasted, harder to maintain, rule broken) in

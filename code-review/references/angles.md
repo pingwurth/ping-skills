@@ -211,6 +211,32 @@ nothing.
 
 ## Deep mode — subagent prompt templates
 
+## Angle L — Completeness & wiring
+
+**Mission:** catch claimed behavior that was never actually delivered. The
+other angles hunt defects in what is there; this one hunts what is
+*missing*. Highest priority when the brief classifies the diff as a
+vertical-slice feature.
+
+- **Feature chain closed end-to-end.** For each stage the change claims
+  (initiate → validate/precheck → background work → artifacts →
+  progress/status query → failure recovery), find the code that implements
+  it. A stage with no implementation — or implemented but unreachable — is
+  a candidate.
+- **Three-end consistency.** Every new command/API/event must exist at all
+  three ends — registered (handler/invoke table), exposed (transport/client
+  wrapper), and called (a real call site) — and the ends must agree on name
+  and payload shape. Any end missing is a candidate.
+- **Sync pairs that must move together.** i18n locales; test mocks vs real
+  contracts (mock drift = false-green E2E); generated files vs their source
+  of truth; dependency/version registrations (lockfiles, version registries).
+  One side moved without the other is a candidate.
+- **Doc truthfulness.** TODO/changelog/delivery notes claiming done what the
+  diff does not do (claim/diff mismatch is also a Phase 0 finding).
+
+The brief's §Claimed intent and §Targeted checks are this angle's worklist:
+every targeted check that fails is a candidate.
+
 Run one finder per angle as a parallel subagent; pipeline each candidate into
 a refuter subagent as soon as it arrives (no barrier waiting for all finders).
 If subagents are unavailable, run the same prompts sequentially inline.
