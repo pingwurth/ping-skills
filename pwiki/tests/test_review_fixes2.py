@@ -1,6 +1,6 @@
 """2026-11-08 第二轮 max 审查回修的回归测试(B1 生命周期/数据丢失族)。
 
-对应报告: pwiki/docs/code-review/2026-11-08-code-review-max-round2.md
+对应报告: pwiki/docs/code-review/2026-11-08-code-review-max-round2.md(报告文件已清理)
   #1  D22 改名只改 DB 不落盘(旧位置取自 plan 陈旧 path 键)
   #14 改名落盘绕过导出合成层(丢 <cite>/目录)
   #2  快照卡片 scope 是 JSON 字符串却被逐字符遍历

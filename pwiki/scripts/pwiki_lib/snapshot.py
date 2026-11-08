@@ -331,8 +331,10 @@ def cmd_update(args) -> int:
             else:
                 # c005: 过得了新门禁的行在此重盖章(章是门禁挣来的) —— 曾只
                 # requeue FAILING 行, PASSING 行永远带旧戳: style_drift 永不
-                # 收敛, 每次 update 对全库重跑一遍门禁
-                ctx.db.set_page_style(pid, pub["page_id"], plan_style)
+                # 收敛, 每次 update 对全库重跑一遍门禁。
+                # F06: 这里曾写 pid(本函数从未绑定, 只在嵌套 check_item/推导
+                # 式里出现)→ NameError, update 当场崩; 分区号取 part["id"]
+                ctx.db.set_page_style(part["id"], pub["page_id"], plan_style)
 
     print(f"diff vs baseline {part['published_snapshot_id']}: "
           f"{len(changed)} changed / {len(removed)} removed tracked; "

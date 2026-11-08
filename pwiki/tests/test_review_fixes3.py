@@ -1,6 +1,6 @@
 """2026-11-09 第三轮 max 审查 P0(13 条)回修的回归测试。
 
-对应报告: pwiki/docs/code-review/2026-11-09-code-review-max-round3.md(#1-#13)。
+对应报告: pwiki/docs/code-review/2026-11-09-code-review-max-round3.md(#1-#13, 报告文件已清理)。
 """
 
 from __future__ import annotations

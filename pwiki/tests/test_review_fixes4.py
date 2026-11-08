@@ -1,6 +1,6 @@
 """2026-11-09 第四轮 max 审查回修的回归测试(分批追加)。
 
-对应报告: pwiki/docs/code-review/2026-11-09-code-review-max-round4.md。
+对应报告: pwiki/docs/code-review/2026-11-09-code-review-max-round4.md(报告文件已清理)。
 批1 = #1-#12(正确性/数据丢失/竞态) + 提前落地的 #15/#25/#34/#44。
 """
 

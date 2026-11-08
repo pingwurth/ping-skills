@@ -57,7 +57,7 @@ _imported_names(7 多段) / aliases(8 多形态) · cli._add_common(9 SUPPRESS)
 · gates.rowget(14) · publish 孤儿 _module.yaml 清理(15) · engine finish 计数取
 发布层(16) · scan marker 可见性(17) · publish.normalize_links(18)。
 
-## 2026-11-08 max 审查回修(63 条, 报告见 docs/code-review/)
+## 2026-11-08 max 审查回修(63 条, 报告文件已随 2026-11 清理移除)
 
 三条 P0 与一个根因簇: regenerate 双分支补派生 path; 卡片判定统一走
 `config.is_card_kind()`(计划侧 kind=<种类> / 行侧 kind='card' 两形态);

@@ -234,55 +234,72 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                  for p in existing if p["path"]}
 
     kept_ids = []
-    # 1) kept: 计划内、本次 run 未重跑完成的已发布项(目录漂移项重算路径)
-    for p in existing:
-        if p["page_id"] in completed_ids or p["page_id"] not in plan_ids:
-            continue
-        item = plan_by_id.get(p["page_id"])
-        row = dict(p)
-        if item is not None:
-            merged = dict(item)
-            merged["kind"] = item.get("kind", p["kind"])
-            if config.is_card_kind(p["kind"]) or \
-                    config.is_card_kind(merged.get("kind")):
-                row["path"] = posix(card_path_for(merged, ctx.locale))
-            else:
-                row["path"] = posix(page_path_for(pages_plan, merged, ctx.locale,
-                                                mods_by_id))
-            # kept 合并曾只搬 title/parent/ordinal/path —— plan 改了
-            # type/slug/module/kind 而 DB 行保持旧值: snapshot.check_item
-            # 按 type/slug 对账, update 每轮重标 catalog_changed 却每轮
-            # 合并不进去, 0-job INCREMENT 死循环。目录字段随 plan 全量
-            # 同步(kind 归一到行形态, 与 queue_jobs 同规)
-            if config.is_card_kind(merged.get("kind")):
-                row["kind"] = "card"
-                row["card_kind"] = str(merged.get("card_kind")
-                                       or merged.get("kind"))
-            else:
-                row["kind"] = str(merged.get("kind") or "page")
-                row["card_kind"] = str(merged.get("card_kind") or "")
-            row["parent_id"] = str(item.get("parent", p["parent_id"]))
-            # 显式 `ordinal:` 空值(None)会击穿 .get 默认 —— begin 的
-            # ordinal 守卫只在排队前跑, finish 重读手编 plan 后曾 int(None)
-            # 裸崩在 LINING 中途; as_int 是本 crash 类的统一容错(同族:
-            # lease_minutes/limbs 解码)
-            row["ordinal"] = as_int(item.get("ordinal"), p["ordinal"])
-            row["title"] = str(item.get("title", p["title"]))
-            row["module"] = str(item.get("module") or "")
-            row["sheet"] = str(item.get("sheet") or "")
-            row["article_type"] = str(item.get("type")
-                                      or item.get("article_type") or "")
-            row["slug"] = str(item.get("slug") or "")
-        ctx.db.publish_page(pid, _row_like(row), p["content"], run["id"])
-        kept_ids.append(p["page_id"])
-    # 2) completed jobs → page 表
-    for j in jobs:
-        if j["state"] != "completed":
-            continue
-        ctx.db.publish_page(pid, j, j["content"], run["id"])
-        kept_ids.append(j["page_id"])
-    ctx.db.unpublish_pages(pid, kept_ids)
-    ctx.db.publish_modules(pid, modules_plan)
+    # F36: 两个重发布循环 + 下架 + 模块同步包进单个 BEGIN IMMEDIATE ——
+    # 旧路在 autocommit 连接上每行一条 INSERT OR REPLACE, 稳态 finish(只
+    # 触及几页)也对全库各行各发一个 fsync 写事务, 并发 next/submit 的写锁
+    # 竞争成倍放大; 循环不触及 leases/claim token, 包事务零语义风险。
+    # 未变行(落库列逐列相等)跳写 —— 与文件树侧"先比后写"的 r4 #72 修复
+    # 同口径对齐。
+    existing_by_id = {p["page_id"]: p for p in existing}
+    ctx.db.begin()
+    try:
+        # 1) kept: 计划内、本次 run 未重跑完成的已发布项(目录漂移项重算路径)
+        for p in existing:
+            if p["page_id"] in completed_ids or p["page_id"] not in plan_ids:
+                continue
+            item = plan_by_id.get(p["page_id"])
+            row = dict(p)
+            if item is not None:
+                merged = dict(item)
+                merged["kind"] = item.get("kind", p["kind"])
+                if config.is_card_kind(p["kind"]) or \
+                        config.is_card_kind(merged.get("kind")):
+                    row["path"] = posix(card_path_for(merged, ctx.locale))
+                else:
+                    row["path"] = posix(page_path_for(pages_plan, merged,
+                                                      ctx.locale, mods_by_id))
+                # kept 合并曾只搬 title/parent/ordinal/path —— plan 改了
+                # type/slug/module/kind 而 DB 行保持旧值: snapshot.check_item
+                # 按 type/slug 对账, update 每轮重标 catalog_changed 却每轮
+                # 合并不进去, 0-job INCREMENT 死循环。目录字段随 plan 全量
+                # 同步(kind 归一到行形态, 与 queue_jobs 同规)
+                if config.is_card_kind(merged.get("kind")):
+                    row["kind"] = "card"
+                    row["card_kind"] = str(merged.get("card_kind")
+                                           or merged.get("kind"))
+                else:
+                    row["kind"] = str(merged.get("kind") or "page")
+                    row["card_kind"] = str(merged.get("card_kind") or "")
+                row["parent_id"] = str(item.get("parent", p["parent_id"]))
+                # 显式 `ordinal:` 空值(None)会击穿 .get 默认 —— begin 的
+                # ordinal 守卫只在排队前跑, finish 重读手编 plan 后曾
+                # int(None) 裸崩在 LINING 中途; as_int 是本 crash 类的统一
+                # 容错(同族: lease_minutes/limbs 解码)
+                row["ordinal"] = as_int(item.get("ordinal"), p["ordinal"])
+                row["title"] = str(item.get("title", p["title"]))
+                row["module"] = str(item.get("module") or "")
+                row["sheet"] = str(item.get("sheet") or "")
+                row["article_type"] = str(item.get("type")
+                                          or item.get("article_type") or "")
+                row["slug"] = str(item.get("slug") or "")
+            new_row = _row_like(row)
+            if _republish_changed(p, new_row, p["content"]):
+                ctx.db.publish_page(pid, new_row, p["content"], run["id"])
+            kept_ids.append(p["page_id"])
+        # 2) completed jobs → page 表
+        for j in jobs:
+            if j["state"] != "completed":
+                continue
+            old = existing_by_id.get(j["page_id"])
+            if old is None or _republish_changed(old, j, j["content"]):
+                ctx.db.publish_page(pid, j, j["content"], run["id"])
+            kept_ids.append(j["page_id"])
+        ctx.db.unpublish_pages(pid, kept_ids)
+        ctx.db.publish_modules(pid, modules_plan)
+        ctx.db.commit()
+    except BaseException:
+        ctx.db.rollback()
+        raise
 
     modules = ctx.db.modules(pid)
     pages = list(ctx.db.published_pages(pid))
@@ -377,6 +394,32 @@ def _row_like(d: dict):
         "title_check": d.get("title_check", 0), "pack_key": d.get("pack_key", ""),
     }
     return base
+
+
+# F36: publish_page 落库列中参与"未变跳写"比对的键 —— run_id/updated_at
+# 是过程性簿记(全库零读者), content_hash 由 content 推出, 均不参与比对
+_REPUBLISH_CMP_COLS = ("title", "parent_id", "ordinal", "kind", "module",
+                       "sheet", "card_kind", "path", "prompt", "source_files",
+                       "article_type", "slug", "objective", "modules",
+                       "summary", "key_topics", "style", "scope",
+                       "required_sections", "title_check", "pack_key")
+
+
+def _republish_changed(old_row, new_row, new_content: str) -> bool:
+    """F36: 重发布行是否真的变化(未变行跳写, 与文件树侧"先比后写"对齐)。
+
+    逐列比对 publish_page 会落库的元数据列 + 稿体; 任一不等即视为变化。
+    比对从严: 类型/None 差异一律算变(多写一次无害, 漏写才是回归)。"""
+    if new_content != (old_row["content"] or ""):
+        return True
+    for c in _REPUBLISH_CMP_COLS:
+        try:
+            old_v, new_v = old_row[c], new_row[c]
+        except (KeyError, IndexError):
+            return True     # 行形状异常 —— 保守写库
+        if old_v != new_v:
+            return True
+    return False
 
 
 def _write_indexes(ctx: Ctx, part, pages: list, modules: list, run_id: str,

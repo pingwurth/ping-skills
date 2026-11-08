@@ -16,6 +16,7 @@ from . import config
 from .config import Ctx, now_iso
 from .planner import (plan_limits, plan_modules, plan_pages, render_module_tree,
                       save_plan)
+from .styles import preset
 from .util import die, info
 
 RESULT_RE = re.compile(r"(?s)<result>\s*(\{.*?\})\s*</result>")
@@ -270,15 +271,21 @@ def materialize_layers(ctx: Ctx, plan: dict, state: dict) -> list:
     _limits = plan_limits(plan, state.get("profile", "standard"))
     # 提示词按风格分口径(themes.prompt_for 同源问题): 曾整段禁"顶部引用
     # 清单", 而 deep(DEFAULT_STYLE)的 cite_block_required=True —— 默认风格
-    # 下整 run 的页全缺 <cite>, finish LINING 整批拒绝
+    # 下整 run 的页全缺 <cite>, finish LINING 整批拒绝。
+    # F30: 分档事实不再手写 —— gates 按 STYLE_PRESETS 执行, 提示词与门禁
+    # 同一来源(预设里收紧 mermaid band 后, 手写的"5-8 张"会让 writers 按
+    # 旧数字产出、门禁整批拒); 分支键也走预设而非 style 字面比较, 第三种
+    # 风格不再静默继承 deep 散文(同 gates.py 的预设化口径)。
     style = str(plan.get("style") or ctx.style)
-    if style == "concise":
+    _preset = preset(style)
+    if _preset.get("cite_block_required"):
+        _lo, _hi = _preset["mermaid"]
+        style_tail = (f"深文口径：结尾自带 <cite> 引用块（逐文件列出正文引用的"
+                      f"源码路径，与正文引用集合一致），全文配 {_lo}-{_hi} 张 "
+                      f"mermaid 图，本节分析到具体文件时在节末给章节来源。")
+    else:
         style_tail = ("短页口径：不要写目录、结论或顶部引用清单，本节分析到"
                       "具体文件时在节末给章节来源。")
-    else:
-        style_tail = ("深文口径：结尾自带 <cite> 引用块（逐文件列出正文引用的"
-                      "源码路径，与正文引用集合一致），全文配 5-8 张 mermaid "
-                      "图，本节分析到具体文件时在节末给章节来源。")
     for depth in range(0, int(_limits["max_depth"]) + 1):
         level = [a for a in state["articles"] if a["depth"] == depth]
         level.sort(key=lambda a: (order.get(a["type"], 30),

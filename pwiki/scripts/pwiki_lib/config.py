@@ -245,8 +245,13 @@ class Ctx:
                        f"using {self.repo}")
         if self.locale is None:
             self.locale = self.config.get("locale", "zh")
-        from .db import WikiDB   # 惰性导入(db 导入本模块, 避免环)
-        self.db = WikiDB(self.root)
+        from .db import WikiDB, SchemaVersionError   # 惰性导入(db 导入本模块, 避免环)
+        from .util import die                        # 局部导入避免环(同 __init__)
+        try:
+            self.db = WikiDB(self.root)
+        except SchemaVersionError as e:
+            # F47: 开库版本门禁 —— 前置失败给一行干净报错, 不留裸 traceback
+            die(str(e), EXIT_PRECOND)
         return self
 
     @property

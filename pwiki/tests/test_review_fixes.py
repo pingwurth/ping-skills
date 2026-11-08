@@ -1,6 +1,6 @@
 """2026-11-08 max 审查回修的回归测试(P0×3 / 卡片 kind 根因族 / 竞态 / 门禁族)。
 
-对应报告: pwiki/docs/code-review/2026-11-08-code-review-max.md。
+对应报告: pwiki/docs/code-review/2026-11-08-code-review-max.md(报告文件已清理)。
 """
 
 from __future__ import annotations

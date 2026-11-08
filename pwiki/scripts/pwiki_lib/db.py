@@ -25,6 +25,16 @@ from .util import as_int
 
 SCHEMA_VERSION = "v3"
 
+# F47: 可隐式迁移的老库版本集合 —— SCHEMA 全程 CREATE TABLE IF NOT
+# EXISTS + 附加列默认值, 老库 executescript 后即等效新库, 无数据改写
+# (pwiki 史上只发过 v3 一个版本; 未来 bump SCHEMA_VERSION 且仍是无损
+# 变更时, 把老版本加进本集合, 有损变更则要写真正的迁移步骤)。
+IMPLICIT_SCHEMA_VERSIONS = frozenset({"v3"})
+
+
+class SchemaVersionError(RuntimeError):
+    """开库时 schema_version 不被本版本支持(F47 开库门禁)。"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS db_meta (
   key   TEXT PRIMARY KEY,
@@ -228,10 +238,36 @@ class WikiDB:
         # 两行自相矛盾, 并发 writer 在 finish 的多语句事务下提前
         # 'database is locked'
         self.conn.execute("PRAGMA busy_timeout=10000")
+        # 嵌套事务深度(0=无事务): 见 begin() 的嵌套感知说明
+        self._txn_depth = 0
         self.conn.executescript(SCHEMA)
         if need_init:
             self.meta_set("schema_version", SCHEMA_VERSION)
             self.meta_set("generator_version", config.VERSION)
+        else:
+            # F47: schema_version 曾是只写簿记(打完戳零人读, 暗示着不存在
+            # 的迁移门)—— 接成真开库校验
+            self._check_schema_version()
+
+    def _check_schema_version(self) -> None:
+        """F47: 已有库的 schema_version 开库门禁。
+
+        相等 → 放行; ∈ 可隐式迁移集合(或无戳 —— db_meta 引入前的老库)
+        → 放行并把戳/生成器版本带到当前(隐式迁移已由 executescript 完成);
+        未来/未知版本(本工具更老, 库由更新版本写过)→ 明确报错, 不静默
+        误读别代 schema。"""
+        stamp = self.meta_get("schema_version")
+        if stamp == SCHEMA_VERSION:
+            return
+        if not stamp or stamp in IMPLICIT_SCHEMA_VERSIONS:
+            self.meta_set("schema_version", SCHEMA_VERSION)
+            self.meta_set("generator_version", config.VERSION)
+            return
+        raise SchemaVersionError(
+            f"{self.path} 的 schema_version={stamp!r} 不被本版本支持"
+            f"(当前 {SCHEMA_VERSION}, 可隐式迁移: "
+            f"{'/'.join(sorted(IMPLICIT_SCHEMA_VERSIONS))}) — "
+            "该库可能由更新版本的 pwiki 写入, 请用对应版本打开")
 
     def close(self) -> None:
         try:
@@ -240,14 +276,32 @@ class WikiDB:
             pass
 
     # -- 显式事务助手 -------------------------------------------------------
+    # 嵌套感知(F36): 外层 BEGIN IMMEDIATE, 内层 SAVEPOINT —— publish_run
+    # 把 kept/completed 重发布 + 下架 + 模块同步包进单事务, 其间调用的
+    # unpublish_pages/publish_modules 等自身也管事务(它们独立调用时行为
+    # 不变)。嵌套 rollback 一律整笔回滚并清零深度: 既有调用点 rollback 后
+    # 必然向上抛, 外层 except 再 rollback 是幂等 no-op。
     def begin(self) -> None:
-        self.conn.execute("BEGIN IMMEDIATE")
+        self._txn_depth += 1
+        if self._txn_depth == 1:
+            self.conn.execute("BEGIN IMMEDIATE")
+        else:
+            self.conn.execute(f"SAVEPOINT pwiki_sp{self._txn_depth}")
 
     def commit(self) -> None:
-        if self.conn.in_transaction:
-            self.conn.execute("COMMIT")
+        if not self.conn.in_transaction:
+            # 事务已不在(底层错误自动回滚/裸 ROLLBACK)—— 深度随之清零
+            self._txn_depth = 0
+            return
+        if self._txn_depth > 1:
+            self.conn.execute(f"RELEASE SAVEPOINT pwiki_sp{self._txn_depth}")
+            self._txn_depth -= 1
+            return
+        self._txn_depth = 0
+        self.conn.execute("COMMIT")
 
     def rollback(self) -> None:
+        self._txn_depth = 0
         if self.conn.in_transaction:
             self.conn.execute("ROLLBACK")
 
