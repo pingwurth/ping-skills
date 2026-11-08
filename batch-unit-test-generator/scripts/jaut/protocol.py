@@ -3,6 +3,16 @@
 协议块是脚本与调用方(LLM/编排器)之间的唯一契约, Schema 以
 protocol/next-step.schema.json 为准。运行期不依赖第三方 jsonschema,
 仅在 emit 前做轻量结构自检(必填键 + 枚举值), 不符记 warning 不阻断。
+
+本模块存在三个近同副本(skill 需自包含安装, 无法共享文件):
+  java-unit-test-generator/scripts/jaut/protocol.py
+  batch-unit-test-generator/scripts/jaut/protocol.py   (与 java 副本字节相同,
+      由两侧 tests/test_protocol_parity.py 锁定)
+  code-review-p/scripts/crp/protocol.py                (枚举已分化: 增 do_work,
+      无 write_code)
+修改任一副本的 emit/self_check/结构约定时必须同步另外两处 —— 只改一处,
+另两个 skill 的发射器会带着半套契约继续运行, 滞后的 self_check 是唯一
+能发现的地方(P3-5 序列化修复曾三处各付一次)。
 """
 
 from __future__ import annotations

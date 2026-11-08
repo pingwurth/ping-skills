@@ -753,21 +753,26 @@ def test_fast_single_cov_script_includes_inner_classes():
 
 
 def test_fast_single_cov_script_has_no_dead_code():
-    """死变量 JSON_FILE 已删, trap 清理已就位(L3)。
+    """死变量 JSON_FILE 已删, trap 清理已就位(L3); surefire 退出码分类(F18)。
 
-    契约随根修更新: 不再断言 set -euo pipefail —— batch 侧"失败即退出"
+    契约随根修更新两次: ①不再断言 set -euo pipefail —— batch 侧"失败即退出"
     语义曾把常规测试断言失败变成 ask_user 死路, 连败自动跳过在 batch 侧
     结构性不可达; 已改为与 java 副本同语义(surefire 失败不退出, 照常出
-    报告, tests 由 surefire 报告判定), 见 set -uo pipefail + 脚本头注释。"""
+    报告, tests 由 surefire 报告判定)。②MVN_RC 重新引入但语义收窄: 仅对
+    "rc!=0 且 exec 未生成 且 日志无 Tests run:"(mvn 层失败, 测试从未跑)
+    退出并输出锚点文案"mvn surefire:test 执行失败"供 Python 侧 prose-grep
+    判不可降级; 测试已跑的失败仍交由 exec 检查 + surefire 报告判定。"""
     content = _fast_single_cov_script_path().read_text(encoding="utf-8")
     assert "JSON_FILE" not in content
     assert "trap cleanup EXIT" in content
     assert 'MVN_LOG=""' in content
     assert "set -uo pipefail" in content
     assert "set -euo pipefail" not in content
-    # surefire 阶段不再检查退出码(编译仍在 [1/4] 检查)
     assert "mvn surefire:test" in content
-    assert "MVN_RC" not in content
+    # surefire 退出码分类(F18): mvn 层失败锚点文案 + 与"测试已跑"的区分
+    assert "MVN_RC=$?" in content
+    assert "mvn surefire:test 执行失败" in content
+    assert 'grep -q "Tests run:"' in content
 
 
 # --------------------------------------------------------------------------- #
@@ -952,9 +957,33 @@ def test_is_fallbackable_unknown_prose_is_fallbackable(tmp_path):
     契约随脚本根修更新: fast-single-cov.sh 对 surefire 断言失败不再
     退出(与 java 副本同语义, tests 由 surefire 报告判定), 脚本不再输出
     该文案, 'mvn 执行失败' prose-grep 模式随之移除 —— 命中不了任何已知
-    不可降级模式的失败(如 exec 未生成/工具缺失)应获得降级机会。"""
+    不可降级模式的失败(如 exec 未生成/工具缺失)应获得降级机会。
+    (F18 后新锚点是完整的"mvn surefire:test 执行失败", 旧短文案仍不匹配,
+    保持可降级不受影响。)"""
     log = tmp_path / "mvn.log"
     log.write_text("some output\n❌ mvn 执行失败(退出码 1)。\n")
+    assert maven._is_fallbackable_failure(str(log)) is True
+
+
+def test_is_fallbackable_mvn_level_failure_line(tmp_path):
+    """mvn 层失败锚点文案(F18: 脚本对 rc!=0 且 exec 未生成且测试从未跑的
+    输出, 如插件/提供程序解析失败) -> 不可降级, 避免注定同样失败的全 mvn
+    回退吃掉双倍挂钟时间。"""
+    log = tmp_path / "mvn.log"
+    log.write_text(
+        "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.2.5:test"
+        " (default-cli) on project demo: plugin resolution failure\n"
+        "❌ mvn surefire:test 执行失败(退出码 1): mvn 层失败(插件/提供程序解析等), 测试从未运行\n")
+    assert maven._is_fallbackable_failure(str(log)) is False
+
+
+def test_is_fallbackable_assertion_failure_tests_already_ran(tmp_path):
+    """测试已跑且断言失败(无 mvn 层失败锚点, exec 未生成的 argLine 写死类)
+    -> 可降级(降级方案 jacoco-maven-plugin 自行注入 agent, 正是此类的解药)。"""
+    log = tmp_path / "mvn.log"
+    log.write_text(
+        "[ERROR] Tests run: 3, Failures: 1, Errors: 0, Skipped: 0\n"
+        "[ERROR]   FooTest.testBar:24 expected: <1> but was: <2>\n")
     assert maven._is_fallbackable_failure(str(log)) is True
 
 

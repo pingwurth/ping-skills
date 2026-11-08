@@ -15,10 +15,13 @@ from jaut.testcollect import (
     TEST_SUFFIXES,
     collect_test_classes_with_stub,
     ensure_stub_test_class,
+    existing_test_class_simple,
     find_test_classes,
     has_existing_test,
     remove_stub_files,
 )
+from jaut import testcollect as _testcollect
+# 注意: test_file_for 名以 test_ 开头, 直接 import 会被 pytest 误收集为测试
 
 
 def _logger() -> logging.Logger:
@@ -117,3 +120,75 @@ def test_remove_stub_files(tmp_path):
         tmp_path, ".", "com.foo.Roll", _logger())
     remove_stub_files([stub], _logger(), reason="回滚")
     assert not stub.exists()
+
+
+# --------------------------------------------------------------------------- #
+# c061 双副本 parity(F01): 类级 state 采用实际存在的测试类, 而非硬编码 {S}Test
+# --------------------------------------------------------------------------- #
+# 历史缺陷: e7dff8b 的五变体采用只落在 java 副本; batch make_plan 仍硬编码
+# {S}Test, 用户既有 FooTests 时子代理被指向不存在的 FooTest.java —— 误建
+# 重复测试类、-Dtest 跑错类、真实套件覆盖率从不被测量(方法误判 pending)。
+def test_existing_test_class_simple_prefers_primary(tmp_path):
+    """UserServiceTests 存在(无 UserServiceTest) -> 采用它; 主变体优先。"""
+    fqcn = "com.foo.UserService"
+    _write_test(tmp_path, ".", fqcn, "UserServiceTests")
+    assert existing_test_class_simple(tmp_path, ".", fqcn) == "UserServiceTests"
+    _write_test(tmp_path, ".", fqcn, "UserServiceTest")
+    assert existing_test_class_simple(tmp_path, ".", fqcn) == "UserServiceTest"
+    assert existing_test_class_simple(tmp_path, ".", "com.foo.Order") is None
+
+
+def test_test_file_for_layout_matches_decisions(tmp_path):
+    """采用的测试类文件路径与 decisions.test_class_relpath 同布局。"""
+    from jaut import decisions
+
+    p = _testcollect.test_file_for(tmp_path, "m1", "com.foo.UserService", "UserServiceIT")
+    assert p == tmp_path / "m1" / "src" / "test" / "java" / "com" / "foo" \
+        / "UserServiceIT.java"
+    # 默认 {S}Test 命名时与 decisions 推导一致
+    default = tmp_path / "m1" / decisions.test_class_relpath("com.foo.UserService")
+    assert _testcollect.test_file_for(
+        tmp_path, "m1", "com.foo.UserService", "UserServiceTest") == default
+
+
+def test_ensure_test_file_exists_adopts_existing_variant(tmp_path):
+    """init_coverage 探测: 既有 UserServiceTests 时不建桩、返回该文件。"""
+    from init_coverage import _ensure_test_file_exists
+
+    fqcn = "com.foo.UserService"
+    _write_test(tmp_path, ".", fqcn, "UserServiceTests")
+    created, test_file = _ensure_test_file_exists(
+        tmp_path, ".", fqcn, _logger())
+    assert created is False
+    assert test_file == tmp_path / "src" / "test" / "java" / "com" / "foo" \
+        / "UserServiceTests.java"
+    # 无既有测试类时才建桩(默认 {S}Test 命名)
+    created2, stub = _ensure_test_file_exists(
+        tmp_path, ".", "com.foo.Order", _logger())
+    assert created2 is True
+    assert stub.name == "OrderTest.java"
+
+
+def test_init_plan_adopts_existing_variant(tmp_path):
+    """make_plan._init_plan: state.test_class_* 采用实际存在的测试类。
+
+    batch 侧曾被硬编码 {S}Test: FooTests 用户的类级 workdir 指向不存在
+    的 FooTest.java, 提示词让子代理创建重复测试类。"""
+    from jaut import models
+    from make_plan import _init_plan
+
+    fqcn = "com.foo.UserService"
+    _write_test(tmp_path, ".", fqcn, "UserServiceTests")
+    state = models.State(
+        project_root=str(tmp_path), workdir=str(tmp_path / ".agent" / "w"),
+        threshold=80.0, target_class=fqcn, module=".",
+        jacoco_version="0.8.12", coverage_excludes=[], mvn_log="mvn.log",
+        class_coverage=models.ClassCoverage(rate=0.0, covered=0, missed=3),
+        methods=[models.MethodCoverage(
+            key=models.MethodKey(name="m1", desc=""), covered=0, missed=1,
+            status=models.MethodStatus.PENDING)],
+    )
+    _init_plan(state, _logger())
+    assert state.test_class_simple == "UserServiceTests"
+    assert state.test_class_file.endswith("UserServiceTests.java")
+    assert state.plan["test_class_file"].endswith("UserServiceTests.java")

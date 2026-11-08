@@ -53,6 +53,35 @@ def has_existing_test(project_root: Path, module: str, fqcn: str) -> bool:
     return bool(find_test_classes(project_root, module, fqcn))
 
 
+def existing_test_class_simple(project_root: Path, module: str,
+                               target_class: str) -> str | None:
+    """返回应采用的测试类简单名(命中变体按确定性优先序取首个)。
+
+    c061(双副本 parity, 与 java 副本同口径): 类级 workdir 的 state/提示词
+    以**一个**测试类为中心("只能修改 X"), 探测命中多个变体时取确定性
+    优先序首个({S}Test 优先, 然后 Tests/IT/TestCase, 最后 Test{S});
+    batch_init 的基线 -Dtest 仍走 find_test_classes 全量列表, 两者不冲突。
+
+    无任何已存在测试类时返回 None —— 调用方回落 {S}Test 桩语义
+    (decisions.test_simple_name / test_class_relpath)。
+    """
+    found = find_test_classes(project_root, module, target_class)
+    if not found:
+        return None
+    return found[0].rsplit(".", 1)[-1]
+
+
+def test_file_for(project_root: Path, module: str, target_class: str,
+                  test_simple: str) -> Path:
+    """测试类简单名对应的源文件路径(与 decisions.test_class_relpath 同布局)。"""
+    pkg, _, _ = target_class.rpartition(".")
+    parts = ["src", "test", "java"]
+    if pkg:
+        parts.extend(pkg.split("."))
+    parts.append(f"{test_simple}.java")
+    return _module_dir(project_root, module).joinpath(*parts)
+
+
 def ensure_stub_test_class(project_root: Path, module: str, fqcn: str,
                            logger) -> tuple[bool, Path]:
     """目标类无任何已存在测试类时创建最小桩测试类。

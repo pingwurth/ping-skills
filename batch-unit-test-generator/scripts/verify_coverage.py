@@ -200,7 +200,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             method_round_bonus=state.method_round_bonus,
             global_round_bonus=state.global_round_bonus,
             mvn_log=mvn_log,
-            surefire_report_dir=str(surefire.report_paths(project_root, module)),
+            surefire_report_dir=str(surefire.report_dir(project_root, module)),
             test_simple=test_simple, test_class_file=state.test_class_file)
         decision = decisions.decide_after_verify(ctx)
 

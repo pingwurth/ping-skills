@@ -24,6 +24,7 @@ from typing import Sequence
 from .javasrc import jvm_desc_to_readable
 from .models import ClassCoverage, MethodCoverage, MethodKey, MethodStatus, coverage_rate
 from .logutil import module_logger
+from .xmlutil import tag_endswith  # noqa: E402
 
 # 便于调用方从单一模块取得覆盖率原语
 __all__ = [
@@ -67,8 +68,6 @@ def report_paths(project_root: str | Path, module: str) -> tuple[Path, Path]:
     return jacoco / "jacoco.xml", jacoco / "jacoco.csv"
 
 
-def _tag_endswith(element, suffix: str) -> bool:
-    return str(element.tag).endswith(suffix)
 
 
 def parse_jacoco_xml(xml_path: str | Path,
@@ -86,11 +85,11 @@ def parse_jacoco_xml(xml_path: str | Path,
         return method_cov
 
     for pkg in root.iter():
-        if not _tag_endswith(pkg, "package"):
+        if not tag_endswith(pkg, "package"):
             continue
         pkg_name = pkg.get("name", "").replace("/", ".")
         for cls in pkg:
-            if not _tag_endswith(cls, "class"):
+            if not tag_endswith(cls, "class"):
                 continue
             simple = cls.get("name", "").rsplit("/", 1)[-1]
             full_name = f"{pkg_name}.{simple}" if pkg_name else simple
@@ -100,7 +99,7 @@ def parse_jacoco_xml(xml_path: str | Path,
             fqcn = f"{pkg_name}.{outer}" if pkg_name else outer
             bucket = method_cov.setdefault(fqcn, [])
             for meth in cls:
-                if not _tag_endswith(meth, "method"):
+                if not tag_endswith(meth, "method"):
                     continue
                 method = _parse_method(meth, simple)
                 if method is not None:
@@ -122,7 +121,7 @@ def _parse_method(meth, simple_name: str) -> MethodCoverage | None:
 
     covered = missed = 0
     for counter in meth:
-        if _tag_endswith(counter, "counter") and counter.get("type") == "LINE":
+        if tag_endswith(counter, "counter") and counter.get("type") == "LINE":
             covered = int(counter.get("covered", "0"))
             missed = int(counter.get("missed", "0"))
             break

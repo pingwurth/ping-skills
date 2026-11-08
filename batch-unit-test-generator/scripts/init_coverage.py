@@ -95,6 +95,15 @@ def _ensure_test_file_exists(project_root: Path, module: str, fqcn: str, logger)
         (bool, Path): (是否创建了桩测试文件, 桩测试文件路径)。
     """
     module_dir = project_root if module == "." else project_root / module
+    # c061(双副本 parity): 先按全部命名变体探测用户既有测试类
+    # ({S}Test/{S}Tests/{S}IT/{S}TestCase/Test{S}) —— 只认 {S}Test 时
+    # UserServiceTests 不可见 → 误建空桩 → 真实套件从不被执行
+    from jaut import testcollect
+    existing_simple = testcollect.existing_test_class_simple(
+        project_root, module, fqcn)
+    if existing_simple is not None:
+        return False, testcollect.test_file_for(
+            project_root, module, fqcn, existing_simple)
     test_relpath = decisions.test_class_relpath(fqcn)
     test_file = module_dir / test_relpath
     if test_file.is_file():
@@ -232,7 +241,12 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 logger.warning(f"surefire 目录清理失败, 本轮测试结果可能含陈旧数据: {uncleaned}")
             # 使用 fast-single-cov.sh 获取单类覆盖率(替代 mvn test jacoco:report)
             # init 阶段不传 no_am, 首次需要编译依赖模块
-            test_simple = decisions.test_simple_name(fqcn)
+            # c061: -Dtest 指向实际探测到的既有测试类(变体优先序见 testcollect),
+            # 无既有测试类时回落 {S}Test 桩命名
+            from jaut import testcollect
+            test_simple = (testcollect.existing_test_class_simple(
+                project_root, module, fqcn)
+                or decisions.test_simple_name(fqcn))
             logger.info(f"执行覆盖率采集: module={module}, class={fqcn}, test={test_simple}")
             result, _fast_cov_log = maven.run_single_cov_with_fallback(
                 project_root, module, fqcn, test_simple, mvn_log,

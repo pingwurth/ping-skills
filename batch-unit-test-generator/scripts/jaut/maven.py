@@ -443,11 +443,13 @@ def _tail_file(path: str, *, lines: int = 30) -> str:
 
 
 # fast-single-cov.sh 日志中表示「降级无意义」的关键字
-# (脚本已与 java 副本同语义: surefire:test 测试失败不退出脚本、照常出报告,
-#  由 surefire 报告判定 tests_green —— 故"mvn 执行失败"脚本文案不复存在,
-#  该 prose-grep 模式随之移除, 不再作 bash→Python 控制流信道)
+# (脚本与 java 副本同语义: 测试断言失败不退出脚本、照常出报告, 由 surefire
+#  报告判定 tests_green; 但脚本现捕获 mvn 退出码, 对"rc!=0 且 exec 未生成
+#  且测试从未跑"的 mvn 层失败输出"mvn surefire:test 执行失败(退出码 N)" ——
+#  该 prose-grep 模式是 bash→Python 控制流信道, 改脚本文案必须同步此列表)
 _NON_FALLBACKABLE_PATTERNS = re.compile(
     r"编译失败"                       # mvn test-compile 失败(脚本输出)
+    r"|mvn surefire:test 执行失败"    # mvn 层失败: 插件/提供程序解析等(脚本输出)
     r"|COMPILATION ERROR"            # mvn 编译失败(Maven 原生输出, step4)
     r"|No tests were executed"       # 测试类未找到
     r"|缺少参数"                      # 参数校验失败

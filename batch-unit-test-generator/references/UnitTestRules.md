@@ -156,7 +156,7 @@ void testBar() {
 
 ## 规则 e：测试类不存在时创建（软约束）
 
-测试类路径为 `<模块>/src/test/java/<同包>/<类名>Test.java`；不存在时按下述骨架创建：
+测试类路径**以 `state.json` 的 `test_class_file` 为准**：引擎已按 `<类名>Test / <类名>Tests / <类名>IT / <类名>TestCase / Test<类名>` 全部变体探测并采用实际存在的既有测试类（确定性优先序见 `scripts/jaut/testcollect.py`）；仅当无任何既有测试类时才回落 `<模块>/src/test/java/<同包>/<类名>Test.java`。仅当采用的测试文件不存在时，按下述骨架创建（骨架类名取 `state.test_class_simple`，不一定是 `<类名>Test`）：
 
 ```java
 package com.example.demo;   // 与被测类同包

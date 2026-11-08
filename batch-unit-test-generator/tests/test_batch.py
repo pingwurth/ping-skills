@@ -763,10 +763,10 @@ def test_get_diff_files_auto_merge_base_failure_falls_back_to_two_dot(tmp_path):
         calls.append(list(cmd))
         if cmd[1] == "merge-base":
             return _git_result(False, stderr="fatal: not a valid ref")
-        if cmd[1] == "diff" and "--name-only" in cmd:
-            return _git_result(True, stdout="src/main/java/com/foo/Foo.java\n")
         if cmd[1] == "diff" and "--numstat" in cmd:
-            return _git_result(True, stdout="10\t2\tsrc/main/java/com/foo/Foo.java\n")
+            # F11 根修: 单条 numstat -z 同时供文件清单与增删行数
+            return _git_result(True,
+                               stdout="10\t2\tsrc/main/java/com/foo/Foo.java\0")
         return _git_result(True, stdout="")
 
     with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
@@ -774,8 +774,8 @@ def test_get_diff_files_auto_merge_base_failure_falls_back_to_two_dot(tmp_path):
         files = _get_diff_files(tmp_path, "master", "auto")
 
     assert files == [("src/main/java/com/foo/Foo.java", 10, 2)]
-    name_cmd = next(c for c in calls if "diff" in c and "--name-only" in c)
-    assert name_cmd[-1] == "master..HEAD"
+    numstat_cmd = next(c for c in calls if "diff" in c and "--numstat" in c)
+    assert numstat_cmd[-1] == "master..HEAD"
 
 
 def test_get_diff_files_auto_uses_three_dot_when_merge_base_ok(tmp_path):
@@ -789,16 +789,18 @@ def test_get_diff_files_auto_uses_three_dot_when_merge_base_ok(tmp_path):
         calls.append(list(cmd))
         if cmd[1] == "merge-base":
             return _git_result(True, stdout="abc123\n")
-        if cmd[1] == "diff" and "--name-only" in cmd:
-            return _git_result(True, stdout="src/main/java/com/foo/Foo.java\n")
+        if cmd[1] == "diff" and "--numstat" in cmd:
+            # F11 根修: 单条 numstat -z 同时供文件清单与增删行数
+            return _git_result(True,
+                               stdout="10\t2\tsrc/main/java/com/foo/Foo.java\0")
         return _git_result(True, stdout="")
 
     with patch("jaut.proc.resolve_tool", return_value="/usr/bin/git"), \
          patch("jaut.proc.run_command", side_effect=fake_run):
         _get_diff_files(tmp_path, "master", "auto")
 
-    name_cmd = next(c for c in calls if "diff" in c and "--name-only" in c)
-    assert name_cmd[-1] == "abc123...HEAD"
+    numstat_cmd = next(c for c in calls if "diff" in c and "--numstat" in c)
+    assert numstat_cmd[-1] == "abc123...HEAD"
 
 
 def test_get_diff_files_empty_stdout_returns_empty_list(tmp_path):
@@ -1016,3 +1018,48 @@ def test_batch_init_mvn_failure_rolls_back_stub(tmp_path):
     assert "mvn 执行失败" in ei.value.decision.summary
     stub = (tmp_path / "src" / "test" / "java" / "com" / "foo" / "SoloTest.java")
     assert not stub.exists()
+
+
+# --------------------------------------------------------------------------- #
+# batch_next 委派前置修复(F17): state.json 缺失时主流程先代跑 init_coverage
+# --------------------------------------------------------------------------- #
+def _recheck_entry(tmp_path, fqcn="com.foo.Bar"):
+    """构造一个 state.json 缺失的 recheck 条目。"""
+    from jaut.models import BatchClassEntry
+    workdir = tmp_path / "classes" / "com.foo.Bar"
+    workdir.mkdir(parents=True)
+    return BatchClassEntry(
+        fqcn=fqcn, simple_name="Bar", source_file="", module=".",
+        workdir=str(workdir), baseline_rate=0.0, status="recheck")
+
+
+def test_rebuild_state_prefix_when_state_missing(tmp_path):
+    """state.json 缺失 → 委派文本前置 init_coverage 重建指令(含全部参数)。"""
+    from batch_next import _rebuild_state_prefix
+
+    class _BS:  # 只需 threshold 字段
+        threshold = 80.0
+
+    entry = _recheck_entry(tmp_path)
+    prefix = _rebuild_state_prefix(entry, _BS, tmp_path / "scripts", tmp_path)
+    assert prefix.startswith("⚠")
+    assert "init_coverage.py" in prefix
+    assert f"--workdir {entry.workdir}" in prefix
+    assert "--class com.foo.Bar" in prefix
+    assert "--threshold 80.0" in prefix
+    assert "子代理禁跑 init_coverage" in prefix
+
+
+def test_rebuild_state_prefix_empty_when_state_ok(tmp_path):
+    """state.json 存在且可读 → 空前缀(委派要件不变)。"""
+    import json
+    from batch_next import _rebuild_state_prefix
+
+    class _BS:
+        threshold = 80.0
+
+    entry = _recheck_entry(tmp_path)
+    (tmp_path / "classes" / "com.foo.Bar" / "state.json").write_text(
+        json.dumps({"schema_version": 1, "target_class": "com.foo.Bar"}),
+        encoding="utf-8")
+    assert _rebuild_state_prefix(entry, _BS, tmp_path / "scripts", tmp_path) == ""

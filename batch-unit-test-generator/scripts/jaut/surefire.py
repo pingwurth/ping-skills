@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .logutil import module_logger
 from .models import FailedCase, TestResult
+from .xmlutil import tag_endswith  # noqa: E402
 
 _SUMMARY_RE = re.compile(
     r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+),\s*Skipped:\s*(\d+)")
@@ -23,15 +24,17 @@ _CASE_RE = re.compile(
     r"^(\S+)\(([^()]+)\)\s+Time elapsed:.*?<<<\s*(FAILURE|ERROR)!")
 
 
-def report_paths(project_root: str | Path, module: str) -> Path:
-    """返回模块的 surefire-reports 目录路径(module 为空或 '.' 时用项目根)。"""
+def report_dir(project_root: str | Path, module: str) -> Path:
+    """返回模块的 surefire-reports 目录路径(module 为空或 '.' 时用项目根)。
+
+    注意与 jacoco.report_paths 返回 (xml, csv) 二元组不同, 本函数返回单个
+    目录 —— 曾与之同名(report_paths), 从错误模块导入只会得到形状错误的
+    值(tuple 解包 vs 单路径)而非显眼的导入错误, 故改名以消除陷阱。
+    """
     base = Path(project_root) / module if module and module != "." else Path(project_root)
     return base / "target" / "surefire-reports"
 
 
-def _tag_endswith(element, suffix: str) -> bool:
-    """判断 XML 元素标签是否以指定后缀结尾(忽略命名空间前缀)。"""
-    return str(element.tag).endswith(suffix)
 
 
 def _suite_int_attr(suite, attr: str, fallback: int) -> int:
@@ -48,17 +51,17 @@ def parse_surefire_reports(project_root: str | Path, module: str) -> TestResult:
     目录不存在 / 无报告文件 -> 全零且 report_found=False(调用方按不绿计)。
     """
     result = TestResult()
-    report_dir = report_paths(project_root, module)
-    if not report_dir.is_dir():
+    reports_dir = report_dir(project_root, module)
+    if not reports_dir.is_dir():
         return result
 
-    xml_files = sorted(report_dir.glob("TEST-*.xml"))
+    xml_files = sorted(reports_dir.glob("TEST-*.xml"))
     if xml_files:
         result.report_found = True
         for xf in xml_files:
             _parse_xml_report(xf, result)
     else:
-        txt_files = sorted(report_dir.glob("*.txt"))
+        txt_files = sorted(reports_dir.glob("*.txt"))
         if not txt_files:
             return result
         result.report_found = True
@@ -102,15 +105,15 @@ def _parse_xml_report(xf: Path, result: TestResult) -> None:
         module_logger().warning(f"Surefire XML 无法解析, 按失败计: {xf}")
         return
 
-    suites = ([root] if _tag_endswith(root, "testsuite")
-              else [el for el in root.iter() if _tag_endswith(el, "testsuite")])
+    suites = ([root] if tag_endswith(root, "testsuite")
+              else [el for el in root.iter() if tag_endswith(el, "testsuite")])
     for suite in suites:
-        cases = [el for el in suite.iter() if _tag_endswith(el, "testcase")]
+        cases = [el for el in suite.iter() if tag_endswith(el, "testcase")]
         for case in cases:
             _collect_failed_case(case, result)
 
         def _has(case, suffix: str) -> bool:
-            return any(_tag_endswith(ch, suffix) for ch in case)
+            return any(tag_endswith(ch, suffix) for ch in case)
 
         result.tests += _suite_int_attr(suite, "tests", len(cases))
         result.failures += _suite_int_attr(suite, "failures", sum(1 for c in cases if _has(c, "failure")))
@@ -121,7 +124,7 @@ def _parse_xml_report(xf: Path, result: TestResult) -> None:
 def _collect_failed_case(case, result: TestResult) -> None:
     """每个 testcase 至多计一次失败(取首个 failure/error 子元素)。"""
     for child in case:
-        if _tag_endswith(child, ("failure", "error")):
+        if tag_endswith(child, ("failure", "error")):
             result.failed_cases.append(FailedCase(
                 class_name=case.get("classname", ""),
                 method=case.get("name", ""),

@@ -141,8 +141,10 @@ echo "🏃 [2/4] 运行测试并收集数据..."
 ARG_LINE="-javaagent:$JACOCO_AGENT=destfile=$EXEC_FILE,includes=$TARGET_CLASS:${TARGET_CLASS}\$*"
 
 # 先写临时文件(避免管道缓冲问题), 完成后再输出到 stdout 供 Python run_command 捕获
-# (编译已在 [1/4] 完成并校验; 此处不再检查 mvn 退出码 —— 断言失败属正常轮次结果,
-#  由下方 exec 检查 + Python 侧 surefire 报告判定)
+# (断言失败属正常轮次结果, 由下方 exec 检查 + Python 侧 surefire 报告判定;
+#  但 mvn 退出码必须捕获: mvn 层失败(插件/提供程序解析等)根本没跑到测试,
+#  exec 也不会生成 —— 此类失败曾落入误导性"argLine 写死"分支, 并在 Python
+#  侧触发注定同样失败的全 mvn 回退(双倍挂钟时间 + 错误诊断))
 MVN_LOG=$(mktemp)
 mvn surefire:test \
   -pl "$MODULE_DIR" \
@@ -150,9 +152,21 @@ mvn surefire:test \
   -DargLine="$ARG_LINE" \
   -DforkCount=1 \
   --batch-mode > "$MVN_LOG" 2>&1
+MVN_RC=$?
 
 # 将 Maven 完整输出送到 stdout, 确保 Python 侧 log_file 能捕获
 cat "$MVN_LOG"
+
+# mvn 层失败(非测试断言): rc!=0 且 exec 未生成且日志无 "Tests run:"(测试从未跑)。
+# 反向情形: rc!=0 但测试已跑("Tests run:" 在) → 多为 argLine 写死/System.exit 类,
+# 交由下方 exec 检查给出针对性指引并触发有意义的降级
+if [ "$MVN_RC" -ne 0 ] && [ ! -f "$EXEC_FILE" ] && ! grep -q "Tests run:" "$MVN_LOG"; then
+    echo "❌ mvn surefire:test 执行失败(退出码 $MVN_RC): mvn 层失败(插件/提供程序解析等), 测试从未运行"
+    echo "---------------- Maven 日志最后 20 行 ----------------"
+    tail -n 20 "$MVN_LOG"
+    rm -f "$MVN_LOG"
+    exit 1
+fi
 
 # 检查是否提示 "No tests were executed"
 if grep -q "No tests were executed" "$MVN_LOG"; then

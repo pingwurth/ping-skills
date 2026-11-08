@@ -280,11 +280,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 if class_state is None:
                     # c010: 类 state.json 缺失/不可读是环境错误, 不是覆盖率判
                     # 决 —— 旧路径把它静默转成 unmet 终态(不可复活)并编造
-                    # "无可补测方法"理由。改走 recheck 重入队: batch_next 重新
-                    # 委派, make_plan 在类 workdir 重建 state.json 后自愈。
+                    # "无可补测方法"理由。改走 recheck 重入队; F17 后自愈路径
+                    # 真实存在: batch_next 检出 state.json 缺失时, 会要求主流程
+                    # 先代跑 init_coverage.py 重建基线再委派(子代理从 make_plan
+                    # 开始, 对缺失 state.json 直接 exit 3 且禁跑 init_coverage)。
                     entry.status = "recheck"
                     entry.final_rate = final_rate
-                    entry.skip_reason = "state.json 不可读, 重入队重建"
+                    entry.skip_reason = "state.json 不可读, 重入队由主流程重建基线"
                     logger.warning(
                         f"类 {entry.fqcn} 的 state.json 缺失或不可读"
                         f"({entry.workdir}), 重入队重建: {reason}")

@@ -265,39 +265,45 @@ def _get_diff_files(project_root: Path, target: str | None,
         # 失败(auto 且 mb_ok 为 False), 回退两点对比
         diff_ref = f"{target}..HEAD"
 
-    # 获取变更文件名
-    name_cmd = [git, "diff", "--name-only", "--diff-filter=ACMR", diff_ref]
-    name_result = run_command(name_cmd, cwd=cwd, capture=True,
-                              timeout=config.GIT_COMMAND_TIMEOUT_SECONDS)
-    if not name_result.ok:
-        raise StepError.exec_error(
-            f"git diff 失败(基准 {diff_ref}){_stderr_tail(name_result)}",
-            question=f"请检查目标分支 {target} 是否存在、以及 git 仓库状态")
-    if not name_result.stdout:
-        return []  # 真正的差异为空
-
-    files = [f.strip() for f in name_result.stdout.splitlines() if f.strip()]
-
-    # 获取每个文件的增删行数
-    numstat_cmd = [git, "diff", "--numstat", diff_ref]
+    # 一条 numstat -z 同时取文件清单与增删行数(P12 同款根修, 对齐 crp/scope.py)
+    # -z 输出 NUL 分隔的**原始**字段 —— 重命名行为 `ins<TAB>del<TAB>`(第三列空)
+    # 后随 `\0old\0new` 两个真实路径; 普通行为 `ins<TAB>del<TAB>path\0`。
+    # 旧解析以 --name-only 联结 numstat 第三列, 两种静默丢失:
+    #   (a) 重命名花括号形式 src/{old => new}.java 与 name-only 的
+    #       src/New.java 永不匹配 → +0/-0, 大类丢失 [大类] 标签与双倍探索预算;
+    #   (b) 非 ASCII 路径(quotePath 默认开)以 C 引用形到达, 下游
+    #       filepath.replace("\\", "/") 二次损坏转义 → 路径不存在,
+    #       _is_interface_or_enum/_count_methods 静默归零
+    numstat_cmd = [git, "diff", "--numstat", "-z", "--diff-filter=ACMR", diff_ref]
     stat_result = run_command(numstat_cmd, cwd=cwd, capture=True,
                               timeout=config.GIT_COMMAND_TIMEOUT_SECONDS)
-    stats: dict[str, tuple[int, int]] = {}
-    if stat_result.ok and stat_result.stdout:
-        for line in stat_result.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 3:
-                try:
-                    add = int(parts[0]) if parts[0] != "-" else 0
-                    dele = int(parts[1]) if parts[1] != "-" else 0
-                    stats[parts[2]] = (add, dele)
-                except ValueError:
-                    pass
+    if not stat_result.ok:
+        raise StepError.exec_error(
+            f"git diff 失败(基准 {diff_ref}){_stderr_tail(stat_result)}",
+            question=f"请检查目标分支 {target} 是否存在、以及 git 仓库状态")
+    if not stat_result.stdout:
+        return []  # 真正的差异为空
 
     result: list[tuple[str, int, int]] = []
-    for f in files:
-        add, dele = stats.get(f, (0, 0))
-        result.append((f, add, dele))
+    parts = stat_result.stdout.split("\0")
+    i = 0
+    while i < len(parts):
+        seg = parts[i]
+        i += 1
+        if not seg:
+            continue
+        cols = seg.split("\t", 2)
+        if len(cols) < 3:
+            continue
+        a, d, path = cols
+        if path == "" and i + 1 < len(parts):
+            # 重命名: 空槽后随 old/new 两个 NUL 字段, 取新路径为候选
+            path = parts[i + 1]
+            i += 2
+        # 二进制行 ins/del 为 '-'
+        add = int(a) if a.isdigit() else 0
+        dele = int(d) if d.isdigit() else 0
+        result.append((path, add, dele))
     return result
 
 

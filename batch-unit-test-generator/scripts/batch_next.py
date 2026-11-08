@@ -117,6 +117,10 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         remaining_budget = class_budget - entry.rounds_used
         scripts_dir = Path(__file__).resolve().parent
 
+        # F17: state.json 缺失时由主流程先代跑 init_coverage 重建基线再委派
+        rebuild_prefix = _rebuild_state_prefix(
+            entry, batch_state, scripts_dir, project_root)
+
         # 提示信号取实际驱动预算的 exploration_mode(大类判定可为方法数或 diff 行数,
         # 与方法组拆分条件并不等价)
         exploration_hint = "(探索模式预算翻倍)" if exploring else ""
@@ -140,6 +144,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             group_info = ""
 
         delegation = (
+            f"{rebuild_prefix}"
             f"子代理委派要件(batch-class-writer):\n"
             f"  - worktree(项目根): {project_root}\n"
             f"  - 目标类 FQCN: {entry.fqcn}\n"
@@ -165,6 +170,36 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             route=Route.ASK_USER, reason="委派子代理执行类内迭代",
             question=delegation)
         return decision, EmitContext(workdir=batch_workdir)
+
+
+def _rebuild_state_prefix(entry: BatchClassEntry, batch_state,
+                          scripts_dir: Path, project_root: Path) -> str:
+    """F17: 类 state.json 缺失/不可读(崩溃截断等)时返回委派前置修复指令。
+
+    委派必败的根因: 子代理从 make_plan 开始, 而 make_plan 对缺失
+    state.json 直接 exit 3, 且子代理被禁止运行 init_coverage
+    (agents/batch-class-writer.md 命令白名单)。由主流程在委派前代跑
+    init_coverage 重建基线, 让 batch_finish 的"重入队自愈"承诺真实成立
+    (此前自愈路径不存在, 只会空转一整轮委派后 failed)。
+
+    state.json 正常可读时返回空串(委派要件不变)。
+    """
+    if StateStore(Path(entry.workdir)).load() is not None:
+        return ""
+    rebuild_cmd = (
+        f"python {shlex.quote(str(scripts_dir / 'init_coverage.py'))}"
+        f" --project-root {shlex.quote(str(project_root))}"
+        f" --class {shlex.quote(entry.fqcn)}"
+        f" --threshold {batch_state.threshold}"
+        f" --workdir {shlex.quote(entry.workdir)}"
+    )
+    return (
+        f"⚠ 该类 state.json 缺失或不可读(终验重入队), 子代理无法自建基线"
+        f"(make_plan 会 exit 3, 子代理禁跑 init_coverage)。\n"
+        f"请先由主流程代跑基线重建:\n"
+        f"  {rebuild_cmd}\n"
+        f"成功后再按下述要件委派子代理; 失败则按其 NEXT_STEP 协议处置。\n\n"
+    )
 
 
 def _effective_class_budget(entry: BatchClassEntry) -> tuple[int, bool]:

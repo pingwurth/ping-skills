@@ -12,6 +12,8 @@ import contextlib
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -58,6 +60,26 @@ def _lock_held(lock_path: Path) -> bool:
         return False
     finally:
         fp.close()
+
+
+# 本线程已持有的状态锁(重入守卫, crp 副本 P8/P11/c014 同款; 线程作用域 ——
+# 进程级集合会把"进程内某处持锁"误当"本线程持锁", 嵌入式多线程宿主下
+# 静默失去互斥)。键用锁文件 inode(路径拼写不影互斥), 取不到时回退绝对路径。
+_HELD = threading.local()
+
+
+def _held_keys() -> set:
+    if not hasattr(_HELD, "keys"):
+        _HELD.keys = set()
+    return _HELD.keys
+
+
+def _lock_key(lock_path: Path):
+    try:
+        st = lock_path.stat()
+        return ("ino", st.st_dev, st.st_ino)
+    except OSError:
+        return ("path", str(lock_path.resolve()))
 
 
 def default_workdir(project_root: str | Path) -> Path:
@@ -159,37 +181,57 @@ class StateStore:
         (旧 inode 上阻塞的等待方与新 inode 上立即获锁的后来者会同时"持锁"),
         会破坏互斥; 常驻锁空闲属正常设计, 仅当超 24 小时未刷新且仍被进程
         持有时提示疑似挂起(获锁时刷新 mtime)。
+
+        重入守卫(crp 副本 P8 同款): 同线程在已持锁的 locked() 块内再进
+        locked() 时复用外层锁(no-op), 否则内层对自身 flock 永久阻塞挂死
+        整个 skill 运行(无错误/超时/日志)。
         """
         lock_path = self.path.with_name(config.STATE_FILENAME + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fp = open(lock_path, "a", encoding="utf-8")
+        # 键在 open 之后取: open 前锁文件可能不存在(回退 path 键)而嵌套调用
+        # 时已存在(ino 键)—— 两层键形不一致会让重入守卫漏判
+        key = _lock_key(lock_path)
+        keys = _held_keys()
+        if key in keys:
+            fp.close()  # 未获锁, 只释放 fd(外层已持有)
+            yield
+            return
 
         # 陈旧锁提示: 常驻锁文件空闲(mtime 变旧)属正常设计, 不告警; 仅当超过
         # 24 小时未刷新且仍被进程持有时提示疑似挂起(删除锁文件无法释放 flock,
         # 且会重新引入 inode 竞态, 消息中不再建议手动删除)。
         if lock_path.exists():
             try:
-                import time
                 lock_age = time.time() - lock_path.stat().st_mtime
                 if lock_age > 24 * 3600 and _lock_held(lock_path):  # 24 小时
                     module_logger().warning(
                         f"锁文件 {lock_path} 超过 24 小时未刷新且仍被进程持有 "
                         f"(疑似挂起进程); 锁会在持锁进程退出后自动释放, 本进程将等待获锁"
                     )
-            except (OSError, ImportError):
-                pass
-
-        fp = open(lock_path, "a", encoding="utf-8")
-        try:
-            _lock_file(fp)
-            # 获锁后刷新 mtime: 陈旧提示以"最近一次获锁时间"为准
-            try:
-                os.utime(lock_path)
             except OSError:
                 pass
-            yield
+
+        try:
+            _lock_file(fp)
+            keys.add(key)
+            try:
+                # discard 覆盖 add 之后的整段(含 utime 的 BaseException 窗口)
+                # —— 键残留后本线程永假持锁(crp 副本 c018 同款)
+                try:
+                    os.utime(lock_path)  # 获锁后刷新 mtime: 陈旧提示以此为准
+                except OSError:
+                    pass
+                yield
+            finally:
+                keys.discard(key)
         finally:
             try:
                 _unlock_file(fp)
+            except OSError as exc:
+                # _lock_file 抛出时 fd 从未上锁, Windows 的 LK_UNLCK 对未锁区
+                # 自身抛错并覆盖原始异常(POSIX 为 no-op)—— 记日志不 raise
+                module_logger().warning(f"解锁失败(fd 可能从未上锁, POSIX 为 no-op): {exc}")
             finally:
                 fp.close()
                 # 不 unlink: unlock 后删除与后来者 open 新 inode 存在竞态, 会破坏互斥

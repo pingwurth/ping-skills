@@ -314,10 +314,19 @@ def _init_plan(state: State, logger) -> list[MethodCoverage]:
     """
     project_root = Path(state.project_root)
     module = state.module or "."
-    module_dir = project_root if module == "." else project_root / module
-    test_file = module_dir / decisions.test_class_relpath(state.target_class)
+    # c061(双副本 parity): 用户既有测试类可能是 {S}Tests/{S}IT/{S}TestCase/
+    # Test{S} —— 采用实际存在的(确定性优先序), 无则回落 {S}Test 桩命名;
+    # state.test_class_* 驱动后续 -Dtest 与"只能修改 X"提示词。
+    # 硬编码 {S}Test 时 FooTests 用户会被指向不存在的 FooTest.java,
+    # 子代理误建重复测试类、-Dtest 跑错类、真实套件覆盖率从不被测量
+    from jaut import testcollect
+    test_simple = (testcollect.existing_test_class_simple(
+        project_root, module, state.target_class)
+        or decisions.test_simple_name(state.target_class))
+    test_file = testcollect.test_file_for(
+        project_root, module, state.target_class, test_simple)
     state.test_class_file = str(test_file)
-    state.test_class_simple = decisions.test_simple_name(state.target_class)
+    state.test_class_simple = test_simple
 
     failing = decisions.sort_failing(state.methods)
     state.plan = {
