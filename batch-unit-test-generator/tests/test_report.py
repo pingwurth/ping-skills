@@ -158,5 +158,13 @@ def test_render_class_complete_report_uses_model_budget():
 
 
 def test_report_module_does_not_import_decisions():
-    """渲染层不得反向依赖决策层(report -> decisions 会与 decisions -> report 成环)。"""
-    assert not hasattr(report, "decisions")
+    """渲染层不得反向依赖决策层(report -> decisions 会与 decisions -> report 成环)。
+
+    c037: hasattr 只能拦 `import jaut.decisions as decisions` 形式, 常见的
+    `from jaut.decisions import X` 不创建 report.decisions 属性 —— 恰好让
+    该测试声称不可能的环绿灯通过。改为源码级检查, 两种 import 形式都拦。
+    """
+    import inspect
+    src = inspect.getsource(report)
+    assert "from jaut.decisions" not in src and "from .decisions" not in src
+    assert "import jaut.decisions" not in src and "from . import decisions" not in src

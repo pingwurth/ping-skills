@@ -7,8 +7,8 @@
 
 升级策略(按优先级, 命中即返回):
     覆盖率达标且测试全绿 -> done
-    单方法轮次 >= METHOD_ROUND_BUDGET + method_round_bonus -> 自动跳过当前方法
-    全局轮次   >= GLOBAL_ROUND_BUDGET + global_round_bonus  -> 自动跳过全部 pending
+    单方法轮次 >= method_round_budget() + method_round_bonus -> 自动跳过当前方法
+    全局轮次   >= global_round_budget() + global_round_bonus  -> 自动跳过全部 pending
     连续 TEST_FAIL_STREAK_ROUNDS(3) 轮测试失败 -> 自动跳过当前方法
     连续 NO_IMPROVEMENT_ROUNDS(3) 轮覆盖率无提升 -> 自动跳过当前方法
     测试不绿 -> 回 build_prompt 修复
@@ -184,7 +184,7 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
             route=Route.MAKE_PLAN, reason="取下一个未达标方法",
             artifacts=artifacts, metrics=metrics, mark_done=True)
     # 2) 单方法预算耗尽(含此前追加的窗口) -> 自动跳过当前方法
-    method_budget = config.METHOD_ROUND_BUDGET + ctx.method_round_bonus
+    method_budget = config.method_round_budget() + ctx.method_round_bonus
     if ctx.iteration >= method_budget:
         return _auto_skip(
             metrics, artifacts, label="预算耗尽",
@@ -192,7 +192,7 @@ def decide_after_verify(ctx: VerifyContext) -> Decision:
             summary=(f"方法 {ctx.label} 已达单方法迭代上限 {method_budget} 轮"
                      f"(当前 {after_rate:.1f}%, {_test_status(ctx)}), 自动跳过"))
     # 3) 全局预算耗尽(含此前追加的窗口) -> 自动跳过全部未达标方法
-    global_budget = config.GLOBAL_ROUND_BUDGET + ctx.global_round_bonus
+    global_budget = config.global_round_budget() + ctx.global_round_bonus
     if ctx.global_iteration >= global_budget:
         return _auto_skip(
             metrics, artifacts, skip_all=True, label="全局预算耗尽",

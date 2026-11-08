@@ -186,6 +186,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             class_state = class_states[entry.fqcn]
             class_excludes = (class_state.coverage_excludes
                               if class_state is not None else [])
+            # c078: 终验门槛以类 state 为准 —— make_plan --set-threshold 是
+            # 文档记录的批量恢复命令(delegation.md), 用户按它调低/调高后,
+            # 迭代期(verify_coverage/_reclassify)都按类阈值判定, 终验若仍按
+            # batch_state.threshold 会静默推翻用户决策(调低→误判 unmet 终态,
+            # 调高→误判 done)。类 state 不可读时回落批量阈值(与旧口径一致)。
+            class_threshold = (class_state.threshold
+                               if class_state is not None else batch_state.threshold)
             class_cov = jacoco.aggregate_class_coverage(
                 project_root, modules, entry.fqcn,
                 parsed_xml=parsed_all, excludes=class_excludes)
@@ -213,7 +220,7 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
             # TestResult.is_green 同口径: 报告缺失/无法解析/目录清理失败任一命中
             env_uncertain = ((not test.report_found) or bool(uncleaned)
                              or test.parse_errors > 0)
-            own_ok = (final_rate >= batch_state.threshold and not env_uncertain
+            own_ok = (final_rate >= class_threshold and not env_uncertain
                       and (tests_green or not own_failures))
 
             class_workdir = Path(entry.workdir)
@@ -249,13 +256,16 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                     elif not env_uncertain:
                         for m in class_state.methods:
                             if (m.status == MethodStatus.DONE and not m.is_abstract
-                                    and m.rate < batch_state.threshold):
+                                    and m.rate < class_threshold):
                                 m.status = MethodStatus.PENDING
                                 m.reset_trajectory()
 
                 reason_parts = []
-                if final_rate < batch_state.threshold:
-                    reason_parts.append(f"覆盖率 {final_rate:.1f}% < {batch_state.threshold}%")
+                if final_rate < class_threshold:
+                    threshold_note = (f"覆盖率 {final_rate:.1f}% < {class_threshold}%"
+                                      + ("(类级阈值)" if class_threshold != batch_state.threshold
+                                         else ""))
+                    reason_parts.append(threshold_note)
                 if env_uncertain:
                     reason_parts.append("测试结果不可信(surefire 报告缺失/无法解析或目录清理失败)")
                 elif not tests_green:
@@ -267,7 +277,19 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
                 has_pending = (class_state is not None
                                and any(m.status == MethodStatus.PENDING
                                        for m in class_state.methods))
-                if has_pending:
+                if class_state is None:
+                    # c010: 类 state.json 缺失/不可读是环境错误, 不是覆盖率判
+                    # 决 —— 旧路径把它静默转成 unmet 终态(不可复活)并编造
+                    # "无可补测方法"理由。改走 recheck 重入队: batch_next 重新
+                    # 委派, make_plan 在类 workdir 重建 state.json 后自愈。
+                    entry.status = "recheck"
+                    entry.final_rate = final_rate
+                    entry.skip_reason = "state.json 不可读, 重入队重建"
+                    logger.warning(
+                        f"类 {entry.fqcn} 的 state.json 缺失或不可读"
+                        f"({entry.workdir}), 重入队重建: {reason}")
+                    recheck_list.append(entry.fqcn)
+                elif has_pending:
                     # 仍有可补测方法 → 重入队重验
                     entry.status = "recheck"
                     entry.final_rate = final_rate

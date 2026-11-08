@@ -87,13 +87,13 @@ def test_verify_coverage_below_threshold_routes_build_prompt():
 def test_verify_method_budget_exhausted_auto_skips():
     """单方法预算耗尽不再 ask_user, 改为自动跳过当前方法。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
-                      iteration=config.METHOD_ROUND_BUDGET)
+                      iteration=config.method_round_budget())
     d = decisions.decide_after_verify(ctx)
     assert d.route == Route.MAKE_PLAN
     assert d.exit_code == config.EXIT_CONTINUE
     assert d.auto_skip_method is True
     assert d.skip_all_pending is False
-    assert str(config.METHOD_ROUND_BUDGET) in d.auto_skip_reason
+    assert str(config.method_round_budget()) in d.auto_skip_reason
     assert d.reset_trajectory is True
 
 
@@ -102,7 +102,7 @@ def test_verify_auto_skip_summary_includes_test_status():
     test = TestResult(tests=1, failures=2, errors=1, report_found=True)
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
                       test=test, tests_green=False,
-                      iteration=config.METHOD_ROUND_BUDGET)
+                      iteration=config.method_round_budget())
     d = decisions.decide_after_verify(ctx)
     assert "测试失败" in d.summary
     assert "Failures 2" in d.summary
@@ -110,7 +110,7 @@ def test_verify_auto_skip_summary_includes_test_status():
 
     # 测试全绿时, 跳过消息应体现测试全绿
     ctx_green = _verify_ctx(method=_method(covered=5, missed=5),
-                            iteration=config.METHOD_ROUND_BUDGET)
+                            iteration=config.method_round_budget())
     d_green = decisions.decide_after_verify(ctx_green)
     assert "测试全绿" in d_green.summary
 
@@ -118,7 +118,7 @@ def test_verify_auto_skip_summary_includes_test_status():
 def test_verify_global_budget_exhausted_skips_all_pending():
     """全局预算耗尽 -> 跳过全部未达标方法(不再 ask_user)。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
-                      iteration=2, global_iteration=config.GLOBAL_ROUND_BUDGET)
+                      iteration=2, global_iteration=config.global_round_budget())
     d = decisions.decide_after_verify(ctx)
     assert d.route == Route.MAKE_PLAN
     assert d.auto_skip_method is True
@@ -130,25 +130,25 @@ def test_verify_global_budget_exhausted_skips_all_pending():
 def test_verify_method_budget_bonus_extends_window():
     """追加的单方法预算窗口计入有效预算(窗口内不跳过)。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
-                      iteration=config.METHOD_ROUND_BUDGET,
+                      iteration=config.method_round_budget(),
                       method_round_bonus=3)
     d = decisions.decide_after_verify(ctx)
     assert d.route == Route.BUILD_PROMPT          # 8 < 8+3, 继续迭代
     assert d.auto_skip_method is False
     # 窗口耗尽后自动跳过, 且原因体现有效上限
     ctx2 = _verify_ctx(method=_method(covered=5, missed=5),
-                       iteration=config.METHOD_ROUND_BUDGET + 3,
+                       iteration=config.method_round_budget() + 3,
                        method_round_bonus=3)
     d2 = decisions.decide_after_verify(ctx2)
     assert d2.route == Route.MAKE_PLAN
     assert d2.auto_skip_method is True
-    assert str(config.METHOD_ROUND_BUDGET + 3) in d2.auto_skip_reason
+    assert str(config.method_round_budget() + 3) in d2.auto_skip_reason
 
 
 def test_verify_global_budget_bonus_extends_window():
     """全局预算窗口同理。"""
     ctx = _verify_ctx(method=_method(covered=5, missed=5),
-                      iteration=2, global_iteration=config.GLOBAL_ROUND_BUDGET,
+                      iteration=2, global_iteration=config.global_round_budget(),
                       global_round_bonus=5)
     d = decisions.decide_after_verify(ctx)
     assert d.route == Route.BUILD_PROMPT          # 30 < 30+5, 继续迭代
@@ -160,10 +160,10 @@ def test_verify_budget_decisions_never_ask_user():
     cases = [
         # 单方法预算耗尽
         _verify_ctx(method=_method(covered=5, missed=5),
-                    iteration=config.METHOD_ROUND_BUDGET),
+                    iteration=config.method_round_budget()),
         # 全局预算耗尽
         _verify_ctx(method=_method(covered=5, missed=5),
-                    iteration=2, global_iteration=config.GLOBAL_ROUND_BUDGET),
+                    iteration=2, global_iteration=config.global_round_budget()),
         # 连续测试失败
         _verify_ctx(method=_method(covered=5, missed=5,
                                    results=[TestOutcome(1, 0)] * config.TEST_FAIL_STREAK_ROUNDS),
@@ -238,13 +238,13 @@ def test_auto_skip_reason_matches_actual_trigger():
     """
     # 单方法预算耗尽
     d_budget = decisions.decide_after_verify(_verify_ctx(
-        method=_method(covered=5, missed=5), iteration=config.METHOD_ROUND_BUDGET))
+        method=_method(covered=5, missed=5), iteration=config.method_round_budget()))
     assert "预算耗尽" in d_budget.reason
 
     # 全局预算耗尽 -> 跳过全部未达标方法
     d_global = decisions.decide_after_verify(_verify_ctx(
         method=_method(covered=5, missed=5), iteration=2,
-        global_iteration=config.GLOBAL_ROUND_BUDGET))
+        global_iteration=config.global_round_budget()))
     assert "全局预算耗尽" in d_global.reason
 
     # 连续测试失败不收敛 -> 不得误标为预算耗尽

@@ -71,8 +71,34 @@ ASSERTION_FAILURE_TYPE_PREFIXES = (
 NO_IMPROVEMENT_ROUNDS = 3        # 连续 N 轮覆盖率无提升 -> 自动跳过当前方法
 NO_IMPROVEMENT_NEAR_THRESHOLD_FACTOR = 0.9  # 覆盖率接近门槛(>=threshold*此因子)时抑制无提升跳过
 TEST_FAIL_STREAK_ROUNDS = 3      # 连续 N 轮测试失败     -> 自动跳过当前方法
-METHOD_ROUND_BUDGET = 8          # 单方法最多 N 轮
-GLOBAL_ROUND_BUDGET = 30         # 全局最多 N 轮
+# c038(双副本对称): 单方法/全局轮次预算改为 env 可覆盖函数 —— java 副本早已
+# 是同款(JAVA_UT_METHOD/GLOBAL_ROUND_BUDGET), batch 侧裸常量使 CI 用同一
+# 个 env 限流时批量技能静默按 30 跑满。同 env 名 = 一个旋钮管两个技能。
+_METHOD_ROUND_BUDGET_ENV = "JAVA_UT_METHOD_ROUND_BUDGET"
+_DEFAULT_METHOD_ROUND_BUDGET = 8
+_GLOBAL_ROUND_BUDGET_ENV = "JAVA_UT_GLOBAL_ROUND_BUDGET"
+_DEFAULT_GLOBAL_ROUND_BUDGET = 30
+
+
+def method_round_budget() -> int:
+    """单方法轮次上限: 环境变量 JAVA_UT_METHOD_ROUND_BUDGET 覆盖, 非法值回退默认。
+
+    以函数(而非模块级常量)暴露, 便于测试期动态改写环境变量(与 java 副本同款)。
+    """
+    raw = os.environ.get(_METHOD_ROUND_BUDGET_ENV) or _DEFAULT_METHOD_ROUND_BUDGET
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_METHOD_ROUND_BUDGET
+
+
+def global_round_budget() -> int:
+    """全局轮次上限: 环境变量 JAVA_UT_GLOBAL_ROUND_BUDGET 覆盖, 非法值回退默认。"""
+    raw = os.environ.get(_GLOBAL_ROUND_BUDGET_ENV) or _DEFAULT_GLOBAL_ROUND_BUDGET
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_GLOBAL_ROUND_BUDGET
 FINAL_CHECK_FAIL_STREAK_LIMIT = 2  # 终验连续 N 轮不绿且无待修复方法 -> 未达标收尾
 VALIDATE_FAIL_STREAK_LIMIT = 5   # validate_rules 连续 N 轮违规未通过 -> 自动跳过当前方法
 

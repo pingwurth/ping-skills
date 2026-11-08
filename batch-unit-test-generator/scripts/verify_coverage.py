@@ -217,16 +217,13 @@ def handler(args: argparse.Namespace) -> tuple[Decision, EmitContext]:
         if decision.reset_trajectory:
             entry.reset_trajectory()
         if decision.skip_all_pending:
-            for m in state.methods:
-                if m.status == MethodStatus.PENDING:
-                    m.status = MethodStatus.SKIPPED
-                    m.skip_reason = decision.auto_skip_reason
-                    m.skip_source = SKIP_SOURCE_AUTO
+            # c039: 统一走 State.skip_pending_methods(与预检查/batch_finish 路径同落点)
+            state.skip_pending_methods(decision.auto_skip_reason)
             logger.info(f"跳过全部未达标方法: {decision.auto_skip_reason}")
         store.save(state)
         logger.info(f"方法 {entry.key.label()}: {before_rate:.1f}% -> {entry.rate:.1f}% "
-                    f"(轮次 {state.iteration}/{config.METHOD_ROUND_BUDGET + state.method_round_bonus}, "
-                    f"全局 {state.global_iteration}/{config.GLOBAL_ROUND_BUDGET + state.global_round_bonus}, "
+                    f"(轮次 {state.iteration}/{config.method_round_budget() + state.method_round_bonus}, "
+                    f"全局 {state.global_iteration}/{config.global_round_budget() + state.global_round_bonus}, "
                     f"类级 {state.class_round_used}/{state.class_round_budget}, "
                     f"门槛 {state.threshold}%, 测试绿={tests_green}, 路由={decision.route.value})")
     return decision, EmitContext(workdir=workdir, state=state)

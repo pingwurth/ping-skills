@@ -332,8 +332,8 @@ def test_handler_grant_rounds_extends_both_budget_windows(tmp_path):
         target_class="com.example.MyService",
         methods=[method],
         current_method=method.key,
-        iteration=config.METHOD_ROUND_BUDGET,
-        global_iteration=config.GLOBAL_ROUND_BUDGET,
+        iteration=config.method_round_budget(),
+        global_iteration=config.global_round_budget(),
         validate_fail_streak=4,
         plan={"target_class": "com.example.MyService", "threshold": 80.0, "methods": []},
     )
@@ -529,8 +529,8 @@ def _skipped_method(name: str, covered: int = 5, missed: int = 5,
     m = _make_method(name, desc=desc, covered=covered, missed=missed)
     m.status = MethodStatus.SKIPPED
     m.skip_reason = reason
-    m.round_rates = [50.0] * config.METHOD_ROUND_BUDGET
-    m.round_test_results = [TestOutcome(0, 0)] * config.METHOD_ROUND_BUDGET
+    m.round_rates = [50.0] * config.method_round_budget()
+    m.round_test_results = [TestOutcome(0, 0)] * config.method_round_budget()
     return m
 
 
@@ -548,8 +548,8 @@ def test_handler_unskip_reopens_class_budget_window(tmp_path):
     method = _skipped_method("doStuff",
                              reason="类级预算耗尽(30/30 轮), 未达标方法不再迭代")
     state = _batch_state(
-        [method], iteration=config.METHOD_ROUND_BUDGET,
-        global_iteration=config.GLOBAL_ROUND_BUDGET, validate_fail_streak=4,
+        [method], iteration=config.method_round_budget(),
+        global_iteration=config.global_round_budget(), validate_fail_streak=4,
         class_round_used=config.batch_class_round_budget())
     assert state.class_budget_exhausted is True
 
@@ -561,7 +561,7 @@ def test_handler_unskip_reopens_class_budget_window(tmp_path):
     assert method.round_rates == [] and method.round_test_results == []
     assert state.iteration == 0                    # 游标未切换, 就地重开单方法窗口
     assert state.method_round_bonus == 0
-    assert state.global_round_bonus == config.GLOBAL_ROUND_BUDGET
+    assert state.global_round_bonus == config.global_round_budget()
     assert state.class_round_bonus == config.batch_class_round_budget()
     assert state.class_budget_exhausted is False  # 类级预检查不再命中
     assert state.validate_fail_streak == 0
@@ -592,7 +592,7 @@ def test_handler_unskip_combines_with_grant_rounds(tmp_path):
         handler(_make_args(str(tmp_path), unskip="doStuff", grant_rounds=8))
 
     assert method.status == MethodStatus.PENDING
-    assert state.global_round_bonus == config.GLOBAL_ROUND_BUDGET + 8
+    assert state.global_round_bonus == config.global_round_budget() + 8
     assert state.method_round_bonus == 8
 
 

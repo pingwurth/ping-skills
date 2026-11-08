@@ -1,5 +1,9 @@
 #!/bin/bash
-set -euo pipefail
+# 不启用 set -e: mvn surefire:test 测试失败(退出码非 0)时仍需继续生成覆盖率报告,
+# 测试是否通过由 surefire 报告判定(Python 侧 parse_surefire_reports/tests_green;
+# 与 java 副本同语义 —— 曾"失败即退出"把常规测试失败变成 ask_user 死路,
+# 连败自动跳过(decisions 分支4)在 batch 侧结构性不可达)
+set -uo pipefail
 
 # ==============================================================================
 # 用法: ./fast-single-cov.sh [选项] <模块名> <目标类全限定名> <测试类全限定名>
@@ -137,26 +141,18 @@ echo "🏃 [2/4] 运行测试并收集数据..."
 ARG_LINE="-javaagent:$JACOCO_AGENT=destfile=$EXEC_FILE,includes=$TARGET_CLASS:${TARGET_CLASS}\$*"
 
 # 先写临时文件(避免管道缓冲问题), 完成后再输出到 stdout 供 Python run_command 捕获
+# (编译已在 [1/4] 完成并校验; 此处不再检查 mvn 退出码 —— 断言失败属正常轮次结果,
+#  由下方 exec 检查 + Python 侧 surefire 报告判定)
 MVN_LOG=$(mktemp)
-set +e
-mvn test-compile surefire:test \
+mvn surefire:test \
   -pl "$MODULE_DIR" \
   -Dtest="$TARGET_TEST" \
   -DargLine="$ARG_LINE" \
   -DforkCount=1 \
   --batch-mode > "$MVN_LOG" 2>&1
-MVN_RC=$?
-set -e
 
 # 将 Maven 完整输出送到 stdout, 确保 Python 侧 log_file 能捕获
 cat "$MVN_LOG"
-
-# 检查 mvn 退出码
-if [ $MVN_RC -ne 0 ]; then
-    echo "❌ mvn 执行失败(退出码 $MVN_RC)。"
-    rm -f "$MVN_LOG"
-    exit 1
-fi
 
 # 检查是否提示 "No tests were executed"
 if grep -q "No tests were executed" "$MVN_LOG"; then

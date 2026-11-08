@@ -443,9 +443,11 @@ def _tail_file(path: str, *, lines: int = 30) -> str:
 
 
 # fast-single-cov.sh 日志中表示「降级无意义」的关键字
+# (脚本已与 java 副本同语义: surefire:test 测试失败不退出脚本、照常出报告,
+#  由 surefire 报告判定 tests_green —— 故"mvn 执行失败"脚本文案不复存在,
+#  该 prose-grep 模式随之移除, 不再作 bash→Python 控制流信道)
 _NON_FALLBACKABLE_PATTERNS = re.compile(
     r"编译失败"                       # mvn test-compile 失败(脚本输出)
-    r"|mvn 执行失败"                  # surefire:test 失败(脚本输出)
     r"|COMPILATION ERROR"            # mvn 编译失败(Maven 原生输出, step4)
     r"|No tests were executed"       # 测试类未找到
     r"|缺少参数"                      # 参数校验失败
@@ -463,8 +465,9 @@ def _read_log(path: str) -> str:
 def _is_fallbackable_failure(log_file: str) -> bool:
     """检查 fast-single-cov.sh 的失败日志是否值得降级。
 
-    编译失败、测试失败、测试类未找到等场景降级也会同样失败,
+    编译失败、测试类未找到等场景降级也会同样失败,
     只有 exec 文件未生成(argLine 写死)或工具缺失等场景降级才有意义。
+    (测试失败不在此列 —— 脚本对 surefire 断言失败不退出, 根本到不了这里。)
 
     全文搜索而非尾部截取, 因为 COMPILATION ERROR 等关键字可能出现在
     Maven 输出的任意位置, 截取尾部会因错误详情行数不定而漏判。
@@ -530,7 +533,7 @@ def run_single_cov_with_fallback(
             # 编译失败、测试失败、测试类未找到等场景降级也会同样失败
             tail = _tail_file(log_file, lines=30)
             log.error(
-                "fast-single-cov.sh 失败且降级无意义(编译/测试问题)\n"
+                "fast-single-cov.sh 失败且降级无意义(编译/参数问题)\n"
                 "--- 日志(末尾 %d 行) ---\n%s"
                 "--- 结束 ---", len(tail.splitlines()) if tail else 0, tail or "")
         else:

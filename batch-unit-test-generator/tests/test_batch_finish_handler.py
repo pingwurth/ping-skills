@@ -457,3 +457,51 @@ def test_handler_confirms_done_when_met(tmp_path):
     data = _read_batch_state(workdir)
     assert data["classes"][0]["status"] == "done"
     assert data["classes"][0]["final_rate"] == 85.0
+
+def test_handler_class_threshold_overrides_batch_threshold(tmp_path):
+    """c054/c078: 终验按类 state 的 threshold 判定(make_plan --set-threshold 是
+    文档记录的批量恢复命令) —— 批量 80 / 类级调低到 60, 72% 应判 done;
+    旧口径按 batch_state.threshold 会误判 unmet 终态(不可复活)。"""
+    workdir = tmp_path / "batchwork"
+    _write_batch_state(workdir, _make_entry(tmp_path), threshold=80.0)
+    done = MethodCoverage(
+        key=MethodKey("doStuff", "()V"), covered=54, missed=26,
+        status=MethodStatus.DONE, initial_rate=0.0, round_rates=[60.0])
+    class_state = _make_class_state(tmp_path, methods=[done], threshold=60.0)
+
+    decision, _ = _run(tmp_path, workdir, class_state, final_rate=67.5,
+                       test=_green())
+
+    assert decision.route == Route.FINISH
+    data = _read_batch_state(workdir)
+    assert data["classes"][0]["status"] == "done"
+    assert data["classes"][0]["final_rate"] == 67.5
+    # 反向: 类级调高到 90, 85% 达批量阈值但低于类级 → 不判 done;
+    # 方法已全部 SKIPPED(无补测空间) → unmet 终态, 理由写明类级阈值
+    _write_batch_state(workdir, _make_entry(tmp_path), threshold=80.0)
+    skipped_high = MethodCoverage(
+        key=MethodKey("doStuff", "()V"), covered=54, missed=26,
+        status=MethodStatus.SKIPPED, skip_reason="预算耗尽, 自动跳过")
+    class_state_high = _make_class_state(tmp_path, methods=[skipped_high],
+                                         threshold=90.0)
+    decision2, _ = _run(tmp_path, workdir, class_state_high, final_rate=85.0,
+                        test=_green())
+    data2 = _read_batch_state(workdir)
+    assert data2["classes"][0]["status"] == "unmet"
+    assert "类级阈值" in data2["classes"][0]["skip_reason"]
+
+
+def test_handler_unreadable_class_state_goes_recheck_not_unmet(tmp_path):
+    """c010: 类 state.json 缺失/不可读是环境错误 —— 旧路径把它转成 unmet
+    终态并编造"无可补测方法"理由; 现走 recheck 重入队(make_plan 重建 state
+    后自愈)。"""
+    workdir = tmp_path / "batchwork"
+    _write_batch_state(workdir, _make_entry(tmp_path))
+
+    decision, _ = _run(tmp_path, workdir, class_state=None, final_rate=33.3,
+                       test=_green())
+
+    assert decision.route == Route.BATCH_NEXT
+    data = _read_batch_state(workdir)
+    assert data["classes"][0]["status"] == "recheck"
+    assert "state.json 不可读" in data["classes"][0]["skip_reason"]

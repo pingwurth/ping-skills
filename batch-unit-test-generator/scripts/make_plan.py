@@ -211,7 +211,7 @@ def _unskip(state: State, names: str, logger) -> None:
             and any(m.key == state.current_method for m in revived):
         state.iteration = 0
         state.method_round_bonus = 0
-    state.global_round_bonus += config.GLOBAL_ROUND_BUDGET
+    state.global_round_bonus += config.global_round_budget()
     state.validate_fail_streak = 0
     # 类级预算耗尽时 verify_coverage 会立刻跳过全部 pending, 需同步重开类级窗口
     if state.batch_mode:
@@ -219,7 +219,7 @@ def _unskip(state: State, names: str, logger) -> None:
     labels = ", ".join(m.key.label() for m in revived)
     logger.info(
         f"恢复被跳过的方法: {labels}(全局有效上限 "
-        f"{config.GLOBAL_ROUND_BUDGET + state.global_round_bonus} 轮, 类级有效上限 "
+        f"{config.global_round_budget() + state.global_round_bonus} 轮, 类级有效上限 "
         f"{state.class_round_budget} 轮)")
 
 
@@ -266,8 +266,8 @@ def _grant_rounds(state: State, rounds: int, logger) -> None:
             entry.reset_trajectory()
     logger.info(
         f"用户决策: 追加预算窗口 {rounds} 轮"
-        f"(单方法有效上限 {config.METHOD_ROUND_BUDGET + state.method_round_bonus} 轮, "
-        f"全局有效上限 {config.GLOBAL_ROUND_BUDGET + state.global_round_bonus} 轮)")
+        f"(单方法有效上限 {config.method_round_budget() + state.method_round_bonus} 轮, "
+        f"全局有效上限 {config.global_round_budget() + state.global_round_bonus} 轮)")
 
 
 def _apply_method_group(state: State, method_group: str, logger) -> None:

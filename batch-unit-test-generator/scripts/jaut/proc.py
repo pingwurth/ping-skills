@@ -225,11 +225,18 @@ def _run_captured(cmd: list[str], cmd_str: str, cwd: Optional[str],
 def _run_streamed(cmd: list[str], cmd_str: str, cwd: Optional[str],
                   timeout: Optional[int], log_file: str, log) -> CommandResult:
     """流式写日志执行。单写者不变式: Popen 之后只有读线程写文件句柄。"""
-    log_dir = os.path.dirname(log_file)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
+    # c030: 日志目录创建/打开纳入契约(绝不抛出, 一律返回 CommandResult)——
+    # open 在 try 之外时, 日志目录只读/被占等 OSError 直接抛穿 run_command,
+    # 调用方(只按 StepError 回滚)被穿透
+    try:
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        fp = open(log_file, "w", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log.error(f"日志文件无法打开: {log_file} ({exc})")
+        return CommandResult(ok=False, returncode=None)
 
-    fp = open(log_file, "w", encoding="utf-8", errors="replace")
     proc: Optional[subprocess.Popen] = None
     reader: Optional[threading.Thread] = None
     reader_done = threading.Event()
@@ -287,6 +294,13 @@ def _run_streamed(cmd: list[str], cmd_str: str, cwd: Optional[str],
         if proc.returncode != 0:
             log.error(f"命令失败 (exit {proc.returncode})")
         return CommandResult(ok=proc.returncode == 0, returncode=proc.returncode)
+    except BaseException:
+        # c030: KeyboardInterrupt 等异常路径必须终止已脱离会话的子进程组
+        # (start_new_session 使终端 Ctrl-C 到不了它) —— 只关日志句柄会留下
+        # 孤儿 mvn 继续构建, 占用 target/锁/jacoco exec, 下一次协议步撞上半成品
+        if proc is not None and proc.poll() is None:
+            _kill_process_group(proc)
+        raise
     finally:
         progress.stop()
         if reader is not None:

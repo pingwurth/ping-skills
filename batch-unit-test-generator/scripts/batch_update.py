@@ -277,7 +277,7 @@ def _infer_escalation_reason(class_state) -> str:
     decide_after_verify 的有效预算口径(基础 + bonus), 避免两处逐行复刻导致
     阈值/口径漂移。按优先级检查:
         1. 类级轮次耗尽(有效类级预算, 含探索模式与追加窗口)
-        2. 当前方法迭代轮次耗尽(METHOD_ROUND_BUDGET + method_round_bonus)
+        2. 当前方法迭代轮次耗尽(method_round_budget() + method_round_bonus)
         3. 连续测试失败不收敛(decisions.test_failure_streak)
         4. 连续覆盖率无提升(decisions.no_improvement)
 
@@ -299,7 +299,7 @@ def _infer_escalation_reason(class_state) -> str:
         return ""
 
     # 2) 当前方法轮次耗尽(含 --grant-rounds 追加窗口, 与 decide_after_verify 同口径)
-    method_budget = config.METHOD_ROUND_BUDGET + class_state.method_round_bonus
+    method_budget = config.method_round_budget() + class_state.method_round_bonus
     if len(method.round_rates) >= method_budget:
         return (f"原因: 方法 {current.label()} 已迭代 {len(method.round_rates)} 轮, "
                 f"达单方法上限 {method_budget} 轮"

@@ -256,7 +256,7 @@ def test_infer_escalation_reason_method_round_budget():
     key = MethodKey("doStuff", "()V")
     state = _make_state_for_reason(
         current_method=key,
-        round_rates=[10.0] * config.METHOD_ROUND_BUDGET)
+        round_rates=[10.0] * config.method_round_budget())
     reason = _infer_escalation_reason(state)
     assert "单方法上限" in reason
     assert "doStuff" in reason
@@ -315,11 +315,11 @@ def test_infer_escalation_reason_method_round_budget_includes_bonus():
 
     # 16 轮达含 bonus 的上限, 数字如实转述
     state = _make_state_for_reason(
-        current_method=key, round_rates=[10.0] * (config.METHOD_ROUND_BUDGET + bonus),
+        current_method=key, round_rates=[10.0] * (config.method_round_budget() + bonus),
         method_round_bonus=bonus)
     reason = _infer_escalation_reason(state)
     assert "单方法上限" in reason
-    assert str(config.METHOD_ROUND_BUDGET + bonus) in reason
+    assert str(config.method_round_budget() + bonus) in reason
 
 
 # --------------------------------------------------------------------------- #

@@ -90,11 +90,11 @@ class TestProtocolConstants:
 
 
 class TestBudgetConstants:
-    """预算常量为正整数。"""
+    """预算常量为正整数(c038: 单方法/全局预算已改为 env 可覆盖函数)。"""
 
     def test_budget_values_positive(self):
-        assert config.METHOD_ROUND_BUDGET > 0
-        assert config.GLOBAL_ROUND_BUDGET > 0
+        assert config.method_round_budget() > 0
+        assert config.global_round_budget() > 0
         assert config.NO_IMPROVEMENT_ROUNDS > 0
         assert config.TEST_FAIL_STREAK_ROUNDS > 0
         assert config.FINAL_CHECK_FAIL_STREAK_LIMIT > 0
@@ -102,7 +102,7 @@ class TestBudgetConstants:
 
     def test_global_budget_ge_method_budget(self):
         """全局预算应不小于单方法预算。"""
-        assert config.GLOBAL_ROUND_BUDGET >= config.METHOD_ROUND_BUDGET
+        assert config.global_round_budget() >= config.method_round_budget()
 
 
 class TestPruneDirs:
@@ -137,3 +137,21 @@ class TestJvmTypes:
 
     def test_void_mapping(self):
         assert config.JVM_PRIMITIVE_TYPES["V"] == "void"
+
+
+def test_method_global_round_budget_env_override(monkeypatch):
+    """c038: 单方法/全局轮次预算支持 JAVA_UT_* env 覆盖(与 java 副本同 env 名),
+    非法值回退默认 —— CI 一个旋钮必须同时约束两个技能。"""
+    from jaut import config
+    monkeypatch.setenv("JAVA_UT_METHOD_ROUND_BUDGET", "3")
+    monkeypatch.setenv("JAVA_UT_GLOBAL_ROUND_BUDGET", "10")
+    assert config.method_round_budget() == 3
+    assert config.global_round_budget() == 10
+    monkeypatch.setenv("JAVA_UT_METHOD_ROUND_BUDGET", "abc")
+    monkeypatch.setenv("JAVA_UT_GLOBAL_ROUND_BUDGET", "")
+    assert config.method_round_budget() == config._DEFAULT_METHOD_ROUND_BUDGET
+    assert config.global_round_budget() == config._DEFAULT_GLOBAL_ROUND_BUDGET
+    monkeypatch.delenv("JAVA_UT_METHOD_ROUND_BUDGET")
+    monkeypatch.delenv("JAVA_UT_GLOBAL_ROUND_BUDGET")
+    assert config.method_round_budget() == 8
+    assert config.global_round_budget() == 30
