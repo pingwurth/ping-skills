@@ -55,7 +55,7 @@ def _save_layers(ctx: Ctx, state) -> None:
 
 
 def parse_result_block(text: str) -> dict:
-    """单个 <result>{…}</result> 块(Qoder 应答契约; 代码栅栏 JSON 兜底)。
+    r"""单个 <result>{…}</result> 块(Qoder 应答契约; 代码栅栏 JSON 兜底)。
 
     栅栏兜底逐个栅栏尝试解析 —— 曾用贪婪 `\{.*\}` 把多个栅栏(如正文里
     先引用的 package.json 示例)合并成一段不可解析的跨度, json.loads 在

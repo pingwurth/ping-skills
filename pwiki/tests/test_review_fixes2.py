@@ -633,7 +633,7 @@ def test_metadata_edges_use_catalog_ids(tmp_path):
     child = dict(parent, page_id="ch", title="子", parent_id="svc", ordinal=1,
                  slug="", path="zh/content/子.md")
     publish._write_indexes(ctx, {"id": 1, "branch": "main", "locale": "zh"},
-                           [parent, child], [], "manual", "concise")
+                           [parent, child], [], "manual")
     meta = _json.load(open(
         os.path.join(ctx.root, "zh", "meta", "repowiki-metadata.json"),
         encoding="utf-8"))

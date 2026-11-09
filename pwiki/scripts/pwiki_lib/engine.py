@@ -91,8 +91,8 @@ def cmd_init(args) -> int:
 # --------------------------------------------------------------------------- #
 
 def cmd_begin(args) -> int:
-    from .planner import (card_job, load_plan, page_path_for, plan_cards,
-                          plan_hash, plan_modules, plan_pages, validate_plan)
+    from .planner import (load_plan, plan_cards, plan_hash, plan_modules,
+                          plan_pages, queue_item, validate_plan)
 
     ctx = Ctx(args).load()
     part = ctx.partition()
@@ -174,15 +174,8 @@ def cmd_begin(args) -> int:
               "(并发 begin 竞态被吸收)")
         print("next: pwiki next")
         return config.EXIT_OK
-    items = []
-    for p in queue_pages:
-        item = dict(p)
-        item["path"] = posix(page_path_for(pages, item, ctx.locale,
-                                          modules_by_id))
-        items.append(item)
-    for c in queue_cards:
-        # 卡片 job 字面量统一走 planner.card_job(四个排队入口曾各抄一份)
-        items.append(card_job(c, ctx.locale))
+    items = [queue_item(it, pages, ctx.locale, modules_by_id)
+             for it in list(queue_pages) + list(queue_cards)]
     ctx.db.queue_jobs(run_id, items, style=style)
     # 排队窗口(数百行插入, 数秒)的裸 UPDATE 是全引擎最后一批无守卫 run 写
     # 之一 —— 期间并发 cancel/begin --force 合法置 CANCELLED 后, 裸写把已
@@ -211,7 +204,7 @@ def cmd_begin(args) -> int:
 # next(事务认领)
 # --------------------------------------------------------------------------- #
 
-def _job_payload(job, ctx: Ctx, run, all_jobs, summary) -> dict:
+def _job_payload(job, ctx: Ctx, run, summary) -> dict:
     """--json 载荷(D19: 路径绝对化, 批量派发由变量替换生成, 不许手抄)。"""
     payload = {
         "status": "ok",
@@ -393,7 +386,7 @@ def cmd_next(args) -> int:
     # —— payload(--json)从不读它, 编排方高频轮询模式曾每单白付 ~24ms
     all_jobs = ctx.db.jobs_meta(run["id"])
     if args.json:
-        payloads = [_job_payload(j, ctx, run, all_jobs, summary)
+        payloads = [_job_payload(j, ctx, run, summary)
                     for j in claimed]
         print(json.dumps(payloads if batch > 1 else payloads[0],
                          ensure_ascii=False, indent=2))
@@ -606,12 +599,10 @@ def cmd_submit(args) -> int:
     if warns:
         info("形状/尺寸问题 submit 时是警告, finish(LINING)时按风格升错误级 — "
              "尽早修省一轮重写")
-    problems = errs
-    if args.lenient:
-        # lenient 放宽 H1 契约与"至少一条引用"两条; 引用真实性(path/range)
-        # 与卡片 frontmatter 永不放宽。前缀集合单一来源在 gates。
-        problems = [p for p in problems
-                    if not gates.is_lenient_droppable(p)]
+    # 过滤策略单一属主(gates.blocking_errors): auto 项 submit 阶段本就被
+    # 路由进 warnings(幂等), lenient 放宽 H1 契约与"至少一条引用"两条;
+    # 引用真实性(path/range)与卡片 frontmatter 永不放宽
+    problems = gates.blocking_errors(errs, lenient=bool(args.lenient))
     # gate_item 做了数秒文件 I/O —— 以"现在"的行状态决定令牌与去向, 不信
     # 入场快照: job 曾在门禁期间被其他 writer 认领, 旧快照说"非 processing"
     # 便走无 token UPDATE, 直接顶掉在写 writer 的租约(其 submit 随即孤儿化)
@@ -840,8 +831,8 @@ def cmd_skip(args) -> int:
 
 
 def cmd_regenerate(args) -> int:
-    from .planner import (card_job, load_plan, page_path_for, plan_hash,
-                          plan_modules, plan_pages, plan_cards)
+    from .planner import (load_plan, plan_hash, plan_modules,
+                          plan_pages, plan_cards, queue_item)
     ctx = Ctx(args).load()
     part, run = _active(ctx)
     _lining_guard(run, f" regenerate {args.page_id}")
@@ -850,10 +841,8 @@ def cmd_regenerate(args) -> int:
     cards = plan_cards(plan)
     modules_by_id = {m.get("id"): m for m in plan_modules(plan)}
     item = next((p for p in pages if str(p.get("id")) == args.page_id), None)
-    kind = "page"
     if item is None:
         item = next((c for c in cards if str(c.get("id")) == args.page_id), None)
-        kind = "card"
     if item is None:
         die(f"计划里没有 {args.page_id}", config.EXIT_PRECOND)
     # c040: 与 pause/cancel 同款租约守卫 —— 取消+释放会把在制 writer 的
@@ -901,14 +890,10 @@ def cmd_regenerate(args) -> int:
     if run_id is None:
         die(f"取消旧 run 后有并发 run {raced['id']}({raced['state']})插入 — "
             f"重试 `pwiki regenerate {args.page_id}`", config.EXIT_PRECOND)
-    # path 必须在此显式派生(plan 条目不带 path; 与 begin/update 同口径) ——
-    # 曾以 path='' 入队, finish 打开 <root> 直接 IsADirectoryError 且复崩
-    if config.is_card_kind(kind):   # P48: 禁裸 == 比较的单一入口口径
-        job_item = card_job(item, ctx.locale)
-    else:
-        job_item = dict(item)
-        job_item["path"] = posix(page_path_for(pages, job_item, ctx.locale,
-                                            modules_by_id))
+    # path 必须在此显式派生(plan 条目不带 path; 与 begin/update 同口径,
+    # 分派统一走 planner.queue_item) —— 曾以 path='' 入队, finish 打开
+    # <root> 直接 IsADirectoryError 且复崩
+    job_item = queue_item(item, pages, ctx.locale, modules_by_id)
     ctx.db.queue_jobs(run_id, [job_item], style=style)
     print(f"run {run_id} (regenerate) — 单项重做 {args.page_id}")
     print("next: pwiki next")
@@ -1096,15 +1081,11 @@ def cmd_finish(args) -> int:
                 job["content"], job, ctx.repo,
                 str(job["style"] or fallback_style), phase="lining",
                 mod_titles=mod_titles_for(job, all_mods))
-            errs = [e for e in errs
-                    if not gates.is_auto_fixable(e)]   # 发布层钳位(见 publish)
-            if args.lenient and not args.force:
-                # lenient 契约与 submit 同源(LENIENT_DROP_PREFIXES 单一集合):
-                # 只放宽 H1 契约与"至少一条引用"。finish 曾把 --lenient 当
-                # --force 全放 —— citation/path(引用真实性)这类承诺永不
-                # 放宽的错误也照样发布; 全放请用 --force
-                errs = [e for e in errs
-                        if not gates.is_lenient_droppable(e)]
+            # 过滤策略单一属主(gates.blocking_errors): auto 剔除=发布层
+            # 钳位; lenient 只放宽 H1/无引用(全放是 --force —— finish 曾把
+            # --lenient 当 --force, citation/path 这类承诺也照样发布)
+            errs = gates.blocking_errors(
+                errs, lenient=bool(args.lenient) and not args.force)
             if errs and not args.force:
                 lining_failed.append((job["page_id"], errs))
                 ctx.db.set_job_state(run["id"], job["page_id"], "pending",

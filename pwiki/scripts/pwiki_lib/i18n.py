@@ -87,6 +87,14 @@ def toc_title(locale: str) -> str:
     return TOC_TITLE.get(locale, TOC_TITLE["zh"])
 
 
+def toc_titles() -> set:
+    """目录标题集合(注入侧过滤旧标题用)—— 与 TOC_SECTION_RE/TOC_HEADING_RE
+    同源; compose 曾手抄第三份 set(TOC_TITLE.values())|{'Table of
+    Contents'}, 双向漂移时新 locale 的旧目录标题会漏过滤(被编号进新目录
+    又被删节, 锚向已删标题)。"""
+    return set(TOC_TITLE.values()) | {"Table of Contents"}
+
+
 # 注入目录节的识别/剥除正则(发射与剥除共用一份 —— 双份曾漂移漏掉 "Contents"):
 # 覆盖 i18n 两拼法 + Qoder 兼容的 "Table of Contents"。
 TOC_SECTION_RE = re.compile(

@@ -277,8 +277,7 @@ def _refresh_indexes(ctx: Ctx, plan: dict) -> None:
         pid = part["id"]
         pages = ctx.db.published_pages(pid)
         modules = ctx.db.modules(pid)
-        style = str(plan.get("style") or ctx.style)
-        publish._write_indexes(ctx, part, pages, modules, "manual", style)
+        publish._write_indexes(ctx, part, pages, modules, "manual")
     except Exception as e:   # noqa: BLE001 — 索引尽力而为, 不挡改名
         from .util import info
         info(f"note: 索引重算失败({e}) — 下次 finish 会重写")

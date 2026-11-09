@@ -171,10 +171,16 @@ def lint_mermaid(content: str) -> list:
     return errors
 
 
+# 栅栏模式单一来源: split_fences(捕获组保留栅栏段)与 iter_h2(偏移枚举)
+# 共用 —— iter_h2 曾自持一份字面正则, 栅栏规则演进(~~~ 等)没有跟进渠道,
+# 栅栏内标题会被当真实节(P61 描述的幻影节 bug 重现)
+_FENCE_RE = re.compile(r"(```.*?```)", re.S)
+
+
 def split_fences(content: str) -> list:
     """按代码栅栏切分: 以 ``` 开头的段是栅栏, 其余是正文(P61 共用实现
     —— 栅栏正则曾散在六个转换点各持一份, 规则要变只改这里)。"""
-    return re.split(r"(```.*?```)", content, flags=re.S)
+    return _FENCE_RE.split(content)
 
 
 def strip_code_fences(content: str) -> str:
@@ -189,8 +195,7 @@ def iter_h2(content: str):
     章节来源 gate / --fix / 目录注入的共用枚举器: 栅栏里的 '## ' 是
     示例内容不是分析节 —— 三处调用点曾各自拿原始 content 枚举, 幻影节
     改变计数, --fix 还把"章节来源"块注进代码栅栏里。"""
-    spans = [(m.start(), m.end())
-             for m in re.finditer(r"```.*?```", content, re.S)]
+    spans = [(m.start(1), m.end(1)) for m in _FENCE_RE.finditer(content)]
     for m in re.finditer(r"(?m)^##\s+(.+)$", content):
         if not any(s <= m.start() < e for s, e in spans):
             yield m
@@ -239,6 +244,17 @@ SECTION_SOURCES_RE = re.compile(r"\*\*(?:章节来源|Section sources)\*\*")
 DIAGRAM_SOURCES_RE = re.compile(r"\*\*(?:图表来源|Diagram sources)\*\*")
 
 
+def blocking_errors(errs: list, lenient: bool = False) -> list:
+    """门禁错误的过滤策略单一属主(r6 #41): 先剔机械可修项(compose 落盘
+    时钳位, submit 与 finish 都不该为此拒稿), lenient 再剔"只放宽 H1/
+    无引用"两类 —— 曾四个消费点各自内联组合, 正确性挂在"阶段路由 +
+    旗标面"两处远端事实上。"""
+    errs = [e for e in errs if not is_auto_fixable(e)]
+    if lenient:
+        errs = [e for e in errs if not is_lenient_droppable(e)]
+    return errs
+
+
 def gate_item(content: str, item, repo: str, style: str,
               phase: str = "submit", mod_titles=None) -> tuple:
     """一个条目的完整门禁。phase: 'submit'(全警告) | 'lining'(按风格)。
@@ -246,9 +262,15 @@ def gate_item(content: str, item, repo: str, style: str,
     返回 (errors, warnings)。submit 阶段 errors 只含真实性硬错(引用路径/
     H1/卡片 frontmatter), 形状与尺寸全警告 —— 拒绝也保 checkpoint。
     """
+
     errors, warnings = [], []
     strict = (phase == "lining")
     p = preset(style)
+
+    # 严重度选择器局部提升(r6 #51): 同一表达式曾 11+7 处内联,
+    # 新增检查抄错一个变体会静默改变 concise LINING 行为且无测试把关
+    sev = errors if strict else warnings
+    sev_hard = errors if (strict and p["size_hard"]) else warnings
     kind = str(rowget(item, "kind") or "page")
     title = str(rowget(item, "title") or "")
     prose = strip_code_fences(content)
@@ -286,7 +308,7 @@ def gate_item(content: str, item, repo: str, style: str,
     offbyone = [e for e in cite_errors if is_auto_fixable(e)]
     errors.extend(real_errors)
     if offbyone:
-        (errors if strict else warnings).extend(offbyone)
+        sev.extend(offbyone)
 
     n_cites = len(cites)
     n_files = len(cited)
@@ -295,7 +317,7 @@ def gate_item(content: str, item, repo: str, style: str,
         _gate_card(content, item, p, strict, errors, warnings, repo)
         return errors, warnings
     if kind == "module_sheet":
-        _gate_sheet(content, item, p, strict, errors, warnings, n_cites)
+        _gate_sheet(content, p, strict, errors, warnings, n_cites)
         return errors, warnings
 
     # --- 页面形状(qwiki 16 点, 风格差异: concise 禁 目录/cite/结论; deep 要 cite 块) ---
@@ -304,17 +326,17 @@ def gate_item(content: str, item, repo: str, style: str,
     if re.match(r"^```(?:markdown|md)?\s*\n", content.lstrip()):
         errors.append("schema/fence: 内容不得包在外层代码栅栏里")
     if re.search(r"^#{5,}\s", prose, re.M):
-        (errors if strict else warnings).append(
+        sev.append(
             "schema/headings: 不允许 #### 以下的深层标题")
     if re.search(r"^#{2,4}\s+\d+(?:\.\d+)*[.、)]\s+", prose, re.M):
-        (errors if strict else warnings).append(
+        sev.append(
             "schema/numbering: 不要手工编号小节标题")
 
     if not p.get("cite_block_required"):
         # 发布层注入 <cite>/目录; writer 不得自带(qwiki 契约; 判定走预设键,
         # 不再散落 style == "concise" 字面比较)。注入物类是风格错误 ——
         # validation.md: concise 在 LINING 也保持警告(曾一律升错误级)
-        _sev = errors if (strict and p["size_hard"]) else warnings
+        _sev = sev_hard
         if i18n.TOC_HEADING_RE.search(prose):
             _sev.append("schema/toc: 不要写目录节 —— 发布层会注入")
         if "<cite>" in content:
@@ -326,10 +348,10 @@ def gate_item(content: str, item, repo: str, style: str,
         # deep: writer 自带 cite 块, 且集合必须与正文一致
         # (else 分支里 cite_block_required 恒真 —— 内层再测是死代码)
         if "<cite>" not in content:
-            (errors if strict else warnings).append(
+            sev.append(
                 "schema/cite: deep 页必须自带 <cite> 块")
         elif parse_cite_block(content) != cited:
-            (errors if strict else warnings).append(
+            sev.append(
                 "schema/cite: <cite> 块集合与正文引用集合不一致")
 
     # 节数下限: 有 required_sections 用之; 否则按 article_type 用途清单
@@ -353,11 +375,11 @@ def gate_item(content: str, item, repo: str, style: str,
 
     # --- mermaid(形状类: submit 全警告; LINING 按 size_hard 升错误) ---
     mermaid_errors = lint_mermaid(content)
-    (errors if (strict and p["size_hard"]) else warnings).extend(mermaid_errors)
+    (sev_hard).extend(mermaid_errors)
     diagrams = len(re.findall(r"```mermaid", content))
     lo, hi = p["mermaid"]
     if diagrams < lo or diagrams > hi:
-        sev = errors if (strict and p["size_hard"]) else warnings
+        sev = sev_hard
         sev.append(f"size/mermaid: {diagrams} 图 (目标 {lo}-{hi})")
 
     # --- 尺寸(按风格) ---
@@ -374,7 +396,7 @@ def gate_item(content: str, item, repo: str, style: str,
     words = len(content.split())
     wlo, whi = p["page_words"]
     if whi and words > whi:
-        (errors if (strict and p["size_hard"]) else warnings).append(
+        (sev_hard).append(
             f"size/words: {words} 词 > 词上限 {whi}")
 
     # 引用数: 分档(deep)或总量(concise)
@@ -397,13 +419,13 @@ def gate_item(content: str, item, repo: str, style: str,
         # P20: 下界双向反馈 —— 曾只在 strict 分支报, 低于下限的页提交时
         # 零提示、LINING 才硬拒, 白白烧掉一整轮重写(其余尺寸维度提交时
         # 都双向告警, 这是唯一不对称的维度)
-        (errors if (strict and p["size_hard"]) else warnings).append(
+        (sev_hard).append(
             f"size/cited-files: 引用 {n_files} 个文件 (目标 ≥{flo})")
     elif fhi and n_files > fhi:
         # 上界与 page/words/citations 同走 strict+size_hard 升级 —— 曾恒为
         # 警告, validation.md 却把 size/cited-files 列为 deep 的风格错误,
         # 按文档预测 finish 结果对超界情形失真
-        (errors if (strict and p["size_hard"]) else warnings).append(
+        (sev_hard).append(
             f"size/cited-files: 引用 {n_files} 个文件 (目标 ≤{fhi})")
 
     # --- 证据边界(repowiki 保证回补) ---
@@ -416,7 +438,7 @@ def gate_item(content: str, item, repo: str, style: str,
               if c not in declared
               and not any(c == d or c.startswith(d + "/") for d in scope_dirs)}
     if len(extras) > p.get("extra_cite_files", 10):
-        (errors if strict else warnings).append(
+        sev.append(
             f"citation/extra: {len(extras)} 个引用文件超出声明"
             " source_files/scope(例: " + ", ".join(sorted(extras)[:3]) + ")")
     # evidence/code: 代码引用 <2 —— 文档不能佐证代码行为(repowiki 警告口径)
@@ -450,14 +472,14 @@ def gate_item(content: str, item, repo: str, style: str,
             1, n_sections // p.get("sections_tolerance_div", 3)):
         msg = f"{missing_ss} 个分析节缺 **章节来源** 块"
         if p["section_sources"] == "error":
-            (errors if strict else warnings).append("sources/section: " + msg)
+            sev.append("sources/section: " + msg)
         else:
             warnings.append("sources/section: " + msg)
     # diagrams==0 时 findall 数恒 ≥0, 无需单列分支(曾 if…pass/elif 死形状)
     if diagrams and len(DIAGRAM_SOURCES_RE.findall(content)) < diagrams:
         msg = f"{diagrams} 图中部分缺 **图表来源**"
         if p["diagram_sources"] == "error":
-            (errors if strict else warnings).append("sources/diagram: " + msg)
+            sev.append("sources/diagram: " + msg)
         else:
             warnings.append("sources/diagram: " + msg)
 
@@ -468,7 +490,7 @@ def gate_item(content: str, item, repo: str, style: str,
         if name and name not in content:
             msg = f"shape/module: 指派模块 {name!r} 未在正文出现"
             if p.get("module_mention") == "error":
-                (errors if strict else warnings).append(msg)
+                sev.append(msg)
             else:
                 warnings.append(msg)
     return errors, warnings
@@ -519,13 +541,19 @@ def _gate_card(content, item, p, strict, errors, warnings, repo=""):
             warnings.append("knowledge/citations: " + msg)
 
 
-def _gate_sheet(content, item, p, strict, errors, warnings, n_cites):
+def _gate_sheet(content, p, strict, errors, warnings, n_cites):
     """模块速查表: concise 短式零链接; deep 需行级引用(D16)。"""
+    # 严重度选择器局部提升(r6 #51): 同一表达式曾 11+7 处内联,
+    # 新增检查抄错一个变体会静默改变 concise LINING 行为且无测试把关
+    sev = errors if strict else warnings
+    sev_hard = errors if (strict and p["size_hard"]) else warnings
+
+
     concise_ = p["sheets"] == "short"
     if concise_:
         # 形状类: submit 全警告(validation.md 双严重度模型), LINING 按
         # size_hard —— 曾在 submit 就把 concise 速查表硬拒
-        sev = errors if (strict and p["size_hard"]) else warnings
+        sev = sev_hard
         if "file://" in content:
             sev.append("sheet/links: concise 速查表不写 file:// 链接(正文页承载)")
         if re.search(r"^##\s+", strip_code_fences(content), re.M):
@@ -540,7 +568,7 @@ def _gate_sheet(content, item, p, strict, errors, warnings, n_cites):
                      if c["a"] is not None)
         if n_line < need:
             msg = f"D16: deep 速查表需 ≥{need} 条行级引用, 实得 {n_line}"
-            (errors if strict else warnings).append("knowledge/citations: " + msg)
+            sev.append("knowledge/citations: " + msg)
         if n_cites and not SECTION_SOURCES_RE.search(content):
             (errors if (strict and p["section_sources"] == "error")
              else warnings).append("sources/section: 速查表缺 **章节来源**")

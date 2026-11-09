@@ -21,9 +21,8 @@ import uuid
 from . import config
 from .config import Ctx
 from .gates import extract_citations, strip_code_fences
-from .planner import (card_job, load_plan, modules_hash, page_path_for,
-                      plan_hash, plan_cards, plan_modules, plan_pages,
-                      validate_plan)
+from .planner import (load_plan, modules_hash, plan_hash, plan_cards,
+                      plan_modules, plan_pages, queue_item, validate_plan)
 from .scan import expand_scope
 from .util import as_int, posix, die, info, join_confined
 
@@ -273,7 +272,9 @@ def cmd_update(args) -> int:
         cited = cited_by_page.get(str(pid), set())
         old_srcs = expand_dirs(_as_list(pub["source_files"]))
         scope = set()
-        mid = item.get("module") or (pub["module"] if pub else "")
+        # pub 到此处必非 None(251-257 两臂皆早退), 旧代码的 `if pub else ""`
+        # 是死分支 —— 留着只会让读者回推本函数的空值契约
+        mid = item.get("module") or pub["module"]
         if mid in mod_files:
             scope = mod_files[mid]
         watch = srcs | cited | old_srcs | scope
@@ -355,7 +356,7 @@ def cmd_update(args) -> int:
             errs, _ = gates.gate_item(pub["content"], pub, ctx.repo,
                                       plan_style, phase="lining",
                                       mod_titles=mod_titles_for(pub, drift_mods))
-            errs = [e for e in errs if not gates.is_auto_fixable(e)]
+            errs = gates.blocking_errors(errs)   # 过滤单一属主(仅剔 auto)
             if errs:
                 item = next((x for x in pages + cards
                              if str(x.get("id")) == pub["page_id"]), None)
@@ -395,16 +396,9 @@ def cmd_update(args) -> int:
         die(f"建 run 时发现并发活动 run {raced['id']}({raced['state']}) — "
             "重试 `pwiki update`", config.EXIT_PRECOND)
     modules_by_id = {m.get("id"): m for m in modules}
-    items = []
-    for item, _why in stale:
-        # 卡片字面量统一走 planner.card_job(四个排队入口曾各抄一份)
-        if config.is_card_kind(item.get("kind")):
-            items.append(card_job(item, ctx.locale))
-            continue
-        job = dict(item)
-        job["path"] = posix(page_path_for(pages, job, ctx.locale,
-                                         modules_by_id))
-        items.append(job)
+    # 分派统一走 planner.queue_item(卡片/页 + 路径派生的单一属主)
+    items = [queue_item(item, pages, ctx.locale, modules_by_id)
+             for item, _why in stale]
     ctx.db.queue_jobs(run_id, items, style=plan_style)
     # 排队窗口守卫式写(cmd_begin 同款): 期间被并发 cancel/begin --force
     # 取消的 run 不翻回活动态

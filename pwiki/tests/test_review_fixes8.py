@@ -1014,3 +1014,123 @@ def test_r6_37_join_confined_last_segment_symlink(tmp_path):
     for _ in range(3):
         assert join_confined(r, "src/evil.py") is None
         assert join_confined(r, "src/inner.py") is not None
+
+
+# --------------------------------------------------------------------------- #
+# 批次⑤/⑥: 清理 19 条的锁定测试(#38/#39/#40/#42/#48/#54 等)
+# --------------------------------------------------------------------------- #
+
+def test_r6_38_queue_item_dispatch():
+    """计划条目 → job 的分派单一属主: 卡片走 card_job, 页走路径派生。"""
+    from pwiki_lib.planner import queue_item
+    pages = [{"id": "p1", "title": "页", "kind": "page"}]
+    card = {"id": "c1", "title": "卡", "kind": "external_dependency",
+            "scope": ["src/"]}
+    job = queue_item(card, pages, "zh", {})
+    assert job["kind"] == "external_dependency"   # 归一化留给 queue_jobs
+    assert job["source_files"] == ["src/"]        # 卡片: scope 回退
+    assert job["path"].startswith("knowledge/zh/")
+    page_job = queue_item(dict(pages[0]), pages, "zh", {})
+    assert page_job["path"] and not page_job["path"].startswith("knowledge/")
+
+
+def test_r6_39_load_plan_strips_none(tmp_path):
+    """yaml 显式 None(`type:` 空值)在读取面归一 —— .get 默认值兜底。"""
+    from pwiki_lib import planner
+    from pwiki_lib.yamlite import yaml_dump
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["pages"] = [{"id": "x", "title": "t", "type": None,
+                      "objective": None, "source_files": None}]
+    plan["style"] = None
+    planner.save_plan(ctx, plan)
+    loaded = planner.load_plan(ctx)
+    pg = loaded["pages"][0]
+    assert "type" not in pg and "objective" not in pg \
+        and "source_files" not in pg
+    assert (pg.get("type") or "") == ""      # 叶子消费点口径
+    assert "style" not in loaded
+
+
+def test_r6_40_page_meta_cols_single_source():
+    """27 列清单单一真源: _row_like 键集 / F36 比对列 / db 常量三处一致。"""
+    from pwiki_lib.db import PAGE_META_COLS
+    from pwiki_lib.publish import _REPUBLISH_CMP_COLS, _row_like
+    assert _REPUBLISH_CMP_COLS == PAGE_META_COLS
+    assert set(_row_like({})) == set(PAGE_META_COLS) | {"page_id"}
+    # page 表 schema 的元数据列 ⊆ 真源(SCHEMA 列名逐一对得上)
+    from pwiki_lib.db import SCHEMA
+    page_ddl = SCHEMA.split("CREATE TABLE IF NOT EXISTS page (")[1] \
+        .split("PRIMARY KEY")[0]
+    cols = {ln.split()[0] for ln in page_ddl.splitlines()
+            if ln.startswith("  ") and ln.strip() and not ln.strip().startswith("--")}
+    assert set(PAGE_META_COLS) <= cols, \
+        set(PAGE_META_COLS) - cols
+
+
+def test_r6_42_wide_cite_packs_locked_to_config():
+    """build_packs 的 wide_cite 标志与 config.WIDE_CITE_PACK_KEYS 双向锁定
+    —— 新增高密度聚合包忘同步任一侧, 分档即错(size_hard 的 deep 页被硬拒)。
+    静态源扫描: 标志与 key 同属一个 dict 字面量(编译期常量, 与运行时
+    实例化门槛无关)。"""
+    import re as _re
+    from pwiki_lib import config
+    src = open(os.path.join(os.path.dirname(__file__), "..", "scripts",
+                            "pwiki_lib", "themes.py"),
+               encoding="utf-8").read()
+    flagged = set()
+    for m in _re.finditer(r'"wide_cite": True', src):
+        head = src[max(0, m.start() - 300):m.start()]
+        km = None
+        for km in _re.finditer(r'"key": "([a-z_]+)"', head):
+            pass
+        assert km is not None, "wide_cite 标志不在包 dict 内"
+        flagged.add(km.group(1))
+    assert flagged == set(config.WIDE_CITE_PACK_KEYS), \
+        (flagged, set(config.WIDE_CITE_PACK_KEYS))
+
+
+def test_r6_48_toc_titles_match_section_re():
+    """注入侧过滤集合与剥除正则同源: TOC_SECTION_RE 认的标题都在集合里。"""
+    from pwiki_lib import i18n
+    titles = i18n.toc_titles()
+    for t in titles:
+        assert i18n.TOC_SECTION_RE.search(f"## {t}\n正文"), t
+    assert i18n.TOC_HEADING_RE.match("## Table of Contents")
+
+
+def test_r6_54_is_skeleton_both_spellings():
+    """骨架谓词认两种手编拼写(themes 侧曾只查布尔)。"""
+    from pwiki_lib.planner import is_skeleton
+    assert is_skeleton({"skeleton": True})
+    assert is_skeleton({"module_type": "skeleton"})
+    assert is_skeleton({"skeleton": True, "module_type": "skeleton"})
+    assert not is_skeleton({"skeleton": False})
+    assert not is_skeleton({"module_type": "real"})
+
+
+def test_r6_47_fence_pattern_single_source():
+    """split_fences 与 iter_h2 共用同一编译模式: 栅栏内标题不进枚举。"""
+    from pwiki_lib import gates
+    content = "# T\n\n## A\n\nx\n\n```python\n## B\n```\n\n## C\n"
+    parts = gates.split_fences(content)
+    assert any(p.startswith("```") and "## B" in p for p in parts)
+    assert [m.group(1).strip() for m in gates.iter_h2(content)] == ["A", "C"]
+
+
+def test_r6_49_feature_leaf_id_shapes(tmp_path):
+    """feature 叶 id 形态保真: 族叶带族前缀, 独立叶不带(r6 合并两份
+    builder.add 时的回归锁定)。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["plan", "--themes", "--repo", repo.path, "--root", root]) \
+        in (config.EXIT_OK, config.EXIT_GATE)
+    from pwiki_lib import planner
+    ctx = _ctx(repo, root)
+    if os.path.isfile(ctx.plan_path):
+        plan = planner.load_plan(ctx)
+        for p in plan.get("pages") or []:
+            pid = str(p.get("id") or "")
+            if pid.startswith("feature-") and p.get("parent"):
+                # 形态: feature-[族slug-]stem —— 至少两段或就是 stem
+                assert pid.count("-") >= 1

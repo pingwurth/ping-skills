@@ -19,6 +19,7 @@ import uuid
 
 from . import config, i18n
 from .config import Ctx, now_iso
+from .db import PAGE_META_COLS
 from .planner import module_dir_name
 from .util import (as_int, atomic_write, CJK_RE, json_list, posix, die,
                    info, join_confined)
@@ -171,11 +172,9 @@ def compose_export_content(ctx: Ctx, p, style: str, all_paths: set,
         # 下作者手写的 cite 块被导回时整块剥掉
         return content, n_links
     content = gates.rebuild_cite_block(content, ctx.repo, ctx.locale)
-    _toc_titles = set(i18n.TOC_TITLE.values()) | {"Table of Contents"}
-    # 目录标题栅栏感知(iter_h2): 示例代码里的 '## 安装' 不是节 —— 曾生出
-    # 指进栅栏的幻影目录锚点
+    # 目录标题集合单一来源(i18n.toc_titles, 与剥除正则同源)
     h2 = [m.group(1).strip() for m in gates.iter_h2(content)
-          if m.group(1).strip() not in _toc_titles]
+          if m.group(1).strip() not in i18n.toc_titles()]
     if len(h2) >= 3:
         toc = ["## " + i18n.toc_title(ctx.locale)] + \
             [f"{i}. [{h}](#{_md_anchor(h)})" for i, h in enumerate(h2, 1)]
@@ -461,7 +460,7 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
     info(f"publish: {written} files ({pruned} moved-out pruned"
          + (f", {swept} orphans swept (--prune)" if prune else "")
          + f", {link_fixes} links normalized)")
-    _write_indexes(ctx, part, pages, modules, run["id"], style)
+    _write_indexes(ctx, part, pages, modules, run["id"])
     _write_generation_state(ctx, part, run, pages)
     needs_review = [p["page_id"] for p in pages if p["path"]
                     and not os.path.isfile(os.path.join(ctx.root, p["path"]))]
@@ -488,12 +487,10 @@ def _row_like(d: dict):
 
 
 # F36: publish_page 落库列中参与"未变跳写"比对的键 —— run_id/updated_at
-# 是过程性簿记(全库零读者), content_hash 由 content 推出, 均不参与比对
-_REPUBLISH_CMP_COLS = ("title", "parent_id", "ordinal", "kind", "module",
-                       "sheet", "card_kind", "path", "prompt", "source_files",
-                       "article_type", "slug", "objective", "modules",
-                       "summary", "key_topics", "style", "scope",
-                       "required_sections", "title_check", "pack_key")
+# 是过程性簿记(全库零读者), content_hash 由 content 推出, 均不参与比对。
+# 列集派生自 db.PAGE_META_COLS 单一真源(r6 #40: 曾与 _row_like/publish_page
+# 的手抄清单各自漂移)
+_REPUBLISH_CMP_COLS = PAGE_META_COLS
 
 
 def _republish_changed(old_row, new_row, new_content: str) -> bool:
@@ -513,8 +510,8 @@ def _republish_changed(old_row, new_row, new_content: str) -> bool:
     return False
 
 
-def _write_indexes(ctx: Ctx, part, pages: list, modules: list, run_id: str,
-                   style: str) -> None:
+def _write_indexes(ctx: Ctx, part, pages: list, modules: list,
+                  run_id: str) -> None:
     from .planner import render_module_tree
     os.makedirs(ctx.meta_dir(), exist_ok=True)
     os.makedirs(ctx.content_dir(), exist_ok=True)
@@ -825,13 +822,11 @@ def cmd_write(args) -> int:
                                   phase="lining", mod_titles=mod_titles)
     for w in warns:
         info(f"warn: {w}")
-    # 差一引用是机械可修(compose 落盘时钳位) —— 与 finish 同口径排除,
-    # 否则同一份稿 finish 能过而手工 write 被拒
-    errs = [e for e in errs if not gates.is_auto_fixable(e)]
-    if args.lenient and not args.force:
-        # lenient 与 submit/finish 同一契约(只放宽 H1/无引用), 曾当
-        # --force 全放 —— 引用真实性硬错也被手工发布
-        errs = [e for e in errs if not gates.is_lenient_droppable(e)]
+    # 过滤策略单一属主(gates.blocking_errors, 与 finish/submit 同契约):
+    # 差一引用是机械可修(compose 落盘时钳位), lenient 只放宽 H1/无引用
+    errs = gates.blocking_errors(
+        errs, lenient=bool(getattr(args, "lenient", False))
+        and not args.force)
     if errs and not args.force:
         for e in errs:
             print(f"  rejected: {e}", file=sys.stderr)
@@ -900,13 +895,10 @@ def cmd_delete(args) -> int:
     # 索引同步重写: 曾只删行删文件 —— _index.yaml / knowledge/_index.yaml /
     # repowiki-metadata.json / generation-state.json 仍挂着幻影条目指向
     # 已删文件(Qoder 导入面读的正是这些索引), 直到某次 finish 才自愈
-    from .planner import load_plan_optional
-    plan = load_plan_optional(ctx)   # P60: 单一实现(坏计划留 warn)
-    style = str((plan or {}).get("style") or ctx.style)
     try:
         pages_now = ctx.db.published_pages(pid)
         _write_indexes(ctx, ctx.partition(), pages_now,
-                       ctx.db.modules(pid), "manual", style)
+                       ctx.db.modules(pid), "manual")
         _write_generation_state(ctx, ctx.partition(),
                                 {"id": "manual"}, pages_now)
     except Exception as e:   # noqa: BLE001 — 索引尽力而为, 不挡删除

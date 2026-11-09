@@ -413,7 +413,7 @@ def test_p1_14_15_ordinal_and_null_lists_gated_and_normalized(tmp_path):
     # 旧库残存 'null' 行的容错解码(next 的 join / submit 的迭代不再崩)
     payload = engine._job_payload(
         jc, ctx, {"id": "r1", "state": "DOCUMENT_GENERATING",
-                  "generation_type": "FULL"}, [], {"total": 2})
+                  "generation_type": "FULL"}, {"total": 2})
     assert payload["job"]["source_files"] == [] \
         and payload["job"]["modules"] == []
 
@@ -1063,7 +1063,7 @@ def test_p2_50_indexes_tolerate_corrupt_json_rows(tmp_path):
         "required_sections": "[]", "title_check": 0, "pack_key": "",
         "content": "# P\n",
     }]
-    publish._write_indexes(ctx, part, rows, [], "manual", "concise")
+    publish._write_indexes(ctx, part, rows, [], "manual")
     assert os.path.isfile(os.path.join(ctx.root, "zh", "content",
                                        "_index.yaml"))
 

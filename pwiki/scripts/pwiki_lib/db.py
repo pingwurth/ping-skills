@@ -31,6 +31,17 @@ SCHEMA_VERSION = "v3"
 # 变更时, 把老版本加进本集合, 有损变更则要写真正的迁移步骤)。
 IMPLICIT_SCHEMA_VERSIONS = frozenset({"v3"})
 
+# page 表**元数据**列的单一真源(r6 #40): publish_page 的 INSERT、
+# publish._row_like 的键集、F36 比对列(_REPUBLISH_CMP_COLS)全部应与这份
+# 对齐 —— 曾九处手工枚举互相漂移("kept 合并曾只搬 4 字段"、"对账字段曾
+# 不触发 stale"都是清单漂移的现行案例)。content/content_hash/run_id/
+# updated_at 是稿体与簿记列, 不在此集。测试锁定三处派生一致。
+PAGE_META_COLS = ("title", "parent_id", "ordinal", "kind", "module",
+                  "sheet", "card_kind", "path", "prompt", "source_files",
+                  "article_type", "slug", "objective", "modules", "summary",
+                  "key_topics", "style", "scope", "required_sections",
+                  "title_check", "pack_key")
+
 
 class SchemaVersionError(RuntimeError):
     """开库时 schema_version 不被本版本支持(F47 开库门禁)。"""

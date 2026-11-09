@@ -41,6 +41,22 @@ PLAN_HEADER = """\
 # Plan IO
 # --------------------------------------------------------------------------- #
 
+def _strip_none(plan: dict) -> dict:
+    """yaml 显式 None(`type:` 空值)曾击穿全部 .get 默认值, 六个叶子消费
+    点各自容错(r3 P1 家族)—— 读取面统一删 None 键, 等效于让 .get 默认
+    兜底。删键与显式 None 在 downstream 语义等价: 三路合并(merge_manual)
+    以"≠引擎输出快照"判手改, MISS 与 None 同样不等; save_plan 重写后
+    显式空值变成删行(PLAN_HEADER 记载的两种清空写法归一)。"""
+    for key in ("pages", "cards", "aliases"):
+        items = plan.get(key)
+        if isinstance(items, list):
+            plan[key] = [{k: v for k, v in e.items() if v is not None}
+                         if isinstance(e, dict) else e for e in items]
+    for k in [k for k, v in plan.items() if v is None]:
+        del plan[k]
+    return plan
+
+
 def load_plan(ctx: Ctx) -> dict:
     if not os.path.isfile(ctx.plan_path):
         die(f"plan not found: {ctx.plan_path} — 先跑 `pwiki modules` 或 `pwiki plan --seed`",
@@ -53,7 +69,7 @@ def load_plan(ctx: Ctx) -> dict:
         die(f"wiki_plan.yaml 解析失败: {e}", config.EXIT_GATE)
     if not isinstance(plan, dict):
         die("wiki_plan.yaml: 顶层必须是映射", config.EXIT_GATE)
-    return plan
+    return _strip_none(plan)
 
 
 def load_plan_optional(ctx: Ctx):
@@ -202,6 +218,26 @@ def card_job(card: dict, locale: str) -> dict:
     item["source_files"] = card.get("source_files") or card.get("scope") or []
     item["path"] = posix(card_path_for(card, locale))
     return item
+
+
+def queue_item(item: dict, pages: list, locale: str,
+               modules_by_id: dict) -> dict:
+    """计划条目 → 排队 job dict(卡片/页分派 + 路径派生的单一属主)。
+    begin/regenerate/update 三个排队入口曾各抄一份, begin 那份还缺
+    is_card_kind 守卫 —— 混进 queue_pages 的卡片类条目会被当页派生
+    content 路径。"""
+    if config.is_card_kind(item.get("kind")):
+        return card_job(item, locale)
+    job = dict(item)
+    job["path"] = posix(page_path_for(pages, job, locale, modules_by_id))
+    return job
+
+
+def is_skeleton(m: dict) -> bool:
+    """骨架模块谓词单一实现: 计划两拼写(skeleton 布尔 / module_type:
+    skeleton)都是手工字段且 modules.py 总是成对写 —— 手编可只留一种,
+    themes 曾只查布尔拼写, 与 validate/render 的判定分叉。"""
+    return bool(m.get("skeleton")) or str(m.get("module_type")) == "skeleton"
 
 
 # 人工编辑字段(c027 契约): 再规划合并时同 id 条目保留的手工调过的字段。
@@ -445,17 +481,10 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
             s = str(s)
             if not s:
                 continue
-            # c049/c051: 计划声明的源不得逃出 repo(绝对/../ 一律拒)
-            target = join_confined(ctx.repo, s.rstrip("/"))
-            if target is None:
-                errors.append(f"page {pid}: 源路径越界(仅限仓内相对路径): {s}")
-            elif s.endswith("/"):
-                if not os.path.isdir(target):
-                    (warnings if warn_missing else errors).append(
-                        f"page {pid}: 源目录不存在: {s}")
-            elif not os.path.isfile(target):
-                (warnings if warn_missing else errors).append(
-                    f"page {pid}: 源文件不存在: {s}")
+            # c049/c051 的单一助手(尾斜杠判目录): 第四份手抄块的措辞与
+            # 谓词曾与模块/卡片门漂移 —— 同一个坏路径三个门行为不一致
+            _check_repo_path(ctx, s, f"page {pid}: 源", errors, warnings,
+                             warn_missing, is_dir=s.endswith("/"))
         for s in p.get("scope") or []:
             _check_repo_path(ctx, s, f"page {pid}: scope",
                              errors, warnings, warn_missing, is_dir=True)
@@ -566,7 +595,7 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
         mid = str(m.get("id", ""))
         if mid == "root":
             continue
-        if m.get("skeleton") or str(m.get("module_type")) == "skeleton":
+        if is_skeleton(m):
             continue
         keys = module_keys.get(mid) or {mid}
         if not (keys & covered):
@@ -802,11 +831,7 @@ def seed_cards(inv: dict, locale: str) -> list:
         # slug 会撞车("@foo/bar" 与 "foo-bar" 同 slug) —— id 去重,
         # 引擎自己生成的计划必须能过自己的 validate
         base = f"dep-{slugify(name, str(i))}"
-        cid, n = base, 2
-        while cid in used_dep_ids:
-            cid = f"{base}-{n}"
-            n += 1
-        used_dep_ids.add(cid)
+        cid = _unique_id(base, used_dep_ids)   # 属主模块内的第二副本清除
         cards.append({
             "id": cid,
             "kind": "external_dependency", "title": name, "scope": ["**"],
@@ -1123,9 +1148,6 @@ def render_module_tree(plan: dict, parent_modules=None) -> str:
     else:
         keep_ids = {m.get("id") for m in modules}
     lines = []
-
-    def is_skeleton(m):
-        return bool(m.get("skeleton")) or str(m.get("module_type")) == "skeleton"
 
     def walk(mid, prefix):
         m = next((x for x in modules if x.get("id") == mid), None)

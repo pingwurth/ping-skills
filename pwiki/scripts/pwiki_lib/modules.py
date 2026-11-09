@@ -231,7 +231,7 @@ def decompose(inv: dict, max_modules: int = 40, min_files: int = 4,
     # ----- 容器下兄弟按生态分组合成模块 -----
     children_of: dict = {}
     for d in leaf:
-        parent = d.rsplit("/", 1)[0] if "/" in d else ""
+        parent = dirname(d)
         children_of.setdefault(parent, []).append(d)
 
     synthetic: dict = {}
@@ -288,7 +288,7 @@ def decompose(inv: dict, max_modules: int = 40, min_files: int = 4,
             "module_path": path, "title": title, "scope": [path + "/"],
             "source_files": [], "depends_on": [], "related_to": [],
             "synthetic": False,
-            "parent": path.rsplit("/", 1)[0] if "/" in path else "",
+            "parent": dirname(path),
             "children": [], "ecosystem": eco_of(path),
             "files": nfiles, "lines": nlines,
         }
@@ -449,8 +449,7 @@ def decompose(inv: dict, max_modules: int = 40, min_files: int = 4,
                                           if c != d]
 
     # ----- D1 覆盖断言: 任何源目录不得被静默丢失 -----
-    def parent_of(d: str) -> str:
-        return d.rsplit("/", 1)[0] if "/" in d else ""
+    parent_of = dirname
 
     def subdivided(d: str) -> bool:
         return bool(modules.get(d, {}).get("children"))

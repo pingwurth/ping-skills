@@ -34,6 +34,7 @@ from .styles import preset
 from .corpus import (Corpus, dedupe_files, dirs_of, is_generated,
                      is_never_cite, is_weak_evidence, match_any, path_match,
                      pick_files, primary_first, stem_of, trim_sibling_overlap)
+from .planner import is_skeleton   # 谓词单一实现(两拼写手编面都认)
 from .util import dirname, slugify as pslugify
 
 # --------------------------------------------------------------------------- #
@@ -669,24 +670,22 @@ def instantiate_pack(builder: Builder, corpus: Corpus, pack: dict,
     pack_strong = [f for f in evidence if not is_weak_evidence(f["path"])]
     child_cap = pack.get("ops_thin_cap") if len(pack_strong) < 3 else None
     children = []
+
+    def _decline(child, reason):
+        # 拒因记录单一形态(r4 #61 同族: 四份字面量漂移会让 plan.md 评审门
+        # 上部分拒因缺字段)
+        builder.theme_declined.append({
+            "pack": pack["key"], "child": child.get("key"),
+            "title": child.get("title"), "reason": reason})
     for child in pack.get("children", []):
         if child_cap is not None and len(children) >= child_cap:
-            builder.theme_declined.append({
-                "pack": pack["key"], "child": child.get("key"),
-                "title": child.get("title"),
-                "reason": f"ops-thin repo cap ({len(pack_strong)} strong evidence "
-                          f"files): kept top {child_cap} children"})
+            _decline(child, f"ops-thin repo cap ({len(pack_strong)} strong evidence " f"files): kept top {child_cap} children")
             continue
         child_ev = corpus.collect(child, pool=evidence)
         if len(child_ev) < scaled_min(child, 2, profile):
             # P45: 证据不足的静默丢弃也入 theme_declined —— 人审门要能区分
             # "仓库没有该子主题"与"被大小底线切掉"(D12 要关掉的盲点)
-            builder.theme_declined.append({
-                "pack": pack["key"], "child": child.get("key"),
-                "title": child.get("title"),
-                "reason": f"evidence below minimum: {len(child_ev)} file(s), "
-                          f"needs {scaled_min(child, 2, profile)} "
-                          "(D12 evidence gate)"})
+            _decline(child, f"evidence below minimum: {len(child_ev)} file(s), " f"needs {scaled_min(child, 2, profile)} " "(D12 evidence gate)")
             continue
         # D12 证据门 tier 1: 关键词门控子项需要 ≥1 个非文档非锁文件且路径含关键词
         strong_ev = [f for f in child_ev if not is_weak_evidence(f["path"])]
@@ -695,20 +694,13 @@ def instantiate_pack(builder: Builder, corpus: Corpus, pack: dict,
             kw_strong = [f for f in strong_ev
                          if any(k in f["path"].lower() for k in kws)]
             if not kw_strong:
-                builder.theme_declined.append({
-                    "pack": pack["key"], "child": child.get("key"),
-                    "title": child.get("title"),
-                    "reason": "no strong evidence matching keywords: " +
-                              ", ".join(kws[:6]) + "…"})
+                _decline(child, "no strong evidence matching keywords: "
+                          + ", ".join(kws[:6]) + "…")
                 continue
         # tier 2: requires_strong 子项需要 N 个强文件(纯文档证据归 devguide)
         need_strong = child.get("requires_strong")
         if need_strong and len(strong_ev) < need_strong:
-            builder.theme_declined.append({
-                "pack": pack["key"], "child": child.get("key"),
-                "title": child.get("title"),
-                "reason": f"only {len(strong_ev)} strong evidence file(s), needs "
-                          f"{need_strong} (docs-only evidence belongs to the dev guide)"})
+            _decline(child, f"only {len(strong_ev)} strong evidence file(s), needs " f"{need_strong} (docs-only evidence belongs to the dev guide)")
             continue
         anchor_dirs = {dirname(f["path"]) for f in child_ev
                        if match_any(f["path"], child.get("patterns") or [])}
@@ -795,6 +787,9 @@ def build_packs(builder: Builder, corpus: Corpus, modules: dict) -> list:
     packs.append({
         "key": "architecture", "title": "架构设计", "kind": "architecture",
         "always": True, "priority": 950, "patterns": [],
+        # wide_cite: 高密度聚合包(D15 宽引用分档)—— 与 config.
+        # WIDE_CITE_PACK_KEYS 双向锁定(测试断言两侧一致)
+        "wide_cite": True,
         "source_keywords": ["readme", "main", "index", "app", "server", "config"],
         "children": arch_children})
 
@@ -942,6 +937,7 @@ def build_packs(builder: Builder, corpus: Corpus, modules: dict) -> list:
                                               pool=ai_ev) else "AI 服务集成")
         packs.append({
             "key": "ai", "title": ai_title, "kind": "architecture", "priority": 850,
+            "wide_cite": True,   # 宽引用分档(与 config.WIDE_CITE_PACK_KEYS 锁定)
             "patterns": P_AI,
             "source_keywords": ["ai", "llm", "contract", "mock", "stream",
                                 "provider", "orchestrator"],
@@ -979,6 +975,7 @@ def build_packs(builder: Builder, corpus: Corpus, modules: dict) -> list:
         api_title = "API 接口参考" if corpus.match(["*.proto"], pool=api_ev) else "API 参考"
         packs.append({
             "key": "api", "title": api_title, "kind": "cross", "priority": 840,
+            "wide_cite": True,   # 宽引用分档(与 config.WIDE_CITE_PACK_KEYS 锁定)
             "patterns": P_API,
             "source_keywords": ["route", "proto", "openapi", "contract", "model"],
             "children": [
@@ -1305,6 +1302,7 @@ def build_packs(builder: Builder, corpus: Corpus, modules: dict) -> list:
         packs.append({
             "key": "microservices", "title": "微服务集群", "kind": "architecture",
             "priority": 840, "patterns": ["/services/"],
+            "wide_cite": True,   # 宽引用分档(与 config.WIDE_CITE_PACK_KEYS 锁定)
             "source_keywords": ["readme", "main", "application", "service", "config"],
             "children": ms_children})
 
@@ -1441,6 +1439,26 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
                 priority=720, prompt=prompt_for("功能指南", "feature", style, builder.locale))
             top_family = max(families, key=lambda k: len(families[k])) \
                 if families else None
+
+            def add_feature_leaf(title, f, parent_id, fam_slug, hint):
+                # 两处调用点(族叶/独立功能叶)共用一份取源规则 —— 曾逐字
+                # 两份, 收紧 pick_files 上限或关键词时只有一份跟进。
+                # fam_slug 为空 = 独立功能叶(原 page_id 无族前缀段)
+                stem = slugify(stem_of(f["path"]))
+                builder.add(
+                    page_id=("feature-" + fam_slug + "-" + stem)
+                    if fam_slug else ("feature-" + stem),
+                    title=title, kind="feature", parent=parent_id,
+                    scope=[dirname(f["path"])] if dirname(f["path"])
+                    else parent["scope"],
+                    source_files=[f["path"]] + pick_files(
+                        [x for x in files
+                         if dirname(x["path"]) == dirname(f["path"])],
+                        ["shared", "store", "service", "api", "type"], 3),
+                    priority=690, prompt=prompt_for(title, "feature",
+                                                    style, builder.locale),
+                    title_hint=hint)
+
             for fam, items in families.items():
                 fam_src = pick_files([f for _, f in items],
                                      ["page", "view", "training"],
@@ -1455,30 +1473,10 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
                 if fam != top_family:
                     continue
                 for title, f in items[:profile["leaves_cap"]]:
-                    builder.add(
-                        page_id="feature-" + slugify(fam) + "-" +
-                        slugify(stem_of(f["path"])),
-                        title=title, kind="feature", parent=fam_page["id"],
-                        scope=[dirname(f["path"])] if dirname(f["path"])
-                        else parent["scope"],
-                        source_files=[f["path"]] + pick_files(
-                            [x for x in files
-                             if dirname(x["path"]) == dirname(f["path"])],
-                            ["shared", "store", "service", "api", "type"], 3),
-                        priority=690, prompt=prompt_for(title, "feature", style, builder.locale),
-                        title_hint=fam)
+                    add_feature_leaf(title, f, fam_page["id"],
+                                     slugify(fam), fam)
             for title, f in others[:2]:
-                builder.add(
-                    page_id="feature-" + slugify(stem_of(f["path"])),
-                    title=title, kind="feature", parent=parent["id"],
-                    scope=[dirname(f["path"])] if dirname(f["path"])
-                    else parent["scope"],
-                    source_files=[f["path"]] + pick_files(
-                        [x for x in files
-                         if dirname(x["path"]) == dirname(f["path"])],
-                        ["shared", "store", "service", "api", "type"], 3),
-                    priority=690, prompt=prompt_for(title, "feature", style, builder.locale),
-                    title_hint="功能指南")
+                add_feature_leaf(title, f, parent["id"], "", "功能指南")
 
     # ---------- module deep-dive fallback ----------
     covered_modules = {p["module_path"] for p in builder.pages if p.get("module_path")}
@@ -1544,7 +1542,8 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
         p["related_pages"] = [x for x in p["related_pages"] if x in ids]
 
     # ---------- D8: 骨架目录 声明 vs 现状 ----------
-    skeleton_dirs = {mp.rstrip("/") for mp, m in modules.items() if m.get("skeleton")}
+    skeleton_dirs = {mp.rstrip("/") for mp, m in modules.items()
+                     if is_skeleton(m)}
     skeleton_clause = ("注意：本页范围包含骨架/占位目录（仅 README、清单与配置，无实现代码）。"
                        "README 中的规划内容一律标注为「声明」，与「实现现状」分开写；"
                        "缺失的实现用「仓库中未发现 X 的实现」表述，不得把声明写成已交付行为。")
@@ -1872,12 +1871,10 @@ def _plan_cards(ctx: Ctx, inv: dict, corpus: Corpus, files: list,
         # 'tauri' 与 '@tauri-apps/api' 都映射到 'Tauri': 重复 id 阻塞
         # begin(validate 的重复检查), 撞标题则 _die_on_path_collision
         # 打死 plan --themes
-        cid = "card-" + slug
-        n = 2
-        while cid in card_ids:
-            cid = f"card-{slug}-{n}"
-            n += 1
-        card_ids.add(cid)
+        # 唯一 id 走 planner._unique_id(P67 教训: 页 id 份已收敛, 卡片这份
+        # 手抄漏网 —— 200 组随机碰撞验证两者输出逐一致)
+        from .planner import _unique_id
+        cid = _unique_id("card-" + slug, card_ids)
         title = str(name)
         n = 2
         while title in card_titles:
