@@ -408,9 +408,13 @@ def cmd_plan_layers(ctx: Ctx, args) -> int:
         # 字段, 计划里有而本轮分层没再输出的内容页原样保留, 只有
         # `pwiki plan --reset` 才整体重建
         from .planner import MANUAL_FIELDS, assign_paths, validate_plan
-        from .themes import merge_manual
+        from .themes import (load_manual_baseline, merge_manual,
+                             save_manual_baseline)
+        # 三路合并基线(themes 路线同款): 显式清空/删键也是人工编辑
+        engine_prev = load_manual_baseline(ctx)
         merged = merge_manual(new_tree, old_pages, MANUAL_FIELDS,
-                              keep=lambda p: p.get("kind") != "module_sheet")
+                              keep=lambda p: p.get("kind") != "module_sheet",
+                              engine_prev=engine_prev)
         kept_manual = len(merged) - len(new_tree)
         if kept_manual:
             info(f"保留计划内已有、本轮分层未覆盖的手编页 {kept_manual} 个"
@@ -428,6 +432,8 @@ def cmd_plan_layers(ctx: Ctx, args) -> int:
             die("commit 后的 plan 未过校验 — 调整 work/plan-layers.json "
                 "的层级(裁文章数/深度)再 commit", config.EXIT_GATE)
         save_plan(ctx, plan)
+        # 基线刷新为本次分层输出(按 id 并入, 卡片的既有基线保留)
+        save_manual_baseline(ctx, new_tree)
         print(f"plan rewritten: {len(new_tree)} article pages + "
               f"{kept_manual} kept + "
               f"{len(kept_sheets)} module sheets -> {ctx.plan_path}")

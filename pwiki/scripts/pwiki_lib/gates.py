@@ -673,7 +673,24 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     pages = plan_pages(plan)
     cards = plan_cards(plan)
     mods_by_id = modules_by_id(plan)
-    style = str(plan.get("style") or ctx.style)
+    # 每行按自己的盖章复检(行戳 > plan > last_run > ctx, 与 publish 逐行
+    # 合成 / export 双向同口径)—— 曾用单一 plan 级 style 复检全树: 混合
+    # 盖章树上剥除判定与注入侧分叉, 引擎自己刚发布的树被 validate 打
+    # exit 2(空盖章行在 db_to_file/file_to_db 两方向也曾解析出不同风格)
+    _stamps: dict = {}
+    _run_style = ""
+    if getattr(ctx, "db", None):
+        # ctx 未 load(裸构造/只读探测)时无行戳可用, 整树走 base 兜底
+        _pid = ctx.partition()["id"]
+        _stamps = {str(r["page_id"]): str(r["style"] or "")
+                   for r in ctx.db.published_pages(_pid)}
+        _run_style = str((ctx.db.last_run(_pid) or {"style": ""})["style"] or "")
+    _base_style = str(plan.get("style") or _run_style or ctx.style)
+
+    def _row_style(item) -> str:
+        return _stamps.get(str(item.get("id")), "") or _base_style
+
+    style = _base_style   # 兼容下方内链 pass 等树级兜底
     report_pages = []
     contents: dict = {}      # path → 文件内容(one 与内链 pass 复用, 不重读)
     # 路径当场派生而不是读 plan 的 path 键: path 只在计划写入时由
@@ -719,9 +736,10 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         from .publish import export_injects
         item2 = dict(item)   # P63: sqlite3.Row 也支持 dict(), 残留三元已无差异
         item2.setdefault("kind", kind_hint or "page")
-        if item2.get("kind") == "page" and export_injects(ctx, style, plan):
+        item_style = _row_style(item2)
+        if item2.get("kind") == "page" and export_injects(ctx, item_style, plan):
             content = strip_injected_layers(content)
-        errs, warns = gate_item(content, item2, ctx.repo, style,
+        errs, warns = gate_item(content, item2, ctx.repo, item_style,
                                 phase="lining",
                                 mod_titles=mod_titles_for(item, all_mods))
         if fix:
@@ -736,13 +754,13 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
                 from .util import atomic_write
                 row = dict(item2, content=content3, path=path)
                 out_content, _ = compose_export_content(
-                    ctx, row, style, all_paths, plan=plan)
+                    ctx, row, item_style, all_paths, plan=plan)
                 atomic_write(full, out_content)
                 contents[path] = out_content
                 warns.append(f"fix: 修复 {n1} 个章节来源块 / {n2} 处差一引用")
                 # 复查保持原严重度(lining) —— 曾降回 submit 口径, 只要含
                 # 一处可机械修复的引用, 其余风格错误全部跟着降成警告
-                errs, warns2 = gate_item(content3, item2, ctx.repo, style,
+                errs, warns2 = gate_item(content3, item2, ctx.repo, item_style,
                                          phase="lining",
                                          mod_titles=mod_titles_for(item, all_mods))
                 warns = warns + warns2

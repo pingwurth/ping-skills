@@ -28,6 +28,8 @@ PLAN_HEADER = """\
 # 规则:
 #   - 引擎绝不静默覆盖手工编辑; 需要重建时用 `pwiki plan --reset`
 #     (themes 计划的重建是 `plan --themes --reset`)。
+#   - 清空一个人工字段(如 parent 置空以提升为顶层页)直接删值或删行 ——
+#     引擎按上次输出快照识别"清空也是编辑", 再规划时保留空值不回填。
 #   - `pwiki validate` 报错时 `pwiki begin` 被挡住(exit 2)。
 #   - style: concise = Qoder 短页口径 / deep = repowiki 长文口径(门禁按此执行)。
 #   - modules 的 path 是模块树路径(root 为 "/"); pages 的 parent 是页 id。
@@ -963,6 +965,11 @@ def cmd_plan(args) -> int:
             die("plan 没有 modules — 先跑 `pwiki modules`", config.EXIT_PRECOND)
         assign_paths(plan, ctx.locale)
         save_plan(ctx, plan)
+        # 整建 = 全新引擎输出: 三路合并基线同步刷新(themes/layers 的
+        # merge_manual 据此区分"引擎值"与"手改"; 不刷新会把旧基线里的值
+        # 全部误判为手改, 再生被卡死)
+        from .themes import save_manual_baseline
+        save_manual_baseline(ctx, list(plan["pages"]) + list(plan["cards"]))
         info(f"plan 已{'重置' if has_plan else '种子'}: {ctx.plan_path}"
              f" ({len(plan['pages'])} pages, {len(plan['cards'])} cards)")
         return config.EXIT_OK

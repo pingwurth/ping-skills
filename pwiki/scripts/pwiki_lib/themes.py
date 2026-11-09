@@ -231,24 +231,72 @@ def load_overrides(ctx: Ctx) -> dict:
 
 
 def merge_manual(new_items: list, old_items: list, manual_fields,
-                 keep=None) -> list:
+                 keep=None, engine_prev: dict = None) -> list:
     """新规划结果合并人工编辑(c027 契约的单一落点, pages/cards 两份结构
     相同的手抄曾各自漂移): 同 id 保留手工调过的 manual_fields; 引擎不再
-    输出且 keep() 为真的旧条目保留(keep=None 全保)。"""
+    输出且 keep() 为真的旧条目保留(keep=None 全保)。
+
+    手工判定(r6 #3): 给 engine_prev({id: {field: value}} 上次引擎输出
+    快照, load_manual_baseline)时走三路合并 —— 旧值 ≠ 快照值即手改,
+    显式清空(parent 置空提升为顶层页 / ordinal 归 0 / 删键)同样被保留;
+    快照缺失(首跑/被删)退回"旧值非空即手工"启发式。启发式把手工清空当
+    '未手改'静默回退(违反 PLAN_HEADER '绝不静默覆盖手工编辑'), ordinal 0
+    也曾因 falsy 被 `or ''` 吞掉 —— themes 对根页显式写 parent=None,
+    '键存在即手工'不可用, 三路合才是能区分两者的唯一口径。"""
+    _MISS = object()
+    prev_by_id = engine_prev or {}
     old_by_id = {str(p.get("id")): p for p in old_items}
     new_ids = {str(p.get("id")) for p in new_items}
     out = []
     for np in new_items:
         old = old_by_id.get(str(np.get("id")))
         if old is not None:
+            prev = (prev_by_id.get(str(np.get("id")), {})
+                    if engine_prev is not None else None)
             for f in manual_fields:
-                if str(old.get(f) or "").strip():
-                    np[f] = old[f]
+                if prev is not None:
+                    if old.get(f, _MISS) != prev.get(f, _MISS):
+                        np[f] = old.get(f)
+                else:
+                    v = old.get(f)
+                    if v is None or (isinstance(v, str) and not v.strip()):
+                        continue
+                    np[f] = v
         out.append(np)
     keep = keep or (lambda _old: True)
     out += [old for pid, old in old_by_id.items()
             if pid and pid not in new_ids and keep(old)]
     return out
+
+
+def manual_baseline_path(ctx: Ctx) -> str:
+    """三路合并基线: 上次引擎自己输出的 MANUAL_FIELDS 快照(work/ 下,
+    机器态不进 plan)。"""
+    return os.path.join(ctx.root, "work", "manual-baseline.json")
+
+
+def load_manual_baseline(ctx: Ctx) -> dict:
+    try:
+        with open(manual_baseline_path(ctx), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_manual_baseline(ctx: Ctx, engine_items: list) -> None:
+    """记录引擎输出快照(合并前的新规划值), 作为下次 merge_manual 的三路
+    合并基线。按 id 增量并入: themes 路线记 pages+cards, layers 路线只
+    再生 pages —— 卡片的既有基线不能被清掉(否则下次 themes 对卡片全部
+    误判为手改, 再生被整个卡死)。"""
+    from .planner import MANUAL_FIELDS
+    from .util import atomic_write
+    snap = load_manual_baseline(ctx)
+    for it in engine_items:
+        if isinstance(it, dict) and it.get("id"):
+            snap[str(it["id"])] = {f: it.get(f) for f in MANUAL_FIELDS}
+    atomic_write(manual_baseline_path(ctx),
+                 json.dumps(snap, ensure_ascii=False))
 
 
 def humanize(name: str) -> str:
@@ -2015,6 +2063,9 @@ def cmd_plan_themes(ctx: Ctx, args, plan: dict) -> int:
     # sheet 文件当孤儿剪掉。
     from .planner import MANUAL_FIELDS as _MANUAL_FIELDS
     reset = bool(getattr(args, "reset", False))
+    # 三路合并基线(上次引擎输出): 区分"引擎写的值"与"人工编辑"—— 显式
+    # 清空/序号归 0 也是编辑, 被保留(启发式只能认非空旧值)
+    engine_prev = load_manual_baseline(ctx)
     kept_sheets = [p for p in (plan.get("pages") or [])
                    if p.get("kind") == "module_sheet"]
     old_pages = plan.get("pages") or []
@@ -2028,16 +2079,21 @@ def cmd_plan_themes(ctx: Ctx, args, plan: dict) -> int:
         # 合并/保留人工编辑统一走 merge_manual(pages 与 cards 共用一份)
         merged_pages = merge_manual(
             result["pages"], old_pages, _MANUAL_FIELDS,
-            keep=lambda p: p.get("kind") != "module_sheet")
+            keep=lambda p: p.get("kind") != "module_sheet",
+            engine_prev=engine_prev)
         kept_manual_n = len(merged_pages) - len(result["pages"])
         plan["pages"] = merged_pages + kept_sheets
         dropped = []
     plan["cards"] = result["cards"] if reset else merge_manual(
-        result["cards"], plan.get("cards") or [], _MANUAL_FIELDS)
+        result["cards"], plan.get("cards") or [], _MANUAL_FIELDS,
+        engine_prev=engine_prev)
     plan["modules"] = plan.get("modules") or mods.to_plan_modules(decomposed)
     plan["schema_version"] = 3
     assign_paths(plan, ctx.locale)
     save_plan(ctx, plan)
+    # 基线刷新为本次引擎输出(合并前的新值); --reset 也不例外 —— 手工
+    # 编辑已被丢弃, 新输出就是全部事实
+    save_manual_baseline(ctx, list(result["pages"]) + list(result["cards"]))
 
     # 注册表快照进 DB
     pid = ctx.partition()["id"]

@@ -37,8 +37,13 @@ def tokenize(text: str) -> list:
 
 
 def _fields(content: str):
-    """(title_tokens, heading_tokens, body_tokens) — title×3, headings×2。"""
-    lines = content.splitlines()
+    """(title_tokens, heading_tokens, body_tokens) — title×3, headings×2。
+
+    栅栏先剥(与 gate/publish 层同口径): 栅栏内 '# Example config' 不是页
+    标题, shebang/'# TODO' 不是小节 —— 曾进标题池(×3)/标题池(×2)造成
+    确定性错误排序。"""
+    from .gates import strip_code_fences
+    lines = strip_code_fences(content).splitlines()
     title, headings, body = [], [], []
     for line in lines:
         if line.startswith("#"):

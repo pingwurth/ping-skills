@@ -390,7 +390,13 @@ def cmd_update(args) -> int:
                                          modules_by_id))
         items.append(job)
     ctx.db.queue_jobs(run_id, items, style=plan_style)
-    ctx.db.update_run(run_id, state="DOCUMENT_GENERATING", stage="document")
+    # 排队窗口守卫式写(cmd_begin 同款): 期间被并发 cancel/begin --force
+    # 取消的 run 不翻回活动态
+    if not ctx.db.update_run_guarded(
+            run_id, ("DIRECTORY_GENERATING",),
+            state="DOCUMENT_GENERATING", stage="document"):
+        die(f"run {run_id} 在排队期间被并发操作取消 — 重新 `pwiki update`",
+            config.EXIT_PRECOND)
     ctx.db.log(run_id, "increment_planned",
                f"{len(stale)} stale, {len(removed_items)} removed")
     print(f"run {run_id}: INCREMENT over {len(stale)} items — `pwiki next`")

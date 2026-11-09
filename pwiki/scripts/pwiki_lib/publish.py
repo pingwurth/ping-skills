@@ -124,6 +124,22 @@ def export_injects(ctx: Ctx, style: str, plan: dict = None) -> bool:
     return preset(style)["export"] == "legacy" and export_style == "legacy"
 
 
+def _toc_insert_pos(content: str):
+    """编号目录的注入位: 正文里首个 `</cite>`(cite 块之后), 否则正文首个
+    H1 —— 栅栏感知(P61 同族): 栅栏内的示例 `</cite>` / '# 注释' 不是注入
+    位, 曾把编号目录注进示例代码里把栅栏劈开出厂。无正文命中返回 None。"""
+    from . import gates as _g
+    for pattern in (r"</cite>\s*", r"(?m)^# .*$"):
+        offset = 0
+        for seg in _g.split_fences(content):
+            if not seg.startswith("```"):
+                m = re.search(pattern, seg)
+                if m:
+                    return offset + m.end()
+            offset += len(seg)
+    return None
+
+
 def compose_export_content(ctx: Ctx, p, style: str, all_paths: set,
                            plan: dict = None) -> tuple:
     """(content, link_fixes): 页面按风格注入 <cite>/目录 并规范化内链。
@@ -157,17 +173,21 @@ def compose_export_content(ctx: Ctx, p, style: str, all_paths: set,
     if len(h2) >= 3:
         toc = ["## " + i18n.toc_title(ctx.locale)] + \
             [f"{i}. [{h}](#{_md_anchor(h)})" for i, h in enumerate(h2, 1)]
-        content = i18n.TOC_SECTION_RE.sub("", content)
-        m = re.search(r"</cite>\s*", content)
-        if m:
-            content = (content[:m.end()].rstrip("\n") + "\n\n"
-                       + "\n".join(toc) + "\n\n" + content[m.end():].lstrip("\n"))
-        else:
-            m = re.search(r"^# .*$", content, re.M)
-            if m:
-                content = (content[:m.end()].rstrip("\n") + "\n\n"
-                           + "\n".join(toc) + "\n\n"
-                           + content[m.end():].lstrip("\n"))
+        # 旧目录节的剥除同样栅栏感知: 裸 TOC_SECTION_RE 在未剥栅栏的原文
+        # 上跑, 示例代码里的 '## 目录' 连同栅栏闭合符到下一个真实 '## '
+        # 整段被删 —— 发布文件带着未闭合栅栏出厂, 且 DB 存原文, 每次
+        # finish 确定性重复损毁
+        content = "".join(
+            seg if seg.startswith("```") else i18n.TOC_SECTION_RE.sub("", seg)
+            for seg in gates.split_fences(content))
+        # 手写 '## 目录' 节内自带的 <cite>(concise 下仅警告, 合法)会随节
+        # 一起被剥掉 —— 再补一次重建保证注入点存在(常态下 cite 未随节
+        # 走, 这里是幂等 no-op)
+        content = gates.rebuild_cite_block(content, ctx.repo, ctx.locale)
+        pos = _toc_insert_pos(content)
+        if pos is not None:
+            content = (content[:pos].rstrip("\n") + "\n\n" + "\n".join(toc)
+                       + "\n\n" + content[pos:].lstrip("\n"))
     return content, n_links
 
 
@@ -288,6 +308,17 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                 row["article_type"] = str(item.get("type")
                                           or item.get("article_type") or "")
                 row["slug"] = str(item.get("slug") or "")
+                # 对账字段全量同步(snapshot.check_item 比较的 9 字段一个
+                # 不缺): objective/modules/required_sections/pack_key 曾
+                # "比而不合" —— update 标 catalog_changed 排 0-job
+                # INCREMENT, finish 的 kept 合并不写这四个字段, page 行保持
+                # 旧值, 下轮 update 又 catalog_changed, 手编永不出循环
+                row["objective"] = str(merged.get("objective") or "")
+                row["modules"] = json.dumps(merged.get("modules") or [],
+                                            ensure_ascii=False)
+                row["required_sections"] = json.dumps(
+                    merged.get("required_sections") or [], ensure_ascii=False)
+                row["pack_key"] = str(merged.get("pack_key") or "")
             new_row = _row_like(row)
             if _republish_changed(p, new_row, p["content"]):
                 ctx.db.publish_page(pid, new_row, p["content"], run["id"])
@@ -925,6 +956,11 @@ def cmd_export(args) -> int:
     # cite/目录被当注入物剥掉再写回 DB(永久丢稿)
     from .planner import load_plan_optional
     plan = load_plan_optional(ctx)   # P60: 单一实现(坏计划留 warn)
+    # 空盖章行的兜底链与 db_to_file 同序(行戳 > plan > last_run > ctx)——
+    # 曾只到 last_run: plan 改风格后 db_to_file 按 plan 注入 cite/目录,
+    # file_to_db 按 last_run 判"该风格不注入"而不剥, 注入物被吸收进
+    # page.content(bug10 防线在空盖章 + plan≠run 时重新打开)
+    _fallback = str((plan or {}).get("style") or run_style or ctx.style)
     absorbed = skipped = unchanged = 0
     for p in ctx.db.published_pages(pid):
         full = os.path.join(ctx.root, p["path"])
@@ -939,7 +975,7 @@ def cmd_export(args) -> int:
             # 不是循环中途裸 traceback —— 早前页已吸收, 修好该文件重跑即可
             die(f"发布文件不是合法 UTF-8({full}: {e}) — 修好后重跑 file_to_db",
                 config.EXIT_GATE)
-        page_style = str(p["style"] or run_style or "")
+        page_style = str(p["style"] or _fallback)
         if p["kind"] == "page" and export_injects(ctx, page_style, plan):
             content = _strip_injected(content)   # bug e: 剥注入物再入库
         # content_hash 的读者: 吸收前比对, 未变的行不再无脑重写

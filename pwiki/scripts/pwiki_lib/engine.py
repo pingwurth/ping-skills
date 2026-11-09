@@ -184,7 +184,15 @@ def cmd_begin(args) -> int:
         # 卡片 job 字面量统一走 planner.card_job(四个排队入口曾各抄一份)
         items.append(card_job(c, ctx.locale))
     ctx.db.queue_jobs(run_id, items, style=style)
-    ctx.db.update_run(run_id, state="DOCUMENT_GENERATING", stage="document")
+    # 排队窗口(数百行插入, 数秒)的裸 UPDATE 是全引擎最后一批无守卫 run 写
+    # 之一 —— 期间并发 cancel/begin --force 合法置 CANCELLED 后, 裸写把已
+    # 取消的 run 翻回活动态继续派发; 守卫式写只在仍是本 begin 建的
+    # DIRECTORY_GENERATING 时生效, 被取消则如实退出
+    if not ctx.db.update_run_guarded(
+            run_id, ("DIRECTORY_GENERATING",),
+            state="DOCUMENT_GENERATING", stage="document"):
+        die(f"run {run_id} 在排队期间被并发操作取消(cancel/begin --force) — "
+            "队列作废, 重新 `pwiki begin`", config.EXIT_PRECOND)
     ctx.db.log(run_id, "plan_applied",
                f"{len(items)} items queued (style={style})")
     print(f"run {run_id} started (generate/"
@@ -649,9 +657,11 @@ def cmd_submit(args) -> int:
     if not summary and job["kind"] == "page":
         # 栅栏整体先剥(gates.strip_code_fences)再取首段 —— 手搓的
         # startswith('```') 只挡"段落以栅栏开头", 栅栏贴着首段时示例
-        # 代码漏进 240 字摘要, 随 prompt 注入后续 writer 的上下文
-        body = gates.strip_code_fences(
-            re.sub(r"<cite>.*?</cite>", "", content, flags=re.S))
+        # 代码漏进 240 字摘要, 随 prompt 注入后续 writer 的上下文。
+        # cite 剥除必须发生在剥栅栏**之后**: 先在原文上 sub, 正文里孤立的
+        # <cite> 会与栅栏内示例 </cite> 跨界配对, 吞掉正文尾巴和栅栏头
+        body = re.sub(r"<cite>.*?</cite>", "",
+                      gates.strip_code_fences(content), flags=re.S)
         for para in re.split(r"\n\s*\n", body):
             para = para.strip()
             if para and not para.startswith("#"):
@@ -896,7 +906,14 @@ def cmd_pause(args) -> int:
         ids = ", ".join(j["page_id"] for j in leased)
         die(f"有 writer 仍持有租约({ids}) — 等它们 submit/fail/skip "
             "或租约过期后再 pause", config.EXIT_PRECOND)
-    ctx.db.update_run(run["id"], state="PAUSED")
+    # 取消类状态转换全走守卫式写(c022 家族): _lining_guard 读到的状态与
+    # 写入之间被 finish 抢先置 LINING 时, 裸 UPDATE 会把 LINING 覆盖成
+    # PAUSED —— finish 完成发布后终写匹配 0 行 die, wiki 已发布而 run 卡
+    # 在活动态 PAUSED
+    if not ctx.db.update_run_guarded(run["id"], config.CANCELABLE_RUN_STATES,
+                                     state="PAUSED"):
+        die(f"run {run['id']} 状态已被并发操作改变(如进入 finish) — "
+            "重读后重试 `pwiki pause`", config.EXIT_PRECOND)
     ctx.db.log(run["id"], "run_paused", "")
     print(f"paused run {run['id']} — `pwiki resume` 继续")
     return config.EXIT_OK
@@ -908,7 +925,15 @@ def cmd_resume(args) -> int:
     if run["state"] != "PAUSED":
         print(f"run {run['id']} 状态 {run['state']}, 无需 resume")
         return config.EXIT_OK
-    ctx.db.update_run(run["id"], state="DOCUMENT_GENERATING")
+    # 守卫式写(c022 家族): 读到 PAUSED 与写入之间被并发 cancel 置
+    # CANCELLED(PAUSED ∈ 可取消态)时, 裸 UPDATE 会把已取消的 run 复活成
+    # 活动态重新派发; begin --force 变体则叠出双活动 run
+    if not ctx.db.update_run_guarded(run["id"], ("PAUSED",),
+                                     state="DOCUMENT_GENERATING",
+                                     stage="document"):
+        die(f"run {run['id']} 状态已被并发操作改变(如 cancel) — "
+            "不复活已取消的 run; 重读后重试 `pwiki resume`",
+            config.EXIT_PRECOND)
     ctx.db.log(run["id"], "run_resumed", "")
     print(f"resumed run {run['id']} — `pwiki next` 继续")
     return config.EXIT_OK
@@ -1082,9 +1107,15 @@ def cmd_finish(args) -> int:
     if lining_failed:
         for pid, errs in lining_failed[:20]:
             print(f"  lining rejected {pid}: {errs[0]}", file=sys.stderr)
-        ctx.db.update_run(run["id"], state="DOCUMENT_FAILED",
-                          error=f"lining rejected {len(lining_failed)} items",
-                          finished_at=now_iso())
+        # 守卫式落态(与 1074/1106 同款): 竞争的第二个 finish 已终写
+        # COMPLETED 时, 裸 UPDATE 把终态 run 复活成活动态 DOCUMENT_FAILED,
+        # 编排器看到活动 run 再派 next 重写已发布页
+        if not ctx.db.update_run_guarded(
+                run["id"], ("LINING",), state="DOCUMENT_FAILED",
+                error=f"lining rejected {len(lining_failed)} items",
+                finished_at=now_iso()):
+            die(f"run {run['id']} 已不处于 LINING(被并发 finish 抢先终态?) — "
+                "不复活已终态的 run", config.EXIT_PRECOND)
         ctx.db.log(run["id"], "lining_failed", f"{len(lining_failed)} items")
         die(f"LINING 拒绝 {len(lining_failed)} 项 — 修稿后重新 submit, "
             "再 `pwiki finish`(DOCUMENT_FAILED 可恢复; --lenient 放宽"
