@@ -103,7 +103,7 @@ cite_lines 记忆化、active_run 集合从 config.ACTIVE_RUN_STATES 派生。
 ## 测试
 
 ```bash
-cd pwiki && python3 -m pytest tests/ -q     # 全套(330; 各轮回修只增不减)
+cd pwiki && python3 -m pytest tests/ -q     # 全套(369; 各轮回修只增不减)
 python3 -m pytest tests/test_db.py::test_claim_atomic_no_duplicate_under_threads -q
 ```
 

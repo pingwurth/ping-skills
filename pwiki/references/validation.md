@@ -25,7 +25,7 @@
 | `<cite>` 块/目录/结论 | 禁止(writer 不写, 发布层注入) | cite 块必须自带且==正文集合; 结论节允许 |
 
 分档判定(`styles.cite_band_for`): pack_key ∈ `config.WIDE_CITE_PACK_KEYS`
-(architecture/ai/api) 或 type=overview → 80–120; module_sheet → 60–110;
+(architecture/ai/api/microservices) 或 type=overview → 80–120; module_sheet → 60–110;
 source_files ≤2 → 40–70; 其余 → 60–90。
 
 ## 错误码一览(gates.gate_item / validate --content)

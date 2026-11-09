@@ -234,7 +234,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sp("qoder-plan", "Qoder IDE wiki_plan.yaml 生成/校验(wiki-plan-gen 契约)")
     p.add_argument("--emit", default=None,
-                   help="从 plan v3 生成到该路径(默认 .qoder/repowiki/wiki_plan.yaml)")
+                   help="从 plan v3 生成到该路径"
+                   "(默认 <root>/qoder/repowiki/wiki_plan.yaml, c060)")
     p.add_argument("--lint", default=None, help="lint 现有文件(上限/静默修复预检)")
 
     return parser

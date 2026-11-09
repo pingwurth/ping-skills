@@ -329,7 +329,10 @@ def cmd_update(args) -> int:
             # 卡片也按风格分档(concise 0 行级 / deep ≥3)—— 曾按字面元组
             # 跳过, concise→deep 切换后旧卡永不再排, validate --content
             # 长期报错无修复路径
-            if pub["kind"] not in ("page", "module_sheet", "card"):
+            # P50: kind 判定走注册表口径 —— 裸字面元组曾把原始卡片 kind
+            # 的行静默退出漂移循环(style_drift 永不收敛)
+            if pub["kind"] not in ("page", "module_sheet") \
+                    and not config.is_card_kind(pub["kind"]):
                 continue
             if pub["style"] == plan_style:
                 continue

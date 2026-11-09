@@ -263,7 +263,10 @@ def slugify(s: str) -> str:
     """薄封装 util.slugify(全局唯一 slug 规则 —— 第二套手写规则曾让同一
     模块路径在两条规划路由上产出不同 id); 空串回退 md5 短哈希防撞。"""
     slug = pslugify(str(s), "")
-    return slug or "p-" + hashlib.md5(str(s).encode("utf-8")).hexdigest()[:8]
+    # P51: usedforsecurity=False —— FIPS 强制的 OpenSSL 构建上裸 md5() 会
+    # 抛错(库内唯一 md5, 其余哈希皆 sha256)
+    return slug or "p-" + hashlib.md5(str(s).encode("utf-8"),
+                                      usedforsecurity=False).hexdigest()[:8]
 
 
 

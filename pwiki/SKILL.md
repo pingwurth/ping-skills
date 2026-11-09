@@ -121,8 +121,9 @@ IDE 的 synchronizeWiki 吸收。
 
 ## Qoder IDE 兼容(qoder-plan)
 
-`pwiki qoder-plan` 从 plan v3 生成 `.qoder/repowiki/wiki_plan.yaml`
-(Qoder v1 格式); `--emit <path>` 指定输出路径(两 flag 都带值)。
+`pwiki qoder-plan` 从 plan v3 生成 Qoder v1 格式的 wiki_plan.yaml,
+默认落在 `<root>/qoder/repowiki/`(c060: 不再写分析仓库工作树);
+`--emit <path>` 指定输出路径(两 flag 都带值)。
 `--lint <path>` 按反编译契约预检(wiki-plan-gen/MECHANICS.md): 7 个截断上限
 (title/goal/note 按**字节**、hints/template 按**字符** —— CJK 标题 ≈33
 字即触顶)、parent 只能回溯解析、重复 title 在 parent 之后裁决丢后者、
