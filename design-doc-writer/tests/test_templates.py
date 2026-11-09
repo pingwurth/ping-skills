@@ -1,18 +1,62 @@
 """模板一致性：references/doc-templates.md 的 H2 与 dd.py MANIFEST_DEFAULTS 同文，防漂移。"""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import dd as ddmod
 
 TEMPLATES = Path(__file__).resolve().parent.parent / "references" / "doc-templates.md"
 
+_SKELETON_RE = re.compile(r"^````markdown\n(.*?)^````$\n", re.M | re.S)
+_H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 
-def test_all_manifest_titles_present_in_template():
+
+def _skeleton_h2s(text: str, h1_marker: str) -> list[str]:
+    """提取指定骨架（按 H1 标志区分）围栏外的 H2 标题。
+
+    骨架用四反引号围栏承载、内含 ```mermaid 等内层围栏——内层围栏里的
+    行不算标题（与 dd.py 门禁同口径）。
+    """
+    h2s: list[str] = []
+    for m in _SKELETON_RE.finditer(text):
+        block = m.group(1)
+        first = next((l for l in block.splitlines() if l.strip()), "")
+        if h1_marker not in first:
+            continue
+        inside = False
+        for line in block.splitlines():
+            s = line.strip()
+            if s.startswith("```"):
+                inside = not inside
+            elif not inside:
+                hm = _H2_RE.match(line)
+                if hm:
+                    h2s.append(hm.group(1))
+    return h2s
+
+
+def test_template_skeletons_match_manifest_both_ways():
+    """双向集合锁（F2）：骨架 H2 ↔ MANIFEST_DEFAULTS 一致。
+
+    旧版单向子串锁（"## x" in text）被 H3 `### x` 满足——模板新增/重构
+    章节为 H3 会静默漏出清单与门禁的约束。
+    """
     text = TEMPLATES.read_text(encoding="utf-8")
-    missing = [f"## {title}" for _, _, title, _ in ddmod.MANIFEST_DEFAULTS
-               if f"## {title}" not in text]
-    assert not missing, f"模板缺少章节标题（与 dd.py MANIFEST_DEFAULTS 漂移）：{missing}"
+    for doc_key, marker in (("analysis", "需求分析"), ("design", "详细设计")):
+        skeleton = set(_skeleton_h2s(text, marker))
+        manifest = {t for d, _s, t, _e in ddmod.MANIFEST_DEFAULTS if d == doc_key}
+        assert skeleton == manifest, (
+            f"{doc_key} 骨架与 MANIFEST_DEFAULTS 漂移："
+            f"模板多出 {sorted(skeleton - manifest)} / 清单多出 {sorted(manifest - skeleton)}")
+
+
+def test_manifest_titles_appear_as_real_h2_not_h3():
+    """清单标题在模板中必须是真 H2（H3 不满足章节门禁的标题匹配）。"""
+    text = TEMPLATES.read_text(encoding="utf-8")
+    for _, _, title, _ in ddmod.MANIFEST_DEFAULTS:
+        assert re.search(rf"^## {re.escape(title)}\s*$", text, re.M), \
+            f"标题「{title}」未以 H2 形式出现在模板中"
 
 
 def test_manifest_ids_unique_and_shapes_cover_all_sections():

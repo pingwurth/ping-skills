@@ -15,9 +15,12 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 DD = SCRIPTS_DIR / "dd.py"
 
-ANALYSIS_H2S = ["背景与目标", "范围：IN 与 OUT", "现状与事实调研", "术语表", "决策表", "未决与延期"]
-DESIGN_H2S = ["功能概述", "UI 与页面交互", "核心逻辑说明", "接口设计", "数据库设计",
-              "缓存设计", "非功能性设计", "灰度与回滚", "TDD 测试用例", "决策与 ADR 索引"]
+# 章节标题单源派生自 dd.py MANIFEST_DEFAULTS（模板同文由 test_templates 双向锁），
+# 不再手抄第三份副本
+import dd as _dd  # noqa: E402
+
+ANALYSIS_H2S = [t for d, _s, t, _e in _dd.MANIFEST_DEFAULTS if d == "analysis"]
+DESIGN_H2S = [t for d, _s, t, _e in _dd.MANIFEST_DEFAULTS if d == "design"]
 
 
 @pytest.fixture()

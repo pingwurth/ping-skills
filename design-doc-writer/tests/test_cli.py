@@ -5,17 +5,22 @@ from conftest import make_analysis, make_design, read_ledger, write_doc
 
 
 def test_every_subcommand_prints_next_step_last_line(dd, grilling, tmp_path):
-    """沿完整流程走一遍，每步 stdout 末行都是 next_step: 。"""
+    """沿完整流程走一遍：每步退出码符合预期，且 stdout 末行都是 next_step: 。
+
+    退出码逐条断言（F1）：DDError 路径同样以 next_step 行结尾，只断言
+    末行的话，流程前半段的状态机回归（exit 2）会静默通过。
+    """
     steps = [
-        ("frontier",),
-        ("q-answer", "Q001", "--answer", "最小集"),
-        ("q-answer", "Q002", "--answer", "异步"),
-        ("frontier",),
-        ("status",),
-        ("phase", "analysis-doc"),
+        (("frontier",), 1),                       # 有 open
+        (("q-answer", "Q001", "--answer", "最小集"), 0),
+        (("q-answer", "Q002", "--answer", "异步"), 0),
+        (("frontier",), 0),                       # 全部已答 → 清零
+        (("status",), 0),
+        (("phase", "analysis-doc"), 0),
     ]
-    for step in steps:
+    for step, want_code in steps:
         code, out = dd(*step)
+        assert code == want_code, (step, code, out)
         assert out, step
         last = out.rstrip().splitlines()[-1]
         assert last.startswith("next_step: "), f"{step}: 末行不是 next_step: {last!r}"
