@@ -4,19 +4,19 @@ from __future__ import annotations
 from conftest import make_analysis, make_design, read_ledger, write_doc, write_ledger
 
 
-def answer_all(dd, repo, *answers):
+def answer_all(dd, *answers):
     for qid, ans in answers:
         assert dd("q-answer", qid, "--answer", ans)[0] == 0
 
 
 def good_analysis_state(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "最小集"), ("Q002", "异步"))
+    answer_all(dd, ("Q001", "最小集"), ("Q002", "异步"))
     write_doc(grilling, make_analysis())
 
 
 def test_statediagram_v2_version_suffix_accepted(dd, grilling):
     """E2E 回归：stateDiagram-v2 的 -v2 版本后缀不得导致白名单误拒。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis(
         extra="```mermaid\nstateDiagram-v2\n    [*] --> S1\n    S1 --> [*]\n```"))
     code, out = dd("check", "--doc", "analysis")
@@ -26,7 +26,7 @@ def test_statediagram_v2_version_suffix_accepted(dd, grilling):
 
 def test_h3_subsection_counts_as_section_content(dd, grilling):
     """E2E 回归：H3 子标题结构化的章节不算空章节（边界只认 H1/H2）。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     text = make_analysis().replace(
         "## 术语表\n\n内容：术语表的实质内容。",
         "## 术语表\n\n### 领域词\n\n**导出任务**: 定义。")
@@ -44,13 +44,13 @@ def test_pass_when_analysis_complete(dd, grilling):
 
 
 def test_missing_doc_fails(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "doc-missing" in out
 
 
 def test_missing_and_empty_sections(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     text = make_analysis().replace("## 范围：IN 与 OUT\n\n内容：范围：IN 与 OUT的实质内容。", "## 其他\n\nx")
     text = text.replace("内容：术语表的实质内容。", "")
     write_doc(grilling, text)
@@ -67,14 +67,14 @@ def test_open_questions_block_analysis(dd, grilling):
 
 
 def test_fence_imbalance(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis() + "\n```\n散落围栏\n")
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "fence-imbalance" in out
 
 
 def test_mermaid_type_whitelist_and_alias(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis(extra="\n```mermaid\nmindmap\n  根\n  叶\n```\n"))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "mermaid-type" in out and "mindmap" in out
@@ -84,7 +84,7 @@ def test_mermaid_type_whitelist_and_alias(dd, grilling):
 
 
 def test_complexity_warn_only(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     chain = "\n".join(f"  N{i:02d} --> N{i + 1:02d}" for i in range(1, 20))
     write_doc(grilling, make_analysis(extra=f"\n```mermaid\nflowchart TD\n{chain}\n```\n"))
     code, out = dd("check", "--doc", "analysis")
@@ -93,7 +93,7 @@ def test_complexity_warn_only(dd, grilling):
 
 
 def test_unresolved_marker_always_fails(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis(extra="\n此处 [未决:Q001] 仍悬着\n"))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "unresolved-marker" in out
@@ -116,14 +116,14 @@ def test_deferred_reconciliation_both_ways(dd, grilling):
 
 
 def test_placeholder_fails(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis().replace("内容：术语表的实质内容。", "内容：术语表待补充。"))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "placeholder" in out and "待补充" in out
 
 
 def test_status_line_missing_and_drift(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis().replace("状态: Draft\n\n", ""))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "status-line" in out
@@ -156,7 +156,7 @@ def test_adr_three_way_reconciliation(dd, grilling):
 
 
 def confirmed_analysis(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "最小集"), ("Q002", "异步"))
+    answer_all(dd, ("Q001", "最小集"), ("Q002", "异步"))
     write_doc(grilling, make_analysis())
     assert dd("confirm", "--doc", "analysis", "--because", "用户：分析没问题")[0] == 0
     assert dd("phase", "design-doc")[0] == 0
@@ -164,7 +164,7 @@ def confirmed_analysis(dd, grilling):
 
 def test_design_prereq_requires_confirmed_analysis_and_zero_deferred(dd, grilling):
     # 未确认 analysis 时直接检查 design：前置 FAIL
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_design())
     code, out = dd("check", "--doc", "design")
     assert code == 1 and "design-prereq" in out

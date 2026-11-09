@@ -109,16 +109,22 @@ def test_atomic_write_survives_serialize_error(booted, monkeypatch):
 
 
 def test_imports_are_stdlib_only():
-    """纯 stdlib 约束：AST 解析 dd.py 的顶层 import，全部落在 stdlib。"""
+    """纯 stdlib 约束：AST 解析 dd.py 与 utils.py 的顶层 import，全部落在 stdlib。
+
+    utils 是本技能 scripts/ 下的兄弟模块（镜像 sensors-analyze 的同名助手面），
+    属白名单；第三方依赖一律不引入。
+    """
     import ast
 
     import dd as ddmod  # noqa: N813
-    src = Path(ddmod.__file__).read_text(encoding="utf-8")
-    mods: set[str] = set()
-    for node in ast.walk(ast.parse(src)):
-        if isinstance(node, ast.Import):
-            mods.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            mods.add(node.module.split(".")[0])
-    nonstd = {m for m in mods if m not in set(sys.stdlib_module_names)}
-    assert not nonstd, f"非 stdlib 依赖：{nonstd}"
+    local = {"utils"}
+    for mod_file in (Path(ddmod.__file__), Path(ddmod.__file__).parent / "utils.py"):
+        src = mod_file.read_text(encoding="utf-8")
+        mods: set[str] = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Import):
+                mods.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                mods.add(node.module.split(".")[0])
+        nonstd = {m for m in mods if m not in set(sys.stdlib_module_names)} - local
+        assert not nonstd, f"{mod_file.name} 非 stdlib 依赖：{nonstd}"

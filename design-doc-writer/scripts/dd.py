@@ -16,7 +16,7 @@ Draft→Confirmed 状态机、原子落盘、断点续跑。
 from __future__ import annotations
 
 import argparse
-import atexit
+import graphlib
 import json
 import logging
 import os
@@ -24,6 +24,8 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from utils import next_step, setup_logging
 
 # ==================== 常量（单一事实源） ====================
 
@@ -117,53 +119,9 @@ ADR_FILE_RE = re.compile(r"^(\d{4})-.*\.md$")
 
 EXIT_OK, EXIT_FLOW, EXIT_ERR = 0, 1, 2
 
-# ==================== 日志（移植自 sensors-analyze/scripts/utils.py） ====================
+# ==================== 日志 / 协议输出（scripts/utils.py，镜像 sensors-analyze） ====================
 
-_ORIGINAL_STDERR = sys.stderr
-_STDERR_REDIRECT = None
-_ATEXIT_REGISTERED = False
 LOG = logging.getLogger(SKILL_NAME)
-
-
-def _restore_stderr() -> None:
-    global _STDERR_REDIRECT
-    sys.stderr = _ORIGINAL_STDERR
-    if _STDERR_REDIRECT is not None:
-        try:
-            _STDERR_REDIRECT.close()
-        except OSError:
-            pass
-        _STDERR_REDIRECT = None
-
-
-def setup_logging(log_path: Path, create_dirs: bool = True) -> None:
-    """全部输出写日志文件；stderr 重定向到同一句柄（进程退出时恢复）。
-
-    对齐 sensors-analyze 现行为：每次调用 mode="w" 重建日志文件，命令头由
-    调用方写入。单一文件句柄承载日志与 stderr——两个独立句柄各持各的偏移，
-    会把对方的写入互相覆盖（stderr 诊断被静默销毁）。
-
-    create_dirs=False 且父目录不存在时直接跳过文件日志（只读探测不产生
-    .agent/ 目录副作用）。IO 失败抛 OSError，由 main 统一转 exit 2。
-    """
-    global _STDERR_REDIRECT, _ATEXIT_REGISTERED
-    _restore_stderr()
-    LOG.setLevel(logging.DEBUG)
-    for h in list(LOG.handlers):  # 幂等：摘掉上次配置的 handler
-        LOG.removeHandler(h)
-        h.close()
-    if not create_dirs and not log_path.parent.is_dir():
-        return  # 只读探测（无台账的 status）：不建目录、不落日志
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = logging.FileHandler(str(log_path), encoding="utf-8", mode="w")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    LOG.addHandler(fh)
-    sys.stderr = fh.stream
-    _STDERR_REDIRECT = fh
-    if not _ATEXIT_REGISTERED:
-        atexit.register(_restore_stderr)
-        _ATEXIT_REGISTERED = True
 
 
 # ==================== 错误类型 ====================
@@ -357,25 +315,31 @@ def adrs_dir_path(repo: Path, ledger: dict) -> Path:
     return repo / ledger["adrs_dir"]
 
 
+def scan_adr_files(repo: Path, ledger: dict) -> dict[str, Path]:
+    """ADR 目录现有文件：编号→路径（文件名锚定解析）。单一实现，编号分配与
+    ⑧b 引用核对共用，文件名约定变更只改这一处。"""
+    files: dict[str, Path] = {}
+    d = adrs_dir_path(repo, ledger)
+    if d.is_dir():
+        for p in sorted(d.iterdir()):
+            m = ADR_FILE_RE.match(p.name)
+            if m:
+                files[m.group(1)] = p
+    return files
+
+
 def next_adr_number(repo: Path, ledger: dict) -> int:
     """下一个 ADR 编号 = max(文件系统已有编号, 台账已分配编号) + 1。
 
     台账侧占坑：文件由 LLM 落笔（建议性 next_step），写盘前编号只存在于
     ledger 中——不看台账会导致连续两次 --adr 都分到同一号（撞号）。
     """
-    n = 0
-    d = adrs_dir_path(repo, ledger)
-    if d.is_dir():
-        for p in d.iterdir():
-            m = ADR_FILE_RE.match(p.name)
-            if m:
-                n = max(n, int(m.group(1)))
+    nums = set(scan_adr_files(repo, ledger))
     for q in ledger["questions"]:
-        adr = q.get("adr") or {}
-        m = ADR_FILE_RE.match(Path(adr.get("path", "")).name)
+        m = ADR_FILE_RE.match(Path((q.get("adr") or {}).get("path", "")).name)
         if m:
-            n = max(n, int(m.group(1)))
-    return n + 1
+            nums.add(m.group(1))
+    return max((int(n) for n in nums), default=0) + 1
 
 
 # ==================== frontier（纯图算法） ====================
@@ -560,13 +524,16 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, confirm_mode: bool = False
         m = re.match(r"^##\s+(.+?)\s*$", line)
         if m:
             headings[m.group(1)] = i
+    sec_items: list[Item] = []
+    n_enabled = 0
     for s in ledger["manifest"]["sections"]:
         if s["doc"] != doc_key or not s["enabled"]:
             continue
+        n_enabled += 1
         if s["title"] not in headings:
-            items.append(Item("FAIL", "section-missing",
-                              f"缺少章节「## {s['title']}」",
-                              "章节标题须与 manifest 完全一致（dd.py MANIFEST_DEFAULTS 为单一事实源）"))
+            sec_items.append(Item("FAIL", "section-missing",
+                                  f"缺少章节「## {s['title']}」",
+                                  "章节标题须与 manifest 完全一致（dd.py MANIFEST_DEFAULTS 为单一事实源）"))
             continue
         j = headings[s["title"]]
         # 章节边界只认围栏外的 H1/H2：H3+ 子标题及其内容都算本章节实体
@@ -576,59 +543,69 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, confirm_mode: bool = False
                 nxt = k
                 break
         if not "\n".join(lines[j + 1:nxt]).strip():
-            items.append(Item("FAIL", "section-empty", f"章节「{s['title']}」为空",
-                              "补充内容；确不需要该章节时先 dd.py manifest --disable <id>"))
+            sec_items.append(Item("FAIL", "section-empty", f"章节「{s['title']}」为空",
+                                  "补充内容；确不需要该章节时先 dd.py manifest --disable <id>"))
+    # 每个门都给结论：全过时发 PASS（SKILL.md 阶段 4 的逐项 PASS/FAIL/WARN）
+    items.extend(sec_items or [Item("PASS", "sections-ok", f"启用章节全部齐全非空（{n_enabled} 项）")])
 
     # ② mermaid 围栏配平
     fences = sum(1 for l in lines if l.strip().startswith("```"))
     if fences % 2 != 0:
         items.append(Item("FAIL", "fence-imbalance",
                           f"代码围栏不配平（``` 共 {fences} 个）", "补齐缺失的闭合围栏"))
+    else:
+        items.append(Item("PASS", "fence-ok", f"代码围栏配平（{fences} 个 ``` 行）"))
 
     # ③④ 图类型白名单 + 复杂度
     mermaid_n = 0
+    mm_items: list[Item] = []
     for bi, block in enumerate(_mermaid_blocks(text), 1):
         mermaid_n += 1
         t = _mermaid_type(block)
         if t is None:
-            items.append(Item("FAIL", "mermaid-empty", f"第 {bi} 张 mermaid 图为空"))
+            mm_items.append(Item("FAIL", "mermaid-empty", f"第 {bi} 张 mermaid 图为空"))
             continue
         if t not in MERMAID_ALLOWED:
-            items.append(Item("FAIL", "mermaid-type",
-                              f"第 {bi} 张图类型 `{t}` 不在白名单（flowchart/sequenceDiagram/classDiagram/stateDiagram/erDiagram）",
-                              "逻辑设计不用 mindmap/gantt/pie 等，按 references/mermaid-uml.md 改型"))
+            mm_items.append(Item("FAIL", "mermaid-type",
+                                 f"第 {bi} 张图类型 `{t}` 不在白名单（flowchart/sequenceDiagram/classDiagram/stateDiagram/erDiagram）",
+                                 "逻辑设计不用 mindmap/gantt/pie 等，按 references/mermaid-uml.md 改型"))
             continue
         shown = MERMAID_ALIAS.get(t, t)
         nodes, edges = _complexity(block, t)
         if nodes > MAX_NODES or edges > MAX_EDGES:
-            items.append(Item("WARN", "mermaid-complex",
-                              f"第 {bi} 张图（{shown}）粗估 {nodes} 节点/{edges} 边，超上限 {MAX_NODES}/{MAX_EDGES}",
-                              "拆分为多张图，每图只回答一个问题"))
+            mm_items.append(Item("WARN", "mermaid-complex",
+                                 f"第 {bi} 张图（{shown}）粗估 {nodes} 节点/{edges} 边，超上限 {MAX_NODES}/{MAX_EDGES}",
+                                 "拆分为多张图，每图只回答一个问题"))
+    items.extend(mm_items)
+    if mermaid_n and not any(i.level == "FAIL" for i in mm_items):
+        items.append(Item("PASS", "mermaid-ok", f"{mermaid_n} 张 mermaid 图类型全部在白名单"))
 
     # ⑤ 未决/延期标记（全角/半角冒号等价）
+    marker_items: list[Item] = []
     unresolved = UNRESOLVED_RE.findall(text)
     if unresolved:
-        items.append(Item("FAIL", "unresolved-marker",
-                          f"存在未决标记 {'、'.join(sorted(set(unresolved)))}",
-                          "未决问题必须先 q-answer 或裁剪出范围（写进 IN/OUT）"))
+        marker_items.append(Item("FAIL", "unresolved-marker",
+                                 f"存在未决标记 {'、'.join(sorted(set(unresolved)))}",
+                                 "未决问题必须先 q-answer 或裁剪出范围（写进 IN/OUT）"))
     doc_deferred = set(DEFERRED_RE.findall(text))
     if doc_key == "design":
         if doc_deferred:
-            items.append(Item("FAIL", "deferred-marker",
-                              f"设计文档不允许延期标记：{'、'.join(sorted(doc_deferred))}",
-                              "详细设计确认前延期问题必须答掉或裁剪出范围"))
+            marker_items.append(Item("FAIL", "deferred-marker",
+                                     f"设计文档不允许延期标记：{'、'.join(sorted(doc_deferred))}",
+                                     "详细设计确认前延期问题必须答掉或裁剪出范围"))
     else:
         ledger_deferred = {q["id"] for q in ledger["questions"] if q["status"] == "deferred"}
         missing = ledger_deferred - doc_deferred
         dangling = doc_deferred - ledger_deferred
         if missing:
-            items.append(Item("FAIL", "deferred-reconcile",
-                              f"台账延期但文档未标注：{'、'.join(sorted(missing))}",
-                              "在「未决与延期」节逐条 [延期:Qxxx] 标注"))
+            marker_items.append(Item("FAIL", "deferred-reconcile",
+                                     f"台账延期但文档未标注：{'、'.join(sorted(missing))}",
+                                     "在「未决与延期」节逐条 [延期:Qxxx] 标注"))
         if dangling:
-            items.append(Item("FAIL", "deferred-reconcile",
-                              f"文档延期标记在台账中不存在或非延期：{'、'.join(sorted(dangling))}",
-                              "标记必须与台账 deferred 集合一一对应"))
+            marker_items.append(Item("FAIL", "deferred-reconcile",
+                                     f"文档延期标记在台账中不存在或非延期：{'、'.join(sorted(dangling))}",
+                                     "标记必须与台账 deferred 集合一一对应"))
+    items.extend(marker_items or [Item("PASS", "markers-ok", "未决/延期标记与台账对账一致")])
 
     # ⑥ 占位符（词边界：等待定时 / TODOS 等正常文本不误伤）
     ph_hits = [w for w, pat in zip(PLACEHOLDERS, PLACEHOLDER_RES) if pat.search(text)]
@@ -636,33 +613,35 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, confirm_mode: bool = False
         items.append(Item("FAIL", "placeholder",
                           f"存在占位符残留：{'、'.join(ph_hits)}",
                           "所有占位符（含模板省略号 ……）替换为具体内容后才能确认"))
+    else:
+        items.append(Item("PASS", "placeholder-ok", "无占位符残留"))
 
     # ⑦ 状态行与台账一致（只认围栏外状态行）
     expect = "Confirmed" if doc["status"] == "confirmed" else "Draft"
     idx = _find_status_line(lines, states)
     if idx is None:
         items.append(Item("FAIL", "status-line", f"缺少状态行（H1 下应有 `状态: {expect}`）"))
-    elif not confirm_mode:
-        m = STATUS_LINE_RE.match(lines[idx])
-        if m.group(1) != expect:
+    else:
+        val = STATUS_LINE_RE.match(lines[idx]).group(1)
+        if confirm_mode:
+            items.append(Item("PASS", "status-ok", f"状态行存在（{val}），confirm 将同步为 Confirmed"))
+        elif val != expect:
             items.append(Item("FAIL", "status-line",
-                              f"状态行为 {m.group(1)}，台账为 {doc['status']}（期望 {expect}）",
+                              f"状态行为 {val}，台账为 {doc['status']}（期望 {expect}）",
                               "状态行只能随 confirm 流转，勿手改漂移；确认意图仍在时重跑 confirm 可自愈同步"))
+        else:
+            items.append(Item("PASS", "status-ok", f"状态行 {val} 与台账一致"))
 
     # ⑧ ADR 对账（b：文档引用→文件存在；a/c 在 run_checks 汇总层做全局对账）
-    adir = adrs_dir_path(repo, ledger)
-    adr_files = {}
-    if adir.is_dir():
-        for p in adir.iterdir():
-            mm = ADR_FILE_RE.match(p.name)
-            if mm:
-                adr_files[mm.group(1)] = p
+    adr_files = scan_adr_files(repo, ledger)
     refs = set(ADR_REF_RE.findall(text))
-    for num in sorted(refs):
-        if num not in adr_files:
-            items.append(Item("FAIL", "adr-ref",
-                              f"文档引用 ADR-{num} 但 {ledger['adrs_dir']}/{num}-*.md 不存在",
-                              "按分配路径补写 ADR 文件（references/doc-templates.md 的 ADR 模板）"))
+    ref_bad = [num for num in sorted(refs) if num not in adr_files]
+    for num in ref_bad:
+        items.append(Item("FAIL", "adr-ref",
+                          f"文档引用 ADR-{num} 但 {ledger['adrs_dir']}/{num}-*.md 不存在",
+                          "按分配路径补写 ADR 文件（references/doc-templates.md 的 ADR 模板）"))
+    if not ref_bad:
+        items.append(Item("PASS", "adr-ref-ok", f"文档 ADR 引用均有对应文件（{len(refs)} 处）"))
 
     if doc_key == "design" and mermaid_n == 0 and any(
             s["doc"] == "design" and s["id"] == "core-logic" and s["enabled"]
@@ -690,19 +669,28 @@ def run_checks(repo: Path, ledger: dict, which: str,
         items.extend(doc_items)
         refs_union |= refs
         # ⑨⑩ 前置
-        if dk == "analysis" and which in ("analysis", "all") and stats["open"] > 0:
-            items.append(Item("FAIL", "open-questions",
-                              f"台账还有 {stats['open']} 个 open 问题",
-                              "frontier 清零（全部 q-answer 或 --defer）后才能确认分析文档"))
+        if dk == "analysis" and which in ("analysis", "all"):
+            if stats["open"] > 0:
+                items.append(Item("FAIL", "open-questions",
+                                  f"台账还有 {stats['open']} 个 open 问题",
+                                  "frontier 清零（全部 q-answer 或 --defer）后才能确认分析文档"))
+            else:
+                items.append(Item("PASS", "open-ok", "台账 open 问题已清零"))
         if dk == "design":
+            prereq_ok = True
             if ledger["docs"]["analysis"]["status"] != "confirmed":
                 items.append(Item("FAIL", "design-prereq",
                                   "分析文档尚未 confirmed",
                                   "先 check+confirm analysis，再 phase design-doc"))
+                prereq_ok = False
             if stats["open"] > 0 or stats["deferred"] > 0:
                 items.append(Item("FAIL", "design-prereq",
                                   f"设计确认要求台账零 open 零 deferred（当前 open={stats['open']} deferred={stats['deferred']}）",
                                   "延期问题要么答掉，要么裁剪进范围（更新 IN/OUT）"))
+                prereq_ok = False
+            if prereq_ok:
+                items.append(Item("PASS", "prereq-ok",
+                                  "前置满足：analysis 已确认、台账零 open 零 deferred"))
 
     # 未被检文档的 ADR 引用并入（全局对账 c 的口径是「任何决策表」）
     for dk in ("analysis", "design"):
@@ -717,19 +705,27 @@ def run_checks(repo: Path, ledger: dict, which: str,
 
     # ⑧ 全局对账（不依赖 which，对台账里分配过的 ADR 负责；编号从文件名锚定解析，
     # 目录名里的年份片段（如 docs/2024-adr/0001-x.md）不得冒充编号）
+    adr_audited = 0
+    adr_audit_ok = True
     for q in ledger["questions"]:
         adr = q.get("adr") or {}
         if adr.get("needed") and q["status"] == "answered":
+            adr_audited += 1
             p = repo / adr.get("path", "")
             num_m = ADR_FILE_RE.match(Path(adr.get("path", "")).name)
             if not p.is_file():
                 items.append(Item("FAIL", "adr-file",
                                   f"{q['id']} 分配了 ADR 但文件不存在：{adr.get('path')}",
                                   "按 references/doc-templates.md 的 ADR 模板立即补写"))
+                adr_audit_ok = False
             elif num_m and num_m.group(1) not in refs_union:
                 items.append(Item("FAIL", "adr-ref",
                                   f"ADR-{num_m.group(1)}（{q['id']}）未被任何决策表引用",
                                   "在分析或设计文档的决策表/ADR 索引中补 ADR-NNNN 引用"))
+                adr_audit_ok = False
+    if adr_audited and adr_audit_ok:
+        items.append(Item("PASS", "adr-audit-ok",
+                          f"ADR 对账通过（{adr_audited} 项分配：文件存在且被引用）"))
     has_fail = any(i.level == "FAIL" for i in items)
     return items, has_fail
 
@@ -777,6 +773,13 @@ def _brief_status(ledger: dict) -> str:
             f"design={ledger['docs']['design']['status']}")
 
 
+def _print_overview(ledger: dict, stats: dict) -> None:
+    """frontier 与 status 共用的台账概要头（单一实现，防两个恢复入口各说各话）。"""
+    print(f"== design-doc-writer 台账 ==  phase: {ledger['phase']}  feature: {ledger['project']['feature']}")
+    print(f"问题 {stats['total']}：answered {stats['answered']} / open {stats['open']} / "
+          f"deferred {stats['deferred']}   ADR 已分配 {stats['adr']}")
+
+
 PHASE_GUIDE = {
     "intake": "输入已收集则 dd.py phase analyzing 进入分析阶段，随后 dd.py kb-scan",
     "analyzing": "dd.py kb-scan 后按 primary 知识库做事实调研，对照 references/question-dimensions.md 逐维度 dd.py q-add",
@@ -810,20 +813,19 @@ def cmd_init(args, repo: Path) -> tuple[int, str]:
         sections.append({"doc": doc, "id": sid, "title": title,
                          "enabled": bool(preset.get(sid, default))})
     reason = f"shape={args.shape} 预置（可用 dd.py manifest --enable/--disable 调整）"
+    # 台账只存会被读回的字段：时间戳/缘由走 history[]（审计一致，无只写冗余）
     ledger = {
         "version": LEDGER_VERSION,
         "note": "本文件只允许经 scripts/dd.py 子命令修改，禁止手编",
-        "project": {"repo_root": str(repo.resolve()), "feature": args.feature,
-                    "created_at": now_iso(), "updated_at": now_iso()},
+        "project": {"feature": args.feature, "updated_at": now_iso()},
         "phase": "intake",
-        "kb": {"scanned_at": None, "detected": [], "openwiki_mcp": False,
-               "primary": None, "note": "尚未 kb-scan"},
+        "kb": {"detected": [], "openwiki_mcp": False, "primary": None},
         "questions": [],
         "docs": {
             "analysis": {"path": analysis, "status": "draft", "confirmed_at": None, "because": None},
             "design": {"path": design, "status": "draft", "confirmed_at": None, "because": None},
         },
-        "manifest": {"updated_at": now_iso(), "sections": sections, "reason": reason},
+        "manifest": {"sections": sections, "reason": reason},
         "adrs_dir": adrs_dir,
         "history": [],
     }
@@ -854,12 +856,9 @@ def cmd_kb_scan(args, repo: Path) -> tuple[int, str]:
         if usable and primary is None:
             primary = kind
     ledger["kb"] = {
-        "scanned_at": now_iso(),
         "detected": detected,
         "openwiki_mcp": bool(args.openwiki),
         "primary": primary,
-        "note": ("事实调研优先用 primary 对应工具；无知识库则降级直接读码"
-                 if primary else "未探测到知识库，降级直接读码"),
     }
     add_history(ledger, "kb-scan", f"primary={primary} openwiki={bool(args.openwiki)}")
     save_ledger(repo, ledger)
@@ -917,29 +916,19 @@ def _add_one_question(ledger: dict, spec: dict) -> str:
         "facts": spec.get("facts") or None,
     }
     ledger["questions"].append(q)
-    # 防御性环检查（新节点无入边，理论上不成环；批量乱序时兜底）
-    _assert_acyclic(ledger)
+    # 防环校验由 cmd_q_add 在整批加完后做一次（依赖只允许指向现存 id，
+    # 单加一个节点不可能成环；每问全量 DFS 是 O(B·(N+B)) 的无谓开销）
     return qid
 
 
 def _assert_acyclic(ledger: dict) -> None:
+    """graphlib 一次迭代遍历做防环（CycleError 自带完整环路径）。"""
     by_id = q_by_id(ledger)
-    color: dict[str, int] = {}
-
-    def visit(qid: str) -> None:
-        color[qid] = 1
-        for d in by_id[qid].get("depends_on", []):
-            if d not in by_id:
-                continue
-            if color.get(d) == 1:
-                raise DDError(f"依赖成环：{d} ↔ {qid}", next_="检查 depends_on，依赖必须无环")
-            if color.get(d) is None:
-                visit(d)
-        color[qid] = 2
-
-    for qid in by_id:
-        if color.get(qid) is None:
-            visit(qid)
+    graph = {qid: [d for d in q.get("depends_on", []) if d in by_id] for qid, q in by_id.items()}
+    try:
+        graphlib.TopologicalSorter(graph).prepare()
+    except graphlib.CycleError as e:
+        raise DDError(f"依赖成环：{e.args[0]}", next_="检查 depends_on，依赖必须无环") from e
 
 
 def cmd_q_add(args, repo: Path) -> tuple[int, str]:
@@ -958,6 +947,12 @@ def cmd_q_add(args, repo: Path) -> tuple[int, str]:
 
     ids = []
     if args.batch:
+        # 组合守卫：混传即报错，不再静默丢弃单问题参数
+        if any([args.dimension, args.title, args.body, args.recommendation,
+                args.depends_on, args.facts]):
+            raise DDError("--batch 与单问题参数（--dimension/--title/--body/"
+                          "--recommendation/--depends-on/--facts）互斥",
+                          next_="批量走 questions.json；单条提问去掉 --batch")
         try:
             batch = json.loads(Path(args.batch).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -971,6 +966,7 @@ def cmd_q_add(args, repo: Path) -> tuple[int, str]:
                 "recommendation": args.recommendation, "depends_on": args.depends_on,
                 "facts": args.facts}
         ids.append(_add_one_question(ledger, spec))
+    _assert_acyclic(ledger)  # 整批一次（含手编台账等异常输入的兜底）
     add_history(ledger, "q-add", "、".join(ids) + (f"（共 {len(ids)} 条）" if len(ids) > 1 else ""))
     save_ledger(repo, ledger)
     print(f"== q-add ==  新增：{'、'.join(ids)}" + ("（analyzing→grilling 自动推进）" if auto else ""))
@@ -994,6 +990,10 @@ def cmd_q_answer(args, repo: Path) -> tuple[int, str]:
         raise DDError("--adr 只能搭配 --answer（先有决策才有 ADR）")
     if args.adr and args.no_adr:
         raise DDError("--adr 与 --no-adr 互斥")
+    if args.reason and not args.defer:
+        raise DDError("--reason 仅搭配 --defer（作答的依据写在决策文本里）")
+    if args.adr_slug and not args.adr:
+        raise DDError("--adr-slug 仅搭配 --adr")
 
     q = q_by_id(ledger).get(args.id)
     if q is None:
@@ -1047,13 +1047,13 @@ def cmd_frontier(args, repo: Path) -> tuple[int, str]:
     ledger = load_ledger(repo)
     stats = question_stats(ledger)
     frontier, blocked = compute_frontier(ledger["questions"])
-    print(f"== design-doc-writer 台账 ==  phase: {ledger['phase']}  feature: {ledger['project']['feature']}")
-    print(f"问题 {stats['total']}：answered {stats['answered']} / open {stats['open']} / "
-          f"deferred {stats['deferred']}   ADR 已分配 {stats['adr']}")
+    _print_overview(ledger, stats)
     if frontier:
         print(f"本轮 frontier（{len(frontier)}）：")
         for q in frontier:
             print(f"  {q['id']} [{q['dimension']}] {q['title']}")
+            if q.get("facts"):  # q-add --facts 记录的自查事实，提问时要用
+                print(f"      事实：{q['facts']}")
     if blocked:
         print(f"被阻塞（{len(blocked)}）：" + "、".join(
             f"{q['id']}（等 {'、'.join(d['id'] + ('延期中' if d['status'] == 'deferred' else '') for d in deps)}）"
@@ -1064,8 +1064,7 @@ def cmd_frontier(args, repo: Path) -> tuple[int, str]:
     if blocked:
         return EXIT_FLOW, ("无新问题可问但有被阻塞问题：请用户处理被延期依赖（q-answer 答掉或维持延期），"
                            "或裁剪掉下游问题")
-    if stats["open"] > 0:  # 理论上不会走到（open 必在 frontier/blocked 之一）
-        return EXIT_FLOW, "仍有 open 问题：dd.py status 检查台账"
+    # compute_frontier 把每个 open 问题划入 frontier 或 blocked，此处必然清零
     # 阶段感知的收尾指引：给出的 phase 指令必须本身合法（PHASE_EDGES 可达）
     cur = ledger["phase"]
     if cur == "grilling":
@@ -1129,7 +1128,6 @@ def cmd_manifest(args, repo: Path) -> tuple[int, str]:
     if not args.reason:
         raise DDError("--reason 必填（记录裁剪理由，供审计）")
     if changed:
-        ledger["manifest"]["updated_at"] = now_iso()
         ledger["manifest"]["reason"] = args.reason
         add_history(ledger, "manifest", f"{','.join(changed)}  reason={args.reason}")
         save_ledger(repo, ledger)
@@ -1147,13 +1145,11 @@ def cmd_status(args, repo: Path) -> tuple[int, str]:
     ledger = load_ledger(repo)
     stats = question_stats(ledger)
     frontier, blocked = compute_frontier(ledger["questions"])
-    print(f"== design-doc-writer 台账 ==  phase: {ledger['phase']}  feature: {ledger['project']['feature']}")
+    _print_overview(ledger, stats)
     for dk in ("analysis", "design"):
         d = ledger["docs"][dk]
         extra = f"  confirmed_at={d['confirmed_at']}" if d["status"] == "confirmed" else ""
         print(f"  [{dk}] {d['status']:<9} {d['path']}{extra}")
-    print(f"问题 {stats['total']}：answered {stats['answered']} / open {stats['open']} / deferred {stats['deferred']}"
-          f"   ADR 已分配 {stats['adr']}")
     by_dim: dict[str, int] = {}
     for q in ledger["questions"]:
         if q["status"] == "open":
@@ -1164,6 +1160,11 @@ def cmd_status(args, repo: Path) -> tuple[int, str]:
         print(f"frontier（{len(frontier)}）：" + "、".join(q["id"] for q in frontier))
     if blocked:
         print(f"被阻塞（{len(blocked)}）：" + "、".join(q["id"] for q, _ in blocked))
+    open_facts = [q for q in ledger["questions"] if q["status"] == "open" and q.get("facts")]
+    if open_facts:
+        print("open 问题的自查事实（--facts）：")
+        for q in open_facts:
+            print(f"  · {q['id']} {q['facts']}")
     kb = ledger["kb"]
     print(f"知识库：primary={kb.get('primary') or '（无，降级读码）'}"
           + (f"  openwiki_mcp={kb.get('openwiki_mcp')}" if kb.get("openwiki_mcp") else ""))
@@ -1385,10 +1386,10 @@ def main(argv: list[str] | None = None) -> int:
     code: int
     nxt: str
     try:
-        setup_logging(log, create_dirs=not probe_only)
+        setup_logging(SKILL_NAME, log, create_dirs=not probe_only)
     except OSError as e:
         print(f"错误: 日志初始化失败：{e}")
-        print("next_step: 检查 --log 路径与权限后重试")
+        next_step("检查 --log 路径与权限后重试")
         return EXIT_ERR
     try:
         LOG.info(f"[cmd] dd.py {' '.join(argv)}  repo={repo}")
@@ -1406,7 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误: 未预期异常：{e}（详见日志 {log}）")
         nxt = "查看日志定位；这是 bug 请回报"
         code = EXIT_ERR
-    print(f"next_step: {nxt}")
+    next_step(nxt)
     return code
 
 

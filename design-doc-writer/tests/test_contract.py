@@ -114,19 +114,19 @@ def test_d5_argparse_error_contract(booted):
 # ---------- D6：日志与 stderr 共用单一文件句柄（互不覆盖） ----------
 
 def test_d6_single_handle_no_overwrite(tmp_path):
-    import dd as ddmod
+    import utils
     lp = tmp_path / "dd.log"
-    ddmod.setup_logging(lp)
+    logger = utils.setup_logging("ddw-contract-test", lp)
     try:
-        ddmod.LOG.info("info-before")
+        logger.info("info-before")
         sys.stderr.write("stderr-burst\n")
         sys.stderr.flush()
-        ddmod.LOG.info("info-after")
-        ddmod.LOG.handlers[0].flush()
+        logger.info("info-after")
+        logger.handlers[0].flush()
     finally:
-        ddmod._restore_stderr()
-        for h in list(ddmod.LOG.handlers):
-            ddmod.LOG.removeHandler(h)
+        utils._restore_stderr()
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
             h.close()
     text = lp.read_text(encoding="utf-8")
     assert "info-before" in text and "info-after" in text

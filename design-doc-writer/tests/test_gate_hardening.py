@@ -10,7 +10,7 @@ import os
 from conftest import make_analysis, make_design, read_ledger, write_doc
 
 
-def answer_all(dd, repo, *answers):
+def answer_all(dd, *answers):
     for qid, ans in answers:
         assert dd("q-answer", qid, "--answer", ans)[0] == 0
 
@@ -26,7 +26,7 @@ def write_adr(repo, rel, text="# 决策\n\n一段。\n"):
 
 def test_a1_fenced_heading_does_not_satisfy_section_gate(dd, grilling):
     """围栏内引用的 `## 术语表` 不能顶替真实章节（空/缺失两个方向）。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     # 真实「术语表」空 + 围栏骨架里有同名标题 → 必须 FAIL section-empty
     text = make_analysis().replace("## 术语表\n\n内容：术语表的实质内容。", "## 术语表\n")
     text += "\n```markdown\n## 术语表\n\n（引用模板骨架）\n```\n"
@@ -43,7 +43,7 @@ def test_a1_fenced_heading_does_not_satisfy_section_gate(dd, grilling):
 
 def test_a2_fenced_status_line_invisible_and_confirm_does_not_rewrite_fence(dd, grilling):
     """围栏内的 `状态: Draft` 不满足门禁；confirm 只改真实状态行。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     fenced = "\n```markdown\n# 示例 需求分析\n\n状态: Draft\n\n## 背景与目标\n\n示例\n```\n"
     # 无真实状态行 → check FAIL，confirm 被拒
     text = make_analysis().replace("状态: Draft\n\n", "")
@@ -61,7 +61,7 @@ def test_a2_fenced_status_line_invisible_and_confirm_does_not_rewrite_fence(dd, 
 
 def test_e3_confirm_preserves_blank_line_after_status(dd, grilling):
     """confirm 逐行替换状态行，不再吞掉状态行后的空行。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     p = write_doc(grilling, make_analysis())
     assert "状态: Draft\n\n## 背景与目标" in p.read_text(encoding="utf-8")
     assert dd("confirm", "--doc", "analysis", "--because", "ok")[0] == 0
@@ -81,7 +81,7 @@ def test_a3_fullwidth_colon_markers_reconciled(dd, grilling):
 
 def test_a3_fullwidth_unresolved_marker_fails(dd, grilling):
     """全角过期 [未决：Q001] 同样要拦——不能只认半角。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis(extra="此处 [未决：Q001] 仍悬着"))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "unresolved-marker" in out and "Q001" in out
@@ -90,7 +90,7 @@ def test_a3_fullwidth_unresolved_marker_fails(dd, grilling):
 # ---------- A4：mermaid 围栏变体不再被跳过 ----------
 
 def test_a4_mermaid_fence_variants_are_checked(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     for fence in ("```Mermaid", "``` mermaid", "````mermaid"):
         block = f"\n{fence}\npie\n  \"a\" : 1\n```\n" if not fence.startswith("````") else \
                 f"\n{fence}\npie\n  \"a\" : 1\n````\n"
@@ -113,7 +113,7 @@ def test_a5_confirm_rejected_at_intake_bypasses_interview(dd, booted):
 # ---------- A6：design 确认复检已确认的 analysis ----------
 
 def test_a6_design_check_rechecks_degraded_analysis(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis())
     assert dd("confirm", "--doc", "analysis", "--because", "ok")[0] == 0
     assert dd("phase", "design-doc")[0] == 0
@@ -131,7 +131,7 @@ def test_a6_design_check_rechecks_degraded_analysis(dd, grilling):
 # ---------- A7：manifest 的 done/confirmed 守卫 ----------
 
 def test_a7_manifest_locked_after_done_and_confirmed_doc(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis())
     assert dd("confirm", "--doc", "analysis", "--because", "ok")[0] == 0
     assert dd("phase", "design-doc")[0] == 0
@@ -150,7 +150,7 @@ def test_a7_manifest_locked_after_done_and_confirmed_doc(dd, grilling):
 # ---------- A8：finish 重跑门禁 ----------
 
 def test_a8_finish_reruns_checks_blocks_deferred_trapped_in_done(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis())
     assert dd("confirm", "--doc", "analysis", "--because", "ok")[0] == 0
     assert dd("phase", "design-doc")[0] == 0
@@ -168,14 +168,14 @@ def test_a8_finish_reruns_checks_blocks_deferred_trapped_in_done(dd, grilling):
 # ---------- A9：模板省略号 `……` 进门禁 ----------
 
 def test_a9_ellipsis_placeholder_flagged(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis(extra="| …… | …… |"))
     code, out = dd("check", "--doc", "analysis")
     assert code == 1 and "placeholder" in out and "……" in out
 
 
 def test_a9_prose_ellipsis_not_flagged(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     write_doc(grilling, make_analysis(extra="正常行文的省略：先做导出、再做多格式等等……与占位无关。"))
     assert dd("check", "--doc", "analysis")[0] == 0
 
@@ -183,7 +183,7 @@ def test_a9_prose_ellipsis_not_flagged(dd, grilling):
 # ---------- B1：ADR 编号台账占坑 ----------
 
 def test_b1_consecutive_adr_assignments_do_not_collide(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "a"), ("Q002", "b"))
+    answer_all(dd, ("Q001", "a"), ("Q002", "b"))
     assert dd("q-answer", "Q001", "--answer", "异步", "--adr", "--adr-slug", "cache")[0] == 0
     assert dd("q-answer", "Q002", "--answer", "REST", "--adr", "--adr-slug", "auth")[0] == 0
     qs = read_ledger(grilling)["questions"]
@@ -194,7 +194,7 @@ def test_b1_consecutive_adr_assignments_do_not_collide(dd, grilling):
 # ---------- B2：ADR 分配生命周期可逃逸 ----------
 
 def test_b2_no_adr_clears_stale_assignment(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "a"), ("Q002", "b"))
+    answer_all(dd, ("Q001", "a"), ("Q002", "b"))
     dd("q-answer", "Q001", "--answer", "A", "--adr", "--adr-slug", "export")
     write_adr(grilling, "docs/adr/0001-export.md")
     # 决策反转：--no-adr 清除分配，删除矛盾文件后不再永久 FAIL
@@ -206,7 +206,7 @@ def test_b2_no_adr_clears_stale_assignment(dd, grilling):
 
 
 def test_b2_defer_clears_adr_assignment(dd, grilling):
-    answer_all(dd, grilling, ("Q002", "b"))
+    answer_all(dd, ("Q002", "b"))
     dd("q-answer", "Q001", "--answer", "A", "--adr", "--adr-slug", "export")
     assert dd("q-answer", "Q001", "--defer", "--reason", "再想想")[0] == 0
     assert read_ledger(grilling)["questions"][0]["adr"] is None
@@ -218,7 +218,7 @@ def test_b2_defer_clears_adr_assignment(dd, grilling):
 # ---------- B3：状态行同步失败不得谎报成功 ----------
 
 def test_b3_confirm_sync_failure_aborts_without_ledger_change(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     p = write_doc(grilling, make_analysis())
     # 只读目录注入写失败（文件级 444 挡不住 os.replace，目录级才挡得住创建临时文件）
     p.parent.chmod(0o555)
@@ -236,7 +236,7 @@ def test_b3_confirm_sync_failure_aborts_without_ledger_change(dd, grilling):
 
 def test_b4_confirm_heals_status_drift(dd, grilling):
     """confirmed 后作者按模板惯例重写 Draft → 重跑 confirm 自愈（不再死锁）。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     p = write_doc(grilling, make_analysis())
     assert dd("confirm", "--doc", "analysis", "--because", "第一次")[0] == 0
     assert dd("phase", "grilling")[0] == 0  # 合法回边
@@ -250,7 +250,7 @@ def test_b4_confirm_heals_status_drift(dd, grilling):
 
 def test_b4_confirm_heals_doc_confirmed_ledger_draft_window(dd, grilling):
     """崩溃窗口（文档 Confirmed / 台账 draft）重跑 confirm 自愈。"""
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     p = write_doc(grilling, make_analysis())
     p.write_text(p.read_text(encoding="utf-8").replace("状态: Draft", "状态: Confirmed"), encoding="utf-8")
     code, out = dd("confirm", "--doc", "analysis", "--because", "补台账")
@@ -261,7 +261,7 @@ def test_b4_confirm_heals_doc_confirmed_ledger_draft_window(dd, grilling):
 # ---------- C1：mermaid %% 指令/注释 ----------
 
 def test_c1_mermaid_init_directive_and_comment_ok(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     block = ("\n```mermaid\n%%{init: {'theme':'dark'}}%%\n%% 一张状态图\n"
              "stateDiagram-v2\n    [*] --> S1\n    S1 --> [*]\n```\n")
     write_doc(grilling, make_analysis(extra=block))
@@ -290,7 +290,7 @@ def test_c2_adrs_dir_year_fragment_not_confused(dd, repo, tmp_path):
 # ---------- C3：占位符词边界 ----------
 
 def test_c3_placeholder_word_boundaries(dd, grilling):
-    answer_all(dd, grilling, ("Q001", "x"), ("Q002", "y"))
+    answer_all(dd, ("Q001", "x"), ("Q002", "y"))
     # 正常中文行文（等待定时）与标识符（/TODOS）不误伤
     write_doc(grilling, make_analysis(extra="系统等待定时任务完成后回调；接口见 /api/TODOS 列表。"))
     code, out = dd("check", "--doc", "analysis")

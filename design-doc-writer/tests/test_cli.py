@@ -117,14 +117,6 @@ def test_status_shows_phase_and_history(dd, grilling):
     assert "analysis" in out and "design" in out
 
 
-def test_check_exit_codes(dd, grilling):
-    write_doc(grilling, make_analysis())
-    assert dd("check", "--doc", "analysis")[0] == 1   # open 未清
-    dd("q-answer", "Q001", "--answer", "x")
-    dd("q-answer", "Q002", "--answer", "y")
-    assert dd("check", "--doc", "analysis")[0] == 0
-
-
 def test_confirm_because_required_by_argparse(dd, grilling):
     code, out = dd("confirm", "--doc", "analysis")
     assert code == 2  # argparse required 缺失
