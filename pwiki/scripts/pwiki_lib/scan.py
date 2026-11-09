@@ -163,16 +163,31 @@ def read_text(path: str, limit: int = 200_000) -> str:
     return _corpus_read_text(path, limit)
 
 
+def _count_lines_chunked(path: str) -> int:
+    """分块计数(1 MiB)—— count_lines 与 cite_lines 共用(P75: Python 行
+    迭代是 scan 的主导 CPU 成本, 实测 7.8× 差距; 末行无换行补 1 同口径)。"""
+    n, tail = 0, b""
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                n += chunk.count(b"\n")
+                tail = chunk[-1:]
+    except OSError:
+        return 0
+    if tail and tail != b"\n":
+        n += 1
+    return n
+
+
 def count_lines(path: str) -> int:
     """D23 口径: 返回真实行数(供引用钳位); 超大文件返回 -1 计入 skipped_large。"""
     try:
         if os.path.getsize(path) > MAX_TEXT_BYTES:
             return -1
-        n = 0
-        with open(path, "rb") as fh:
-            for _ in fh:
-                n += 1
-        return n
+        return _count_lines_chunked(path)
     except OSError:
         return 0
 

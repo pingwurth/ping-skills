@@ -325,12 +325,40 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
     all_paths = {p["path"] for p in pages}
 
     written = link_fixes = 0
+    # P71: 合成短路缓存 —— 合成输入(page_id/内容哈希/风格/路径/全路径集
+    # 签名/commit/文件 mtime)与上次落盘完全一致时, 跳过 normalize+钳位+
+    # 引用块重建的整段工作(每次 finish 曾对全部已发布页重组, 3 页增量也
+    # 白付 ~132 页的正则与 stat)。任一输入变化(key 不匹配)即回退全量合成,
+    # 引用钳位随仓库演化的自愈语义不变; 缓存本身走原子写。
+    import hashlib as _hl
+    _paths_sig = _hl.sha256(
+        "\n".join(sorted(all_paths)).encode("utf-8")).hexdigest()[:16]
+    _cache_path = os.path.join(ctx.root, "work", "compose-cache.json")
+    try:
+        with open(_cache_path, encoding="utf-8") as _fh:
+            _cache = json.load(_fh)
+        if not isinstance(_cache, dict):
+            _cache = {}
+    except (OSError, ValueError):
+        _cache = {}
+    _new_cache: dict = {}
     for p in pages:
         target = os.path.join(ctx.root, p["path"])
         # 合成按行自己的盖章风格(p['style'] > 调用方兜底)—— kept 行/旧 run
         # 行带着写入时的盖章, finish 曾按统一的当前风格合成, 换风格后旧页
         # 的注入层口径被翻转(行是 sqlite3.Row, 取键不用 .get)
         row_style = str(p["style"] or style)
+        _key = [str(p["page_id"]), str(p["content_hash"] or ""), row_style,
+                str(p["path"] or ""), _paths_sig, str(ctx.commit or "")]
+        try:
+            _st = os.stat(target)
+            _ent = _cache.get(str(p["page_id"]))
+            if isinstance(_ent, dict) and _ent.get("key") == _key \
+                    and int(_st.st_mtime * 1000) == _ent.get("mtime"):
+                _new_cache[str(p["page_id"])] = _ent
+                continue
+        except OSError:
+            pass
         content, n = compose_export_content(ctx, p, row_style, all_paths,
                                             plan=plan)
         link_fixes += n
@@ -339,11 +367,23 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
         try:
             with open(target, encoding="utf-8") as fh:
                 if fh.read() == content:
+                    try:
+                        _new_cache[str(p["page_id"])] = {
+                            "key": _key,
+                            "mtime": int(os.stat(target).st_mtime * 1000)}
+                    except OSError:
+                        pass
                     continue
         except (OSError, UnicodeDecodeError):
             pass
         atomic_write(target, content)
         written += 1
+        try:
+            _new_cache[str(p["page_id"])] = {
+                "key": _key, "mtime": int(os.stat(target).st_mtime * 1000)}
+        except OSError:
+            pass
+    atomic_write(_cache_path, json.dumps(_new_cache, ensure_ascii=False))
     keep_files = {os.path.normpath(os.path.join(ctx.root, p["path"]))
                   for p in pages if p["path"]}
     pruned = swept = 0

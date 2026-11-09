@@ -1465,20 +1465,27 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
         for p in leaves[:5]:
             protected.add(p["id"])
     while len(builder.pages) > max_pages:
+        # P76: 叶判定用子计数映射(曾每删一页 O(n²) any() 嵌套扫描), related
+        # 改增量移除(曾每删一页为全库重建列表)
+        _child_n: dict = {}
+        for c in builder.pages:
+            if c.get("parent"):
+                _child_n[c["parent"]] = _child_n.get(c["parent"], 0) + 1
         leaves = [p for p in builder.pages
-                  if not any(c["parent"] == p["id"] for c in builder.pages)]
-        leaves = [p for p in leaves
-                  if p["kind"] != "overview" and p["id"] not in protected]
+                  if not _child_n.get(p["id"])
+                  and p["kind"] != "overview" and p["id"] not in protected]
         if not leaves:
             break
         drop = min(leaves, key=lambda p: (p["priority"],
                                           len(p["source_files"]), p["id"]))
         builder.pages.remove(drop)
         builder.by_id.pop(drop["id"], None)
+        builder.used_ids.discard(drop["id"])
         builder.used_slugs.discard(drop["slug"])
         builder.used_titles.discard(drop["title"])
         for p in builder.pages:
-            p["related_pages"] = [x for x in p["related_pages"] if x != drop["id"]]
+            if drop["id"] in p["related_pages"]:
+                p["related_pages"].remove(drop["id"])
     ids = {p["id"] for p in builder.pages}
     for p in builder.pages:
         if p["parent"] not in ids:
@@ -1538,6 +1545,14 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
     repaired = {"missing": 0, "generated": 0, "backfilled": 0}
     # D13: 回填把已被认领的文件排最后, 兄弟自然分歧; 计数也喂给最终裁剪
     backfill_claims: dict = defaultdict(int)
+    # P73: 合格候选排序一次 + 路径索引 —— 曾每个薄页对全仓文件列表过一
+    # 遍 ~45 项模式检查(几十薄页 × 10k 文件 = 数千万次字符串操作)
+    _eligible = sorted(
+        f["path"] for f in files
+        if f.get("lang") in hand_langs
+        and not is_generated(f["path"])
+        and not match_any(f["path"], P_TEST))
+    _by_path = {f["path"]: f for f in files}
 
     def backfill_from_scope(page, need):
         got: list = []
@@ -1570,19 +1585,33 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
                 if len(got) >= need or (cap is not None and added >= cap):
                     return
 
+        # P73: 合格文件排序一次 + 前缀二分 —— 曾每个薄页对全仓文件
+        # 列表过一遍 ~45 项模式检查(几十薄页 × 10k 文件)
+        import bisect as _bis
+
+        def _under(dirs):
+            out = []
+            for d in dirs:
+                d2 = str(d).rstrip("/")
+                if not d2 or d2 == ".":
+                    continue
+                j = _bis.bisect_left(_eligible, d2)
+                if j < len(_eligible) and _eligible[j] == d2:
+                    out.append(d2)
+                i = _bis.bisect_left(_eligible, d2 + "/")
+                while i < len(_eligible) and _eligible[i].startswith(d2 + "/"):
+                    out.append(_eligible[i])
+                    i += 1
+            return out
+
         def scope_cands(extra_dirs=None):
             dirs = [x for x in (extra_dirs or page.get("scope") or [])
                     if x and x != "."]
             return [
-                f for f in files
-                if any(f["path"] == d.rstrip("/")
-                       or f["path"].startswith(d.rstrip("/") + "/") for d in dirs)
-                and f.get("lang") in hand_langs
-                and not is_generated(f["path"])
-                and not match_any(f["path"], P_TEST)
+                _by_path[p_] for p_ in _under(dirs)
                 # D12: 永不用锁文件/元文档垫页 —— pea 评估里随机
                 # CLAUDE.md/pnpm-lock 引用正是编造证据的痕迹
-                and not is_never_cite(f["path"])
+                if not is_never_cite(p_)
             ]
 
         # tier 0: 全仓同名伴生(与 primary 同 4 字符 stem 前缀), 上限 2

@@ -263,6 +263,9 @@ class Corpus:
         self.modules = modules          # {module_path: entry} (modules.decompose)
         self.manifest_paths = manifest_paths
         self._text: dict = {}
+        # P72: grep 的小写文本缓存 —— themes 每个 needle 曾对全部记忆文本
+        # 重 .lower() 一遍(数十 needle = 数 GB 瞬时字符串扰动)
+        self._text_lower: dict = {}
         self._docs = [f for f in files
                       if f.get("lang") in DOC_LANGS
                       or f["path"].lower().endswith((".md", ".mdx", ".rst"))]
@@ -289,6 +292,12 @@ class Corpus:
             and not (exclude and match_any(f["path"], exclude))
         ])
 
+    def read_lower(self, path: str) -> str:
+        """read() 的小写视图(P72 记忆化; grep 专用)。"""
+        if path not in self._text_lower:
+            self._text_lower[path] = self.read(path).lower()
+        return self._text_lower[path]
+
     def grep(self, pool: list, needles: list, limit: int = 300,
              max_bytes: int = 300_000) -> list:
         hits = []
@@ -298,7 +307,7 @@ class Corpus:
                 break
             if f.get("bytes", 0) > max_bytes or f.get("lang") not in TEXT_LANGS:
                 continue
-            text = self.read(f["path"]).lower()
+            text = self.read_lower(f["path"])
             if text and any(n in text for n in lowered):
                 hits.append(f)
         return hits

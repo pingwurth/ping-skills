@@ -199,10 +199,12 @@ def decompose(inv: dict, max_modules: int = 40, min_files: int = 4,
             nfiles, nlines = stats(d)
             if nfiles < 30 or nlines < 1200:
                 continue
+            # P77: 只扫本子树(dir_files 祖先映射已枚举) —— 曾对全仓
+            # 文件列表逐个 startswith(30-50 个合格叶子 × 10k 文件)
             direct_subdirs = sorted({
                 "/".join(f["path"].split("/")[:depth(d) + 1])
-                for f in files
-                if f["path"].startswith(d + "/") and f["path"].count("/") > depth(d)
+                for f in direct_files(d)
+                if f["path"].count("/") > depth(d)
             })
             candidates = []
             for sd in direct_subdirs:
@@ -702,6 +704,7 @@ def seed_depends_on(ctx: Ctx, plan: dict) -> int:
             if os.path.splitext(p)[1].lower() in source_exts
             or os.path.basename(p) == "pom.xml"][:600]
     added = 0
+    text_memo: dict = {}   # P74: 重叠 scope 的文件只读一次(曾每模块重读)
     for m in modules:
         if m.get("depends_on"):
             continue
@@ -715,7 +718,11 @@ def seed_depends_on(ctx: Ctx, plan: dict) -> int:
                 continue
             # 有界读取统一走 corpus.read_text(唯一实现; 这份手抄曾带
             # errors='replace' 与自有上限, 解码口径与主阅读器漂移)
-            text = read_text(full, 200_000)
+            if full in text_memo:
+                text = text_memo[full]
+            else:
+                text = read_text(full, 200_000)
+                text_memo[full] = text
             if not text:
                 continue
             names = (_pom_dep_artifacts(text)

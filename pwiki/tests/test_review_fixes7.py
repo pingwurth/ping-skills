@@ -1110,3 +1110,54 @@ def test_p60_load_plan_optional_warns_on_corrupt(tmp_path, capsys):
     capsys.readouterr()
     assert planner.load_plan_optional(ctx) is None
     assert "不可用" in capsys.readouterr().err
+
+
+# =========================================================================== #
+# 批次⑦: 性能(P71 可观测回归; P72-P77 为等价优化, 存量套件覆盖)
+# =========================================================================== #
+
+def test_p71_refinish_skips_unchanged_compose(tmp_path, monkeypatch):
+    """同 commit 重跑(regenerate 单页后 finish): 未变页跳过整段导出合成。"""
+    from pwiki_lib import publish
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    total = len(list(ctx.db.published_pages(pid)))
+    assert total >= 5
+    target = next(p for p in ctx.db.published_pages(pid)
+                  if p["kind"] == "page")
+
+    calls = []
+    orig = publish.compose_export_content
+
+    def spy(ctx_, p, style, all_paths, plan=None):
+        calls.append(str(p["page_id"]))
+        return orig(ctx_, p, style, all_paths, plan=plan)
+
+    monkeypatch.setattr(publish, "compose_export_content", spy)
+    # regenerate 挂在活动 run 上: begin 开新 FULL run 再单撤重做一项
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert _cli(["regenerate", target["page_id"], "--force",
+                 "--repo", repo.path, "--root", root]) == config.EXIT_OK
+    # 给重做页交一份真变化的内容(字节相同会被缓存正确跳过)
+    from pwiki_lib import engine
+    ctx2 = _ctx(repo, root)
+    run2 = ctx2.db.active_run(ctx2.partition()["id"])
+    j = ctx2.db.claim_jobs(run2["id"], count=1)[0]
+    page_file = _write_job_file(root, j)
+    with open(page_file, "a", encoding="utf-8") as fh:
+        fh.write("\n新增一段, 内容确实变了。\n")
+    assert engine.cmd_submit(_ns(repo, root, page_id=j["page_id"],
+                                 file=page_file, summary="", key_topics="",
+                                 report=None, lenient=False, force=False,
+                                 claim=j["claim_token"])) == config.EXIT_OK
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    assert set(calls) == {str(target["page_id"])}, \
+        f"未变页也被重新合成: {sorted(calls)}(共 {total} 页)"
