@@ -321,8 +321,10 @@ class WikiDB:
             "SELECT * FROM partition WHERE branch=? AND locale=?",
             (branch, locale)).fetchone()
         if row:
-            self.conn.execute("UPDATE partition SET last_accessed_at=? WHERE id=?",
-                              (now_iso(), row["id"]))
+            # 只读路径不再顺手 UPDATE last_accessed_at(列无读者, 历史
+            # schema 保留): pages/read/status/search 这些文档标注只读的
+            # 命令曾全成了写者 —— finish 的长 BEGIN IMMEDIATE 发布事务
+            # 期间阻塞在写锁上耗尽 busy_timeout, 裸崩 database is locked
             return row
         if not create:
             return None

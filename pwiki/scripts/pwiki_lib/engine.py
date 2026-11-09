@@ -509,8 +509,11 @@ def _adoptable_token(job_row, supplied):
     曾各自漂移)。"""
     processing = str(job_row["state"]) == "processing"
     if supplied is None:
+        # 违规判定不随行状态收窄: 租约过期回 pending 的行(attempts>1)
+        # 照样拒 —— 曾限定 state=='processing', 最陈旧的稿子反而赢得了
+        # 发布位(SKILL.md 规则 8 承诺的是无条件拒绝)
         token = str(job_row["claim_token"] or "") if processing else ""
-        return token, processing and int(job_row["attempts"] or 0) > 1
+        return token, int(job_row["attempts"] or 0) > 1
     return supplied, False
 
 

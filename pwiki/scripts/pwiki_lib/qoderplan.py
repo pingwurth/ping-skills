@@ -111,9 +111,12 @@ def _emit(ctx: Ctx, out_path: str) -> int:
         # 会在 CJK 字符中间硬字节截断(乱码)
         doc = {"title": _trunc_bytes(title, CAP_TITLE_BYTES),
                "goal": _trunc_bytes(goal, CAP_GOAL_BYTES)}
-        if parent_title and parent_title != title:
+        if parent_title and str(p.get("parent")) != str(p.get("id")):
             # parent 必须写**截断后**的父标题 —— loader 拿修剪后的 title
-            # 回溯匹配, 全量父标题对超限父档永不命中 → 子档静默降级顶层
+            # 回溯匹配, 全量父标题对超限父档永不命中 → 子档静默降级顶层。
+            # 自引用守卫按 id(parent==自己)而不是标题: 父子同名是合法树
+            # (validate 的重名检查按 parent 分组)—— 曾按标题相等丢 parent
+            # 键, 子档被 IDE 按"重复 title 丢后者"契约整篇静默蒸发
             doc["parent"] = _trunc_bytes(parent_title, CAP_TITLE_BYTES)
         hints = str(p.get("prompt") or "").strip()
         if hints:
@@ -215,9 +218,7 @@ def _check_caps(documents: list, notes: list) -> list:
                 # Qoder 只能回溯解析: 目标若出现在后面, parent 落空 → 降顶层
                 later = any(str(d.get("title") or "").strip() == parent
                             for d in documents[i + 1:])
-                if parent in titles_seen.values():
-                    pass
-                elif later:
+                if later:
                     warns.append(f"documents[{i}] ({title!r}): parent "
                                  f"{parent!r} 定义在其后 — 无法回溯, 静默降级顶层")
                 else:

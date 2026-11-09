@@ -379,8 +379,16 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
         # 行带着写入时的盖章, finish 曾按统一的当前风格合成, 换风格后旧页
         # 的注入层口径被翻转(行是 sqlite3.Row, 取键不用 .get)
         row_style = str(p["style"] or style)
+        # 缓存键含生效 export_style(plan 级 > config 级, 与 export_injects
+        # 同源读): 曾漏该维度 —— 切换 export_style 后未变页全部命中缓存
+        # 继续供旧注入口径的文件, 后续 file_to_db 按新配置不剥, 注入物被
+        # 吸进 page.content(bug10 防线被绕过; plan_hash 也不含它, update
+        # 直接 noop 不给重合成机会)
+        _export_style = str((plan or {}).get("export_style")
+                            or ctx.config.get("export_style", "legacy"))
         _key = [str(p["page_id"]), str(p["content_hash"] or ""), row_style,
-                str(p["path"] or ""), _paths_sig, str(ctx.commit or "")]
+                str(p["path"] or ""), _paths_sig, str(ctx.commit or ""),
+                _export_style]
         try:
             _st = os.stat(target)
             _ent = _cache.get(str(p["page_id"]))

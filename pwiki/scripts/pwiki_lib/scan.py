@@ -255,6 +255,14 @@ def parse_pyproject(path: str) -> dict:
             if m2:
                 out["dependencies"].append(m2.group(1).strip())
                 continue
+            # 末项带闭合括号的合法 TOML(`"bar"]`)既不是纯项也不以 ']'
+            # 开头 —— 项曾整个被丢且数组永不收口, in_deps_array 吞掉文件
+            # 余下全部内容(整个 [tool.poetry.dependencies] 节)
+            m3 = re.match(r'^["\']([^"\'#]+?)["\']\s*\]\s*(#.*)?$', s)
+            if m3:
+                out["dependencies"].append(m3.group(1).strip())
+                in_deps_array = False
+                continue
             if s.startswith("]"):
                 in_deps_array = False
             continue
@@ -702,45 +710,46 @@ def expand_scope(repo: str, entries: dict, seen: set, scope: str) -> None:
 
 def _expand_scope_uncached(repo: str, scope) -> tuple:
     from .util import join_confined
-    s = str(scope).strip()
+    s = str(scope).strip().rstrip("/")
     if not s:
         return ()
-    # 键归一尾斜杠: 'src' 与 'src/' 是同一目录的两种手写形态,
-    # 分键存会各走一遍 walk
-    key = (repo, s.rstrip("/"))
+    # 尾斜杠在入口统一归一: 'src/main.py/'(手滑)曾带着斜杠进目录分支而
+    # isdir 为假 —— 空集被缓存, 且缓存键与 'src/main.py' 共享, 同进程
+    # 内后来无斜杠的查询也被污染成空(校验还放行: _check_repo_path 正是
+    # rstrip 后 exists) —— 文件被大改后 update 永久静默陈旧
+    key = (repo, s)
     hit = _SCOPE_CACHE.get(key)
     if hit is not None:
         return hit
     out: set = set()
-    if join_confined(repo, s.rstrip("/")) is None:
+    if join_confined(repo, s) is None:
         _SCOPE_CACHE[key] = ()
         return ()
     # 文件系统操作沿用调用方 repo 形态的 join(repo 可能本身是符号链接,
     # realpath 形态会让 relpath 算出 ../.. 串)
-    base = os.path.join(repo, s.rstrip("/"))
+    base = os.path.join(repo, s)
     # 目录判定看文件系统而不是尾斜杠: 手编 scope 'src'(无 '/')曾静默落进
     # 文件分支不展开 —— 快照基线与 update 变更集双双跟踪 0 文件,
     # scope-only 页永远报 no-op。调用方(expand_dirs)各自的 s+'/' 补丁
     # 从此多余但无害。
-    if s.endswith("/") or os.path.isdir(base):
-        if os.path.isdir(base):
-            for root, dirs, names in os.walk(base):
-                dirs[:] = sorted(d for d in dirs
-                                 if d not in config.DEFAULT_IGNORES
-                                 and not _dir_ignored(d)
-                                 and not os.path.islink(os.path.join(root, d)))
-                for name in sorted(names):
-                    full = os.path.join(root, name)
-                    # 文档化的契约"忽略 DEFAULT_IGNORES 与二进制": BINARY_EXT
-                    # 曾没应用 —— logo.png/sqlite 入跟踪集, 一次资产重导出就把
-                    # 整个模块的页面排队全量重写。符号链接同理不入集(防逃逸)。
-                    if os.path.splitext(name)[1].lower() in BINARY_EXT:
-                        continue
-                    if name.endswith(GENERATED_SUFFIXES):
-                        continue
-                    if os.path.islink(full):
-                        continue
-                    out.add(posix(os.path.relpath(full, repo)))
+    if os.path.isdir(base):
+        for root, dirs, names in os.walk(base):
+            dirs[:] = sorted(d for d in dirs
+                             if d not in config.DEFAULT_IGNORES
+                             and not _dir_ignored(d)
+                             and not os.path.islink(os.path.join(root, d)))
+            for name in sorted(names):
+                full = os.path.join(root, name)
+                # 文档化的契约"忽略 DEFAULT_IGNORES 与二进制": BINARY_EXT
+                # 曾没应用 —— logo.png/sqlite 入跟踪集, 一次资产重导出就把
+                # 整个模块的页面排队全量重写。符号链接同理不入集(防逃逸)。
+                if os.path.splitext(name)[1].lower() in BINARY_EXT:
+                    continue
+                if name.endswith(GENERATED_SUFFIXES):
+                    continue
+                if os.path.islink(full):
+                    continue
+                out.add(posix(os.path.relpath(full, repo)))
         _SCOPE_CACHE[key] = frozenset(out)
         return _SCOPE_CACHE[key]
     # glob 前缀(** / *)截断到最近的稳定目录

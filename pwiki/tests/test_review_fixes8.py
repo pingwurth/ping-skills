@@ -476,3 +476,198 @@ def test_r6_08_validate_content_per_row_stamps(tmp_path):
     planner.save_plan(ctx, plan)
     assert _cli(["validate", "--content", "--repo", repo.path,
                  "--root", root]) == config.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# 批次②: Tier-1 剩余 10 条(#4/#5/#6/#7/#9/#10/#11/#12/#13/#14)
+# --------------------------------------------------------------------------- #
+
+def test_r6_04_expand_scope_trailing_slash_file(tmp_path):
+    """带尾斜杠的文件路径归一后走文件分支; 两种写法共享缓存键且都非空。"""
+    from pwiki_lib.scan import expand_scope
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    r = str(repo)
+    entries, seen = {}, set()
+    expand_scope(r, entries, seen, "src/main.py/")
+    assert set(entries) == {"src/main.py"}, \
+        "尾斜杠文件路径跟踪 0 文件(校验放行, 永久静默陈旧)"
+    # 缓存不被斜杠写法污染: 无斜杠查询同样命中文件
+    entries2, seen2 = {}, set()
+    expand_scope(r, entries2, seen2, "src/main.py")
+    assert set(entries2) == {"src/main.py"}
+    # 目录两种写法仍同一份展开
+    entries3, seen3 = {}, set()
+    expand_scope(r, entries3, seen3, "src/")
+    assert set(entries3) == {"src/main.py"}
+
+
+def test_r6_05_compose_cache_key_includes_export_style(tmp_path):
+    """切换 export_style 后未变页的合成缓存失效 —— current 模式下重跑
+    finish 不再继续供 legacy 注入口径的文件(注入物随后被 file_to_db 吸收)。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    page = next(p for p in ctx.db.published_pages(pid) if p["kind"] == "page")
+    f1 = os.path.join(root, page["path"])
+    with open(f1, encoding="utf-8") as fh:
+        first = fh.read()
+    assert "\n## 目录\n" in first, "前置失败: legacy 默认应注入编号目录"
+
+    plan = planner.load_plan(ctx)
+    plan["export_style"] = "current"
+    planner.save_plan(ctx, plan)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    # 第二个 run 的 job 全部 skip 成终态 —— finish 走 kept 重发布路径
+    # (compose 缓存循环正是在这里跑全树)
+    run2 = ctx.db.active_run(pid)
+    for j in ctx.db.jobs_meta(run2["id"]):
+        ctx.db.set_job_state(run2["id"], j["page_id"], "skipped",
+                             notes="r6 cache-key test")
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    with open(f1, encoding="utf-8") as fh:
+        second = fh.read()
+    assert "\n## 目录\n" not in second, \
+        "export_style 切换后缓存键未失效, 旧注入口径文件继续出厂"
+
+
+def test_r6_06_type_sections_preset_gated():
+    """type 用途清单的 schema/sections 走 section_sources 预设键: concise
+    在 LINING 保持警告(合法 run 不死在 finish), deep 升错误。"""
+    from pwiki_lib.gates import gate_item
+    content = ("# 支付\n\n## A\n\n事实 [README.md:1-2](file://README.md#L1-L2)。\n"
+               "## B\n\n事实 [README.md:1](file://README.md#L1)。\n")
+    item = {"kind": "page", "title": "支付", "type": "overview"}
+    errs, warns = gate_item(content, item, ".", "concise", phase="lining")
+    assert not any("schema/sections" in e for e in errs), errs
+    assert any("schema/sections" in w for w in warns), warns
+    errs, warns = gate_item(content, item, ".", "deep", phase="lining")
+    assert any("schema/sections" in e for e in errs), errs
+
+
+def test_r6_07_as_int_float_edges():
+    """nan/inf/1e999 回落 default 而不是裸 ValueError/OverflowError。"""
+    from pwiki_lib.util import as_int
+    assert as_int(float("nan"), 7) == 7
+    assert as_int(float("inf"), 7) == 7
+    assert as_int(float("-inf"), 7) == 7
+    assert as_int(1e999, 7) == 7
+    assert as_int(3.9, 7) == 3
+    assert as_int("12", 7) == 12
+    assert as_int(None, 7) == 7
+
+
+def test_r6_09_partition_read_path_no_write(tmp_path):
+    """另一个连接持有写事务期间, partition() 的只读解析不再阻塞 ——
+    只读命令(pages/read/status/search)不再因顺手 UPDATE 写锁裸崩。"""
+    from pwiki_lib.db import WikiDB
+    root = str(tmp_path / "wiki")
+    db1 = WikiDB(root)
+    db1.partition("main", "zh")
+    db2 = WikiDB(root)
+    db2.conn.execute("PRAGMA busy_timeout=300")   # 旧代码在此耗尽后裸崩
+    db1.begin()   # BEGIN IMMEDIATE: 模拟 finish 的长发布事务
+    try:
+        row = db2.partition("main", "zh")
+        assert row is not None and row["branch"] == "main"
+    finally:
+        db1.rollback()
+
+
+def test_r6_10_adoptable_token_rejects_pending_attempts():
+    """attempts>1 省略 --claim 恒拒 —— 不再收窄到 state=='processing',
+    租约过期回 pending 的陈旧稿不再赢得发布位。"""
+    from pwiki_lib.engine import _adoptable_token
+
+    def row(state, attempts):
+        return {"state": state, "attempts": attempts, "claim_token": "t"}
+
+    _, violated = _adoptable_token(row("pending", 2), None)
+    assert violated, "过期回 pending 的重认领行接受了无令牌提交"
+    _, violated = _adoptable_token(row("processing", 1), None)
+    assert not violated, "首认领的省略采纳(单写便利)被误伤"
+    _, violated = _adoptable_token(row("processing", 3), None)
+    assert violated
+
+
+def test_r6_11_parse_pyproject_inline_close_bracket(tmp_path):
+    """末项带闭合括号(`"bar"]`)的依赖数组: 项被收且数组收口, 后续
+    [tool.poetry.dependencies] 节不再被吞。"""
+    from pwiki_lib.scan import parse_pyproject
+    p = tmp_path / "pyproject.toml"
+    p.write_text("[project]\n"
+                 "name = \"demo\"\n"
+                 "dependencies = [\n"
+                 "  \"foo\",\n"
+                 "  \"bar\"]\n"
+                 "[tool.poetry.dependencies]\n"
+                 "python = \"^3.11\"\n", encoding="utf-8")
+    out = parse_pyproject(str(p))
+    assert out["dependencies"] == ["foo", "bar", "python"], \
+        out["dependencies"]
+
+
+def test_r6_12_render_module_tree_root_scope_all():
+    """parent_modules=['/'] = 全仓(layers 侧同判): 渲染完整模块树而不是
+    只剩根一行。"""
+    from pwiki_lib.planner import render_module_tree
+    plan = {"modules": [
+        {"id": "root", "path": "/", "title": "根", "parent": ""},
+        {"id": "apps", "path": "apps", "title": "应用", "parent": "root"},
+        {"id": "scripts", "path": "scripts", "title": "脚本", "parent": "root"},
+    ]}
+    tree = render_module_tree(plan, ["/"])
+    assert "`apps`" in tree and "`scripts`" in tree, tree
+    # 限定域仍然只渲染该域(+祖先链)
+    tree2 = render_module_tree(plan, ["apps"])
+    assert "`apps`" in tree2 and "`scripts`" not in tree2
+
+
+def test_r6_13_coverage_check_without_typed_pages(tmp_path):
+    """无任何页带 type(合法可选)时, 模块覆盖硬规照样执行。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    # apps/services 域有真实文件; 构造一个只覆盖 root 的单页计划
+    plan["pages"] = [{"id": "only", "title": "唯一页", "kind": "page",
+                      "modules": ["/"], "ordinal": 1}]
+    plan["cards"] = []
+    errors, _w = planner.validate_plan(ctx, plan, strict=True)
+    assert any("未被任何文章的 modules 覆盖" in e for e in errors), errors
+
+
+def test_r6_14_qoderplan_emit_keeps_parent_on_same_title(tmp_path):
+    """父子同名(合法树)时子档仍带 parent 键 —— 不再被 IDE 按'重复 title
+    丢后者'契约整篇静默蒸发。"""
+    from pwiki_lib import planner, qoderplan
+    from pwiki_lib.yamlite import yaml_load
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["pages"] = [
+        {"id": "pay", "title": "支付", "kind": "page", "ordinal": 1,
+         "modules": ["/"]},
+        {"id": "pay-refund", "title": "支付", "kind": "page",
+         "parent": "pay", "ordinal": 2, "modules": ["/"]},
+    ]
+    plan["cards"] = []
+    planner.save_plan(ctx, plan)
+    out = os.path.join(root, "work", "qoder-plan.yaml")
+    assert qoderplan._emit(ctx, out) == config.EXIT_OK
+    with open(out, encoding="utf-8") as fh:
+        docs = yaml_load(fh.read())["repowiki"]["documents"]
+    assert len(docs) == 2, docs
+    child = next(d for d in docs if d["goal"] != docs[0]["goal"]) \
+        if False else docs[1]
+    assert child.get("parent") == "支付", docs

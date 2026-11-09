@@ -131,11 +131,16 @@ def as_int(v, default: int = 0) -> int:
         return default
     if isinstance(v, int):
         return v
-    if isinstance(v, float):
-        return int(v)
     try:
+        if isinstance(v, float):
+            # nan/inf/1e999(yamlite 会解成 float)在 int() 处抛
+            # ValueError/OverflowError —— 挪进同一容错: 容错整数不挑
+            # 最坏输入崩(曾炸穿 qoder-plan/plan --review/merge_manual
+            # 三条链, 最重一条把 `ordinal: nan` 写回盘后 render 崩,
+            # 计划文件已损坏)
+            return int(v)
         return int(str(v).strip())
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

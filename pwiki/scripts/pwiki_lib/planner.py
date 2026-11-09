@@ -540,26 +540,27 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
                                 "(1-2 句 + 'Out of scope: ...')")
     # 覆盖硬规: 每个注册模块出现在至少一篇的 modules 里(跨层并集)。
     # 骨架/占位模块豁免(有 sheet 但不强制成文)。
-    if typed:
-        module_keys = {}
-        for m in modules:
-            mid = str(m.get("id", ""))
-            keys = {mid, str(m.get("path") or ""), str(m.get("dir") or ""),
-                    str(m.get("title") or "")}
-            module_keys[mid] = {k.rstrip("/") for k in keys if k}
-        covered = set()
-        for p in tree:
-            for mod in (p.get("modules") or []):
-                covered.add(str(mod).rstrip("/"))
-        for m in modules:
-            mid = str(m.get("id", ""))
-            if mid == "root":
-                continue
-            if m.get("skeleton") or str(m.get("module_type")) == "skeleton":
-                continue
-            keys = module_keys.get(mid) or {mid}
-            if not (keys & covered):
-                shape.append(f"module '{mid}' 未被任何文章的 modules 覆盖(覆盖硬规)")
+    # 不依赖任何页带 type(合法可选): 曾整个嵌在 `if typed:` 下 —— 无
+    # type 的计划跳过检查, 整个模块可以无文档发布且零诊断
+    module_keys = {}
+    for m in modules:
+        mid = str(m.get("id", ""))
+        keys = {mid, str(m.get("path") or ""), str(m.get("dir") or ""),
+                str(m.get("title") or "")}
+        module_keys[mid] = {k.rstrip("/") for k in keys if k}
+    covered = set()
+    for p in tree:
+        for mod in (p.get("modules") or []):
+            covered.add(str(mod).rstrip("/"))
+    for m in modules:
+        mid = str(m.get("id", ""))
+        if mid == "root":
+            continue
+        if m.get("skeleton") or str(m.get("module_type")) == "skeleton":
+            continue
+        keys = module_keys.get(mid) or {mid}
+        if not (keys & covered):
+            shape.append(f"module '{mid}' 未被任何文章的 modules 覆盖(覆盖硬规)")
     # 反模式: 兄弟同名 + 分层泄漏标题。同名兄弟是**错误** —— 路径由标题派生,
     # 同名即同路径, 发布会静默互相覆盖(曾只是警告, 照样 begin)。
     # 比对用 safe_filename 归一后的文件名: raw 不同('配置?' vs '配置*')但
@@ -1081,10 +1082,15 @@ def render_module_tree(plan: dict, parent_modules=None) -> str:
             for m in modules}
     kids = {m.get("id"): len(by_parent.get(m.get("id"), [])) for m in modules}
     if parent_modules is not None:
-        wanted = {str(x).rstrip("/") for x in parent_modules}
+        # '/' 归一保留(layers 的 overview 模板原样输出 '/'): rstrip 成 ''
+        # 曾把想要集缩成"仅根模块" —— 而 layers.apply_layer_result 把 '/'
+        # 当全仓放行, 同一值两个消费者判定相反, 分层会话死在提交门禁
+        wanted = {str(x).rstrip("/") or "/" for x in parent_modules}
         by_id = {m.get("id"): m for m in modules}
 
         def keep(m):
+            if "/" in wanted:
+                return True   # '/' = 全仓(与 layers 侧同判)
             p = str(m.get("path") or m["id"]).rstrip("/")
             return p in wanted or any(p.startswith(w + "/") for w in wanted)
 

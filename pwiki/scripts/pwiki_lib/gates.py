@@ -344,7 +344,11 @@ def gate_item(content: str, item, repo: str, style: str,
                        rowget(item, "type") or "")
         need = config.ARTICLE_TYPE_SECTIONS.get(job_type)
         if need and len(h2) < need:
-            (errors if strict else warnings).append(
+            # 预设键门控(与上方 required_sections 分支同款): concise 在
+            # LINING 也保持警告(validation.md 契约)—— 曾写死 strict 升错,
+            # 合法 concise run(type 页节数不足)整批死在 finish
+            (errors if (strict and p.get("section_sources") == "error")
+             else warnings).append(
                 f"schema/sections: 类型 {job_type!r} 需 ≥{need} 节, 实得 {len(h2)}")
 
     # --- mermaid(形状类: submit 全警告; LINING 按 size_hard 升错误) ---
