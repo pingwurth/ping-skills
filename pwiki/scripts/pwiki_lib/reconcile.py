@@ -127,6 +127,24 @@ def _move_published_file(ctx: Ctx, plan: dict, pub, content: str,
         moved.append(old_path)
 
 
+def _rename_h1(content: str, title: str) -> str:
+    """把真 H1(栅栏外第一个 '# ' 行)改成新标题。
+
+    P13: 栅栏感知, 与 gate_item 的 H1 口径同源(校验在剥栅栏文本上找 H1)
+    —— 曾对原始内容 re.sub(count=1): 页首代码栅栏里的 '#' 注释被当 H1
+    改写, 真 H1 原样留着, 行标题与内容 H1 从此永久不一致且无 stale 原因
+    修复它。找不到栅栏外 H1 时原样返回(不改)。"""
+    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    for i, seg in enumerate(parts):
+        if seg.startswith("```"):
+            continue
+        m = re.search(r"^# .*$", seg, re.M)
+        if m:
+            parts[i] = seg[:m.start()] + f"# {title}" + seg[m.end():]
+            return "".join(parts)
+    return content
+
+
 def _apply_title_rename(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
     """返回 (status, msg): status ∈ applied | rejected。"""
     from .planner import (assign_paths, load_plan, plan_pages, save_plan)
@@ -181,9 +199,9 @@ def _apply_title_rename(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
         try:
             if pub is not None:
                 # 发布层: 改 H1 + 更新 DB(content 引用不动) + 移文件。
-                # 替换串用 lambda —— 用户标题里的反斜杠曾是 regex 替换转义
-                content = re.sub(r"^# .*$", lambda _: f"# {proposed}",
-                                 pub["content"], count=1, flags=re.M)
+                # H1 改写栅栏感知(_rename_h1, P13); 标题插值走 lambda/拼接
+                # —— 用户标题里的反斜杠曾是 regex 替换转义
+                content = _rename_h1(pub["content"], proposed)
                 ctx.db.conn.execute(
                     "UPDATE page SET title=?, path=? "
                     "WHERE partition_id=? AND page_id=?",

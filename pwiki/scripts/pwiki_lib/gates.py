@@ -109,7 +109,11 @@ def _validate_cited(cites: list, repo: str) -> tuple:
 
 
 def parse_cite_block(content: str) -> set:
-    m = re.search(r"<cite>(.*?)</cite>", content, re.S)
+    """正文 <cite> 块的文件集合(deep 的 lining 校验输入)。
+
+    P19: 在剥栅栏的文本上找块 —— 围栏示例里的 <cite> 不是 writer 的真块,
+    曾被抓来与正文引用集合比对, deep 页在 LINING 被硬拒且无机械修复。"""
+    m = re.search(r"<cite>(.*?)</cite>", strip_code_fences(content), re.S)
     if not m:
         return set()
     return {c["path"] for c in extract_citations(m.group(1))}
@@ -378,8 +382,12 @@ def gate_item(content: str, item, repo: str, style: str,
         errors.append("citation/none: 页面至少 1 条 file:// 引用")
 
     flo, fhi = p["cited_files"]
-    if flo and n_files < flo and strict and p["size_hard"]:
-        errors.append(f"size/cited-files: 引用 {n_files} 个文件 (目标 ≥{flo})")
+    if flo and n_files < flo:
+        # P20: 下界双向反馈 —— 曾只在 strict 分支报, 低于下限的页提交时
+        # 零提示、LINING 才硬拒, 白白烧掉一整轮重写(其余尺寸维度提交时
+        # 都双向告警, 这是唯一不对称的维度)
+        (errors if (strict and p["size_hard"]) else warnings).append(
+            f"size/cited-files: 引用 {n_files} 个文件 (目标 ≥{flo})")
     elif fhi and n_files > fhi:
         # 上界与 page/words/citations 同走 strict+size_hard 升级 —— 曾恒为
         # 警告, validation.md 却把 size/cited-files 列为 deep 的风格错误,
@@ -593,6 +601,11 @@ def fix_off_by_one(content: str, repo: str) -> tuple:
         n = _load_lines(unquote(path).strip())   # %20/裸空格同归真实路径
         if n is None:
             return m.group(0)
+        if n < 1:
+            # P14: 空(0 行)文件无行可钳 —— 曾钳成 '#L0-L0' 非法范围, 发布层
+            # 自己发出的不可自动修复硬错误(分类器只看 b==n+1, 0+1==1 恰好
+            # 命中)。放行原文, 让 citation/range 硬错误如实上报
+            return m.group(0)
         if not b:
             # 单行差一: 起始行==行数+1 → 钳到末行(曾"报告可修却永不修")
             a_i = int(a)
@@ -621,10 +634,18 @@ def strip_injected_layers(content: str) -> str:
     """剥掉导出层注入物(<cite> 块 + 目录节, 双语)。
 
     validate --content 复检 concise 发布树时先还原 writer 原稿口径;
-    file_to_db 吸收手改文件时同样走这里(注入物永不落库)。"""
-    content = re.sub(r"(?s)<cite>.*?</cite>\n*", "", content)
-    content = i18n.TOC_SECTION_RE.sub("", content)
-    return content
+    file_to_db 吸收手改文件时同样走这里(注入物永不落库)。
+
+    P6: 栅栏感知 —— 围栏里的示例 <cite>/“## 目录”不是注入物, 曾被无
+    差别剥掉: file_to_db/validate --fix 把带围栏示例的页面永久写坏,
+    TOC 正则还从栅栏内标题一路吞到收尾反引号(产出未闭合代码块)。
+    注入侧(rebuild_cite_block/目录注入)本就栅栏感知, 两侧自此同口径。"""
+    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    return "".join(
+        i18n.TOC_SECTION_RE.sub(
+            "", re.sub(r"(?s)<cite>.*?</cite>\n*", "", p))
+        if not p.startswith("```") else p
+        for p in parts)
 
 
 # --------------------------------------------------------------------------- #

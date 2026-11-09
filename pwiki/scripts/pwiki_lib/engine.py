@@ -596,6 +596,10 @@ def cmd_submit(args) -> int:
     if problems and not args.force:
         for p in problems:
             print(f"  rejected: {p}", file=sys.stderr)
+        # P4: 门禁拒绝也保稿 —— 这是 cmd_submit 唯一曾不落 orphan 的退出
+        # 路径, stdin 稿(--file -)被消费后整篇蒸发, 连 work/orphan-submits/
+        # 都进不去(头注释承诺 stdin 草稿绝不丢); 其余九个拒绝分支都保
+        saved = _orphan_save(ctx, args.page_id, content)
         if state_now == "processing":
             # 回 pending 即释放认领(set_job_state 已清 token/租约)—— 无需
             # 也无法续租; 曾在此调 extend_lease, 恒为 0 行 no-op
@@ -603,9 +607,9 @@ def cmd_submit(args) -> int:
                                  error="; ".join(problems[:3]),
                                  claim_token=token)
         ctx.db.log(run["id"], "submit_rejected",
-                   f"{args.page_id}: {problems[:3]}")
+                   f"{args.page_id}: {problems[:3]} (被拒稿件存 {saved})")
         die(f"submit 被拒({args.page_id}) — 修稿重交(--force 强过, "
-            "--lenient 放宽)", config.EXIT_GATE)
+            f"--lenient 放宽); 被拒稿件已保存 {saved}", config.EXIT_GATE)
 
     # summary/key_topics 先算好, 随终写进同一守卫事务(P9): 曾在终写之后的
     # 一句裸自动提交 —— 竞争 finish 在两步之间置 LINING 并快照 jobs(),
@@ -639,7 +643,11 @@ def cmd_submit(args) -> int:
         die(f"run 正在 finish(LINING/发布)或已终态 — 提交与快照竞态, "
             f"稿件已保存 {saved}; 等 finish 出结果后重交", config.EXIT_PRECOND)
     if verdict == "token_lost":
+        # P28: 补 run_log 审计行 —— 曾只存文件不记账, 该孤儿从记录在案的
+        # run_log 协调通道消失(其余九个孤儿分支都写 orphan_submit)
         saved = _orphan_save(ctx, args.page_id, content)
+        ctx.db.log(run["id"], "orphan_submit",
+                   f"{args.page_id}: 终写时租约被回收, 稿件存 {saved}")
         die(f"提交时租约刚好被回收 — 稿件已保存 {saved}", config.EXIT_PRECOND)
 
     # key_topics 进活术语表(摘要/话题本体已随终写同事务落行, 见上)

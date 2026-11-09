@@ -537,3 +537,149 @@ def test_p65_write_save_and_restyle_atomic(tmp_path, monkeypatch):
         config.EXIT_OK
     row = ctx.db.published_page(pid, target["page_id"])
     assert row["style"] == "deep" and "追加一段" in row["content"]
+
+
+# =========================================================================== #
+# 批次③: 围栏感知/门禁反馈/稿件不丢(P4/P6/P13/P14/P19/P20/P28)
+# =========================================================================== #
+
+def test_p04_gate_rejected_stdin_saved(tmp_path, monkeypatch):
+    """门禁拒绝的 stdin 稿也保稿(cmd_submit 唯一曾不落 orphan 的路径)。"""
+    import io
+    from pwiki_lib import engine
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    job = ctx.db.claim_jobs(run["id"], count=9)[0]
+    bad = f"# {job['title']}\n\n- [nope.py:1](file://nope.py#L1-L1)\n"
+    monkeypatch.setattr("sys.stdin", io.StringIO(bad))
+    with pytest.raises(SystemExit) as ei:
+        engine.cmd_submit(_ns(repo, root, page_id=job["page_id"], file="-",
+                              summary="", key_topics="", report=None,
+                              lenient=False, force=False,
+                              claim=job["claim_token"]))
+    assert ei.value.code == config.EXIT_GATE
+    orphan_dir = os.path.join(root, "work", "orphan-submits")
+    saved = [f for f in os.listdir(orphan_dir)
+             if f.startswith(job["page_id"])] if os.path.isdir(orphan_dir) else []
+    assert saved, "被拒的 stdin 稿件蒸发(未落 orphan)"
+    rows = ctx.db.conn.execute(
+        "SELECT detail FROM run_log WHERE run_id=? AND event='submit_rejected'",
+        (run["id"],)).fetchall()
+    assert rows and "orphan-submits" in rows[-1]["detail"]
+
+
+def test_p06_strip_injected_layers_fence_aware(tmp_path):
+    """file_to_db/validate 剥注入物不碰围栏示例 —— 带示例页不再被写坏。"""
+    from pwiki_lib.gates import strip_injected_layers
+    fenced = ("```markdown\n<cite>\n- [src/f.py](file://src/f.py)\n</cite>\n"
+              "## 目录\n1. [x](#x)\n```\n")
+    real = "<cite>\n**本文引用**\n- [README.md](file://README.md)\n</cite>\n"
+    toc = "## 目录\n1. [概述](#概述)\n"
+    content = f"# 页\n\n{real}\n{toc}\n正文。\n\n{fenced}"
+    out = strip_injected_layers(content)
+    assert "<cite>" not in out.split("```markdown")[0], "真注入块未剥净"
+    assert "## 目录\n1. [概述]" not in out, "真目录节未剥净"
+    assert "- [src/f.py](file://src/f.py)" in out, "围栏示例 cite 被误剥"
+    assert "## 目录\n1. [x](#x)" in out, "围栏示例目录被误剥"
+    assert out.count("```") == 2, "围栏被劈开(未闭合代码块)"
+
+
+def test_p13_rename_h1_fence_aware(tmp_path):
+    """D22 改名改真 H1, 不再误改页首代码栅栏里的 '#' 注释。"""
+    from pwiki_lib.reconcile import cmd_reconcile
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    target = next(p for p in ctx.db.published_pages(pid)
+                  if p["kind"] == "page")
+    fenced_first = ("```bash\n# 注释\nmake install\n```\n\n"
+                    f"# {target['title']}\n\n正文。\n\n"
+                    "- [README.md:1](file://README.md#L1-L1)\n")
+    ctx.db.save_page_content(pid, target["page_id"], fenced_first)
+    ctx.db.reconcile_add(pid, "title_mismatch",
+                         {"page_id": target["page_id"],
+                          "proposed": str(target["title"]) + "改名"})
+    assert cmd_reconcile(_ns(repo, root, all=True)) == config.EXIT_OK
+    row = ctx.db.published_page(pid, target["page_id"])
+    assert "# 注释\nmake install" in row["content"], "栅栏内注释被误改"
+    assert f"# {target['title']}改名" in row["content"], "真 H1 未改"
+
+
+def test_p14_off_by_one_skips_empty_file(tmp_path):
+    """空(0 行)文件的引用钳位放行原文 —— 不再造 '#L0-L0' 非法范围。"""
+    from pwiki_lib.gates import fix_off_by_one
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    empty = os.path.join(ctx.repo, "src", "empty.py")
+    os.makedirs(os.path.dirname(empty), exist_ok=True)
+    with open(empty, "w", encoding="utf-8") as fh:
+        fh.write("")
+    raw = "[src/empty.py:1-1](file://src/empty.py#L1-L1)"
+    out, n = fix_off_by_one(f"# 页\n\n{raw}\n", ctx.repo)
+    assert n == 0 and raw in out, "空文件被钳成非法 #L0-L0"
+
+
+def test_p19_parse_cite_block_ignores_fenced_example(tmp_path):
+    """deep 的 cite 块集合取真块 —— 围栏示例块不再被拿来比对。"""
+    from pwiki_lib import gates
+    ctx = _ctx(*_fixture(tmp_path)[:2])
+    fenced = ("```markdown\n<cite>\n- [a.py](file://a.py)\n</cite>\n```\n\n")
+    real = "<cite>\n- [README.md](file://README.md)\n</cite>\n"
+    content = (f"# 页\n\n{fenced}{real}"
+               "- [README.md:1](file://README.md#L1-L1)\n")
+    assert gates.parse_cite_block(content) == {"README.md"}
+    errs, _ = gates.gate_item(content, {"kind": "page", "title": "页"},
+                              ctx.repo, "deep", phase="lining")
+    assert not any(e.startswith("schema/cite") for e in errs), errs
+
+
+def test_p20_cited_files_lower_bound_warns_at_submit(tmp_path):
+    """引用文件数低于下限: 提交时即告警(不再憋到 LINING 才硬拒)。"""
+    from pwiki_lib import gates
+    ctx = _ctx(*_fixture(tmp_path)[:2])
+    paths = ["README.md", "Makefile", "services/user/m0.py",
+             "services/user/m1.py", "services/user/m2.py"]
+    lines = []
+    for i in range(65):
+        p = paths[i % len(paths)]
+        lines.append(f"- [r{i}](file://{p}#L1-L1)")
+    content = "# 页\n\n## 架构\n\n" + "\n".join(lines) + "\n"
+    errs, warns = gates.gate_item(content, {"kind": "page", "title": "页"},
+                                  ctx.repo, "deep", phase="submit")
+    assert not any(e.startswith("citation/") for e in errs), errs
+    assert any("size/cited-files" in w and "≥6" in w for w in warns), warns
+
+
+def test_p28_token_lost_orphan_audited(tmp_path, monkeypatch):
+    """终写时令牌被回收的孤儿稿: 孤儿落盘 + run_log 补审计行。"""
+    from pwiki_lib import engine
+    from pwiki_lib.db import WikiDB
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    job = ctx.db.claim_jobs(run["id"], count=9)[0]
+    # 让前置令牌检查放行, 终写事务里的真检查如实翻车 → verdict=token_lost
+    monkeypatch.setattr(WikiDB, "match_claim",
+                        lambda self, *a, **k: True)
+    with pytest.raises(SystemExit) as ei:
+        engine.cmd_submit(_ns(repo, root, page_id=job["page_id"],
+                              file=_write_job_file(root, job),
+                              summary="", key_topics="", report=None,
+                              lenient=False, force=False, claim="stale-tok"))
+    assert ei.value.code == config.EXIT_PRECOND
+    rows = ctx.db.conn.execute(
+        "SELECT detail FROM run_log WHERE run_id=? AND event='orphan_submit'",
+        (run["id"],)).fetchall()
+    assert rows and "租约被回收" in rows[-1]["detail"], \
+        "token_lost 孤儿从 run_log 审计通道消失"
+    assert ctx.db.job(run["id"], job["page_id"])["state"] != "completed"
