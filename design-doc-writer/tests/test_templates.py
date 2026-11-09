@@ -31,7 +31,11 @@ def test_dimensions_enumeration_stable():
 
 
 def test_placeholder_words_absent_in_templates():
-    """模板自身不含占位符禁词（避免 LLM 照抄进文档触发门禁）。"""
+    """模板自身不含占位符禁词（避免 LLM 照抄进文档触发门禁）。
+
+    例外 `……`：模板骨架刻意用省略号标记「落笔时必须替换」的位置——
+    门禁同样禁 `……`（doc-templates.md 的承诺由此兑现），照抄会被 FAIL。
+    """
     text = TEMPLATES.read_text(encoding="utf-8")
-    hits = [p for p in ddmod.PLACEHOLDERS if p in text]
+    hits = [p for p in ddmod.PLACEHOLDERS if p != "……" and p in text]
     assert not hits, f"模板含占位符禁词，会被照抄：{hits}"

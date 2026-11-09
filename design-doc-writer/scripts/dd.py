@@ -93,9 +93,24 @@ MERMAID_ALIAS = {"graph": "flowchart"}  # 归一化报告用
 MAX_NODES = 15   # 单图复杂度 WARN 阈值（与 references/mermaid-uml.md 一致）
 MAX_EDGES = 25
 
-PLACEHOLDERS = ["TODO", "TBD", "FIXME", "待补充", "待定", "<占位", "<动态"]
-UNRESOLVED_RE = re.compile(r"\[未决:Q\d+\]")
-DEFERRED_RE = re.compile(r"\[延期:(Q\d+)\]")
+# 占位符禁词与配套匹配模式（按下标对齐）：词边界防误伤——
+# “等待定时”“/TODOS” 等正常文本不命中（待定/TODO/TBD/FIXME 带边界；待补充/
+# <占位 等词组本身就是占位短语，无需边界）；`……` 为模板省略号（doc-templates.md
+# 承诺落笔时必须替换，两侧贴汉字的行文省略号不算）
+PLACEHOLDERS = ["TODO", "TBD", "FIXME", "待补充", "待定", "<占位", "<动态", "……"]
+PLACEHOLDER_RES = [
+    re.compile(r"(?<![A-Za-z0-9_])TODO(?![A-Za-z0-9_])"),
+    re.compile(r"(?<![A-Za-z0-9_])TBD(?![A-Za-z0-9_])"),
+    re.compile(r"(?<![A-Za-z0-9_])FIXME(?![A-Za-z0-9_])"),
+    re.compile(r"待补充"),
+    re.compile(r"(?<![一-龥])待定(?![一-龥])"),
+    re.compile(r"<占位"),
+    re.compile(r"<动态"),
+    re.compile(r"(?<![一-龥])……(?![一-龥])"),
+]
+# 全角/半角冒号等价接受（中文输入法自然形态，与 STATUS_LINE_RE 口径一致）
+UNRESOLVED_RE = re.compile(r"\[未决[:：]Q\d+\]")
+DEFERRED_RE = re.compile(r"\[延期[:：](Q\d+)\]")
 ADR_REF_RE = re.compile(r"ADR-(\d{4})")
 STATUS_LINE_RE = re.compile(r"^状态[:：]\s*(Draft|Confirmed)\s*$", re.M)
 ADR_FILE_RE = re.compile(r"^(\d{4})-.*\.md$")
@@ -269,6 +284,23 @@ def save_ledger(repo: Path, ledger: dict) -> None:
         raise
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """交付文档的原子写：临时文件 + fsync + os.replace；失败清理临时文件。"""
+    tmp = path.parent / f"{path.name}.tmp-{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def add_history(ledger: dict, event: str, detail: str = "") -> None:
     ledger.setdefault("history", []).append({"at": now_iso(), "event": event, "detail": detail})
 
@@ -291,6 +323,11 @@ def adrs_dir_path(repo: Path, ledger: dict) -> Path:
 
 
 def next_adr_number(repo: Path, ledger: dict) -> int:
+    """下一个 ADR 编号 = max(文件系统已有编号, 台账已分配编号) + 1。
+
+    台账侧占坑：文件由 LLM 落笔（建议性 next_step），写盘前编号只存在于
+    ledger 中——不看台账会导致连续两次 --adr 都分到同一号（撞号）。
+    """
     n = 0
     d = adrs_dir_path(repo, ledger)
     if d.is_dir():
@@ -298,6 +335,11 @@ def next_adr_number(repo: Path, ledger: dict) -> int:
             m = ADR_FILE_RE.match(p.name)
             if m:
                 n = max(n, int(m.group(1)))
+    for q in ledger["questions"]:
+        adr = q.get("adr") or {}
+        m = ADR_FILE_RE.match(Path(adr.get("path", "")).name)
+        if m:
+            n = max(n, int(m.group(1)))
     return n + 1
 
 
@@ -344,18 +386,63 @@ class Item:
         self.level, self.code, self.msg, self.hint = level, code, msg, hint
 
 
+def _fence_states(lines: list[str]) -> list[bool]:
+    """逐行判定是否处于 ``` 围栏内（CommonMark 近似：闭合围栏须 ≥ 开启长度且无 info 串）。
+
+    开/闭围栏行本身也记 True——标题、状态行等结构判定对它们一律不适用。
+    引用模板骨架（```markdown / ````markdown 围栏）中的内容不参与任何门禁判定。
+    """
+    states: list[bool] = []
+    marker_len = 0  # 0 = 不在围栏内；否则为开启围栏的反引号数
+    for line in lines:
+        s = line.strip()
+        m = re.match(r"^(`{3,})(.*)$", s)
+        if marker_len == 0:
+            if m:
+                states.append(True)
+                marker_len = len(m.group(1))
+            else:
+                states.append(False)
+        elif m and len(m.group(1)) >= marker_len and not m.group(2).strip():
+            states.append(True)
+            marker_len = 0
+        else:
+            states.append(True)
+    return states
+
+
+def _find_status_line(lines: list[str], states: list[bool]) -> int | None:
+    """第一个围栏外的状态行下标；无则 None。"""
+    for i, line in enumerate(lines):
+        if not states[i] and STATUS_LINE_RE.match(line):
+            return i
+    return None
+
+
+_FENCE_OPEN_RE = re.compile(r"^(`{3,})\s*(\S*)")
+
+
 def _mermaid_blocks(text: str) -> list[list[str]]:
-    """提取 ```mermaid 围栏块的内容行；悬开块以已读行返回。"""
+    """提取 mermaid 围栏块的内容行；悬开块以已读行返回。
+
+    围栏开启识别 info 串（不区分大小写、容忍 ``` 后空格），闭合须为
+    不短于开启长度的纯反引号行——```Mermaid / ``` mermaid / 四反引号
+    围栏不再被静默跳过。
+    """
     blocks: list[list[str]] = []
     cur: list[str] | None = None
+    marker = ""
     for line in text.splitlines():
         s = line.strip()
-        if s == "```mermaid":
-            cur = []
-        elif cur is not None and s == "```":
+        if cur is None:
+            m = _FENCE_OPEN_RE.match(s)
+            if m and m.group(2).lower() == "mermaid":
+                marker = m.group(1)
+                cur = []
+        elif s.startswith(marker) and re.fullmatch(r"`{3,}", s):
             blocks.append(cur)
             cur = None
-        elif cur is not None:
+        else:
             cur.append(line)
     if cur is not None:
         blocks.append(cur)
@@ -365,7 +452,7 @@ def _mermaid_blocks(text: str) -> list[list[str]]:
 def _mermaid_type(block: list[str]) -> str | None:
     for line in block:
         s = line.strip()
-        if s:
+        if s and not s.startswith("%%"):  # 跳过 %% 注释与 %%{init:...}%% 指令
             return s.split()[0].lower().split("-")[0]  # stateDiagram-v2 → statediagram
     return None
 
@@ -406,8 +493,14 @@ def _complexity(block: list[str], mtype: str) -> tuple[int, int]:
     return len(nodes), edges
 
 
-def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> list[Item]:
-    """对单份文档跑检查项 ①~⑧（⑨⑩ 由 run_checks 汇总层处理）。"""
+def check_doc(repo: Path, ledger: dict, doc_key: str, confirm_mode: bool = False) -> tuple[list[Item], set[str]]:
+    """对单份文档跑检查项 ①~⑧（⑨⑩ 由 run_checks 汇总层处理）。
+
+    - 围栏代码块内的标题/状态行不参与判定（防引用模板骨架欺骗门禁）；
+    - confirm_mode=True 时 ⑦ 只要求存在围栏外状态行——confirm 将强制同步为
+      Confirmed，Draft↔Confirmed 漂移由重跑 confirm 自愈（严格对账归 check）；
+    - 返回 (items, 文中出现的 ADR 引用号集合)（run_checks 全局对账 c 用）。
+    """
     items: list[Item] = []
     doc = ledger["docs"][doc_key]
     path = repo / doc["path"]
@@ -415,17 +508,20 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> l
     if not path.is_file():
         items.append(Item("FAIL", "doc-missing", f"文档不存在：{doc['path']}",
                           "按 references/doc-templates.md 骨架创建文档（H1 下第二行写 状态: Draft）"))
-        return items
+        return items, set()
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         items.append(Item("FAIL", "doc-read", f"文档读取失败：{e}"))
-        return items
+        return items, set()
     lines = text.splitlines()
+    states = _fence_states(lines)
 
-    # ① 章节完整性（H2 精确标题，且非空）
+    # ① 章节完整性（H2 精确标题，且非空；围栏内的标题不算——引用的模板骨架不是正文）
     headings = {}
     for i, line in enumerate(lines):
+        if states[i]:
+            continue
         m = re.match(r"^##\s+(.+?)\s*$", line)
         if m:
             headings[m.group(1)] = i
@@ -438,10 +534,10 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> l
                               "章节标题须与 manifest 完全一致（dd.py MANIFEST_DEFAULTS 为单一事实源）"))
             continue
         j = headings[s["title"]]
-        # 章节边界只认 H1/H2：H3+ 子标题及其内容都算本章节实体
+        # 章节边界只认围栏外的 H1/H2：H3+ 子标题及其内容都算本章节实体
         nxt = len(lines)
         for k in range(j + 1, len(lines)):
-            if re.match(r"^#{1,2}\s", lines[k]):
+            if not states[k] and re.match(r"^#{1,2}\s", lines[k]):
                 nxt = k
                 break
         if not "\n".join(lines[j + 1:nxt]).strip():
@@ -474,7 +570,7 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> l
                               f"第 {bi} 张图（{shown}）粗估 {nodes} 节点/{edges} 边，超上限 {MAX_NODES}/{MAX_EDGES}",
                               "拆分为多张图，每图只回答一个问题"))
 
-    # ⑤ 未决/延期标记
+    # ⑤ 未决/延期标记（全角/半角冒号等价）
     unresolved = UNRESOLVED_RE.findall(text)
     if unresolved:
         items.append(Item("FAIL", "unresolved-marker",
@@ -499,22 +595,24 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> l
                               f"文档延期标记在台账中不存在或非延期：{'、'.join(sorted(dangling))}",
                               "标记必须与台账 deferred 集合一一对应"))
 
-    # ⑥ 占位符
-    ph_hits = [p for p in PLACEHOLDERS if p in text]
+    # ⑥ 占位符（词边界：等待定时 / TODOS 等正常文本不误伤）
+    ph_hits = [w for w, pat in zip(PLACEHOLDERS, PLACEHOLDER_RES) if pat.search(text)]
     if ph_hits:
         items.append(Item("FAIL", "placeholder",
                           f"存在占位符残留：{'、'.join(ph_hits)}",
-                          "所有占位符替换为具体内容后才能确认"))
+                          "所有占位符（含模板省略号 ……）替换为具体内容后才能确认"))
 
-    # ⑦ 状态行与台账一致
-    m = STATUS_LINE_RE.search(text)
+    # ⑦ 状态行与台账一致（只认围栏外状态行）
     expect = "Confirmed" if doc["status"] == "confirmed" else "Draft"
-    if not m:
+    idx = _find_status_line(lines, states)
+    if idx is None:
         items.append(Item("FAIL", "status-line", f"缺少状态行（H1 下应有 `状态: {expect}`）"))
-    elif m.group(1) != expect:
-        items.append(Item("FAIL", "status-line",
-                          f"状态行为 {m.group(1)}，台账为 {doc['status']}（期望 {expect}）",
-                          "状态行只能随 confirm 流转，勿手改漂移"))
+    elif not confirm_mode:
+        m = STATUS_LINE_RE.match(lines[idx])
+        if m.group(1) != expect:
+            items.append(Item("FAIL", "status-line",
+                              f"状态行为 {m.group(1)}，台账为 {doc['status']}（期望 {expect}）",
+                              "状态行只能随 confirm 流转，勿手改漂移；确认意图仍在时重跑 confirm 可自愈同步"))
 
     # ⑧ ADR 对账（b：文档引用→文件存在；a/c 在 run_checks 汇总层做全局对账）
     adir = adrs_dir_path(repo, ledger)
@@ -524,7 +622,8 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> l
             mm = ADR_FILE_RE.match(p.name)
             if mm:
                 adr_files[mm.group(1)] = p
-    for num in sorted(ADR_REF_RE.findall(text)):
+    refs = set(ADR_REF_RE.findall(text))
+    for num in sorted(refs):
         if num not in adr_files:
             items.append(Item("FAIL", "adr-ref",
                               f"文档引用 ADR-{num} 但 {ledger['adrs_dir']}/{num}-*.md 不存在",
@@ -535,29 +634,28 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, refs_union: set[str]) -> l
             for s in ledger["manifest"]["sections"]):
         items.append(Item("WARN", "mermaid-none",
                           "设计文档没有任何 mermaid 图", "复杂逻辑应以图表达（硬约束 5）"))
-    return items
+    return items, refs
 
 
-def run_checks(repo: Path, ledger: dict, which: str) -> tuple[list[Item], bool]:
-    """跑门禁。which: analysis|design|all。返回 (items, has_fail)。"""
+def run_checks(repo: Path, ledger: dict, which: str,
+               confirm_doc: str | None = None) -> tuple[list[Item], bool]:
+    """跑门禁。which: analysis|design|all（design 含 analysis 复检——确认后
+    劣化的分析文档必须挡住 design 确认与 finish）。返回 (items, has_fail)。
+
+    confirm_doc：正在 confirm 的文档键——该文档的 ⑦ 状态行检查放宽为
+    「存在即可」（confirm 会强制同步），其余文档仍严格对账。
+    """
     items: list[Item] = []
-    docs = ["analysis", "design"] if which == "all" else [which]
+    docs = ["analysis", "design"] if which in ("all", "design") else [which]
+    stats = question_stats(ledger)
 
-    # 两份已存在文档的引用并集（ADR 全局对账 c 用）
     refs_union: set[str] = set()
-    for d in ("analysis", "design"):
-        p = repo / ledger["docs"][d]["path"]
-        if p.is_file():
-            try:
-                refs_union |= set(ADR_REF_RE.findall(p.read_text(encoding="utf-8")))
-            except OSError:
-                pass
-
     for dk in docs:
-        items.extend(check_doc(repo, ledger, dk, refs_union))
+        doc_items, refs = check_doc(repo, ledger, dk, confirm_mode=(dk == confirm_doc))
+        items.extend(doc_items)
+        refs_union |= refs
         # ⑨⑩ 前置
-        stats = question_stats(ledger)
-        if dk == "analysis" and stats["open"] > 0:
+        if dk == "analysis" and which in ("analysis", "all") and stats["open"] > 0:
             items.append(Item("FAIL", "open-questions",
                               f"台账还有 {stats['open']} 个 open 问题",
                               "frontier 清零（全部 q-answer 或 --defer）后才能确认分析文档"))
@@ -571,13 +669,24 @@ def run_checks(repo: Path, ledger: dict, which: str) -> tuple[list[Item], bool]:
                                   f"设计确认要求台账零 open 零 deferred（当前 open={stats['open']} deferred={stats['deferred']}）",
                                   "延期问题要么答掉，要么裁剪进范围（更新 IN/OUT）"))
 
-    # ⑧ 全局对账（不依赖 which，对台账里分配过的 ADR 负责）
-    adir = adrs_dir_path(repo, ledger)
+    # 未被检文档的 ADR 引用并入（全局对账 c 的口径是「任何决策表」）
+    for dk in ("analysis", "design"):
+        if dk in docs:
+            continue
+        p = repo / ledger["docs"][dk]["path"]
+        if p.is_file():
+            try:
+                refs_union |= set(ADR_REF_RE.findall(p.read_text(encoding="utf-8")))
+            except (OSError, UnicodeDecodeError):
+                pass
+
+    # ⑧ 全局对账（不依赖 which，对台账里分配过的 ADR 负责；编号从文件名锚定解析，
+    # 目录名里的年份片段（如 docs/2024-adr/0001-x.md）不得冒充编号）
     for q in ledger["questions"]:
         adr = q.get("adr") or {}
         if adr.get("needed") and q["status"] == "answered":
             p = repo / adr.get("path", "")
-            num_m = re.search(r"(\d{4})-", adr.get("path", ""))
+            num_m = ADR_FILE_RE.match(Path(adr.get("path", "")).name)
             if not p.is_file():
                 items.append(Item("FAIL", "adr-file",
                                   f"{q['id']} 分配了 ADR 但文件不存在：{adr.get('path')}",
@@ -844,6 +953,8 @@ def cmd_q_answer(args, repo: Path) -> tuple[int, str]:
         raise DDError("--defer 须同时给 --reason")
     if args.adr and not args.answer:
         raise DDError("--adr 只能搭配 --answer（先有决策才有 ADR）")
+    if args.adr and args.no_adr:
+        raise DDError("--adr 与 --no-adr 互斥")
 
     q = q_by_id(ledger).get(args.id)
     if q is None:
@@ -851,17 +962,27 @@ def cmd_q_answer(args, repo: Path) -> tuple[int, str]:
 
     if args.defer:
         re_defer = q["status"] == "deferred"
+        adr_cleared = bool((q.get("adr") or {}).get("needed"))
         q["status"] = "deferred"
         q["answer"] = None
         q["answered_at"] = None
-        add_history(ledger, "q-answer", f"{args.id} 延期{'（重新延期）' if re_defer else ''}：{args.reason}")
+        if adr_cleared:
+            q["adr"] = None  # 决策撤回待定：ADR 分配随之清除，重答时可重新分配
+        add_history(ledger, "q-answer",
+                    f"{args.id} 延期{'（重新延期）' if re_defer else ''}：{args.reason}"
+                    + ("；清除过期 ADR 分配" if adr_cleared else ""))
         save_ledger(repo, ledger)
-        print(f"== q-answer ==  {args.id} → deferred（{args.reason}）")
+        print(f"== q-answer ==  {args.id} → deferred（{args.reason}）"
+              + ("；已清除 ADR 分配" if adr_cleared else ""))
         return EXIT_OK, "继续 dd.py frontier；延期问题会阻塞其下游，分析文档需 [延期:Qxxx] 标注"
 
     re_answer = q["status"] == "answered"
     adr_note = ""
-    if args.adr:
+    if args.no_adr:
+        if q.get("adr"):
+            q["adr"] = None  # 决策不再需要 ADR：清除分配，防过期路径造成永久 adr-file FAIL
+            adr_note = "  已清除 ADR 分配"
+    elif args.adr:
         if not re.fullmatch(r"[a-z0-9\-]+", args.adr_slug or ""):
             raise DDError("--adr-slug 须为小写 ascii（[a-z0-9-]）",
                           next_="例如 async-export-job")
@@ -877,7 +998,7 @@ def cmd_q_answer(args, repo: Path) -> tuple[int, str]:
                 + (f"  adr={q['adr']['path']}" if q.get("adr") else ""))
     save_ledger(repo, ledger)
     print(f"== q-answer ==  {args.id} → answered（{'重答，' if re_answer else ''}{args.answer}）{adr_note}")
-    if adr_note:
+    if args.adr:
         return EXIT_OK, (f"立即按 references/doc-templates.md 的 ADR 模板写 {q['adr']['path']}（一段即可），"
                          "再继续 dd.py frontier")
     return EXIT_OK, "继续处理 frontier：dd.py frontier"
@@ -933,8 +1054,11 @@ def cmd_phase(args, repo: Path) -> tuple[int, str]:
 
 def cmd_manifest(args, repo: Path) -> tuple[int, str]:
     ledger = load_ledger(repo)
+    if ledger["phase"] == "done":
+        raise DDError("phase=done 已终态，manifest 不可再改", next_="流程已完成；如需修订请开启新特性")
     if not args.enable and not args.disable:
         raise DDError("须提供 --enable <ids> 和/或 --disable <ids>", next_="例如 --enable cache,release")
+    confirmed_docs = {dk for dk in ("analysis", "design") if ledger["docs"][dk]["status"] == "confirmed"}
     changed = []
     for flag, ids_str, want in (("enable", args.enable, True), ("disable", args.disable, False)):
         if not ids_str:
@@ -944,6 +1068,12 @@ def cmd_manifest(args, repo: Path) -> tuple[int, str]:
                 raise DDError(f"未知章节 id：{sid!r}（合法集合见 dd.py MANIFEST_DEFAULTS / SKILL.md 命令速查）")
             for s in ledger["manifest"]["sections"]:
                 if s["id"] == sid:
+                    if s["doc"] in confirmed_docs:
+                        # 已确认文档的章节清单锁定：启用/停用都会使确认时的门禁
+                        # 与文档现状脱节（停用削弱依据，启用引入未写章节）
+                        raise DDError(
+                            f"章节 {sid} 属于已 confirmed 的 {s['doc']} 文档，清单已锁定",
+                            next_="如确需调整：dd.py phase grilling 回流修订文档后重走确认流程")
                     if s["enabled"] != want:
                         s["enabled"] = want
                         changed.append(f"{sid}→{'on' if want else 'off'}")
@@ -1026,35 +1156,53 @@ def cmd_confirm(args, repo: Path) -> tuple[int, str]:
     doc = args.doc
     if doc not in ("analysis", "design"):
         raise DDError("--doc 只能是 analysis 或 design")
-    items, has_fail = run_checks(repo, ledger, doc)
+    if ledger["phase"] == "intake":
+        raise DDError("phase=intake：访谈流程尚未开始（分析与提问轮次不可跳过）",
+                      next_="dd.py phase analyzing 进入分析阶段，kb-scan + q-add 识别问题")
+    if ledger["phase"] == "done":
+        raise DDError("phase=done 已终态", next_="流程已完成；如需修订请开启新特性")
+    items, has_fail = run_checks(repo, ledger, doc, confirm_doc=doc)
     if has_fail:
         print(f"== confirm（{doc}）==  门禁未过，文档保持 draft ==")
         render_items(items)
         return EXIT_FLOW, "先修复上述 FAIL 项（dd.py check --doc {d}），用户确认后再 confirm".format(d=doc)
     d = ledger["docs"][doc]
     re_confirm = d["status"] == "confirmed"
-    d["status"] = "confirmed"
-    d["confirmed_at"] = now_iso()
-    d["because"] = args.because.strip()
-    # 阶段自动补齐：确认 analysis 时若仍在 grilling → analysis-doc；确认 design 时若仍在 analysis-doc → design-doc
-    auto = ""
-    if doc == "analysis" and ledger["phase"] == "grilling":
-        ledger["phase"] = "analysis-doc"
-        auto = "grilling→analysis-doc（confirm 自动推进）"
-    elif doc == "design" and ledger["phase"] == "analysis-doc":
-        ledger["phase"] = "design-doc"
-        auto = "analysis-doc→design-doc（confirm 自动推进）"
-    if auto:
-        add_history(ledger, "phase", auto)
-    # 同步文档状态行（脚本改，杜绝手改漂移；门禁已保证状态行存在）
+
+    # 先同步文档状态行（围栏外逐行替换，保结构；原子写），成功后才改台账。
+    # 崩溃窗口（文档已改/台账未存）由重跑 confirm 自愈：confirm 门禁对被确认
+    # 文档只要求状态行存在，漂移在同步时被覆盖。同步失败 → 确认中止，台账不动。
     doc_file = repo / d["path"]
     try:
         raw = doc_file.read_text(encoding="utf-8")
-        raw2 = STATUS_LINE_RE.sub("状态: Confirmed", raw, count=1)
-        if raw2 != raw:
-            doc_file.write_text(raw2, encoding="utf-8")
-    except OSError as e:
-        LOG.warning(f"confirm 同步状态行失败（不阻断）：{e}")
+    except (OSError, UnicodeDecodeError) as e:
+        raise DDError(f"状态行同步失败，确认中止（台账未变更）：{e}",
+                      next_="修复文档读取问题后重试 dd.py confirm") from e
+    lines = raw.splitlines()
+    idx = _find_status_line(lines, _fence_states(lines))
+    if idx is None:
+        raise DDError("门禁已过但文档中找不到围栏外状态行（门禁与同步不一致，这是 bug 请回报）")
+    if lines[idx] != "状态: Confirmed":
+        lines[idx] = "状态: Confirmed"
+        try:
+            _atomic_write_text(doc_file, "\n".join(lines) + ("\n" if raw.endswith("\n") else ""))
+        except OSError as e:
+            raise DDError(f"状态行同步失败，确认中止（台账未变更）：{e}",
+                          next_="修复文档写入权限/磁盘问题后重试 dd.py confirm") from e
+
+    d["status"] = "confirmed"
+    d["confirmed_at"] = now_iso()
+    d["because"] = args.because.strip()
+    # 阶段自动补齐（只前进不倒退）：确认 analysis → 至少 analysis-doc；确认 design → design-doc
+    auto = ""
+    if doc == "analysis" and ledger["phase"] in ("analyzing", "grilling"):
+        ledger["phase"] = "analysis-doc"
+        auto = "→analysis-doc（confirm 自动推进）"
+    elif doc == "design" and ledger["phase"] in ("analyzing", "grilling", "analysis-doc"):
+        ledger["phase"] = "design-doc"
+        auto = "→design-doc（confirm 自动推进）"
+    if auto:
+        add_history(ledger, "phase", auto)
     add_history(ledger, "confirm", f"{doc}{'重确认' if re_confirm else ''} because={args.because.strip()}")
     save_ledger(repo, ledger)
     print(f"== confirm ==  {doc} → confirmed（because: {args.because.strip()}；状态行已同步为 Confirmed）")
@@ -1069,6 +1217,14 @@ def cmd_finish(args, repo: Path) -> tuple[int, str]:
     if missing:
         print("== finish ==  未完成双确认：" + "、".join(missing))
         return EXIT_FLOW, ("先完成 " + "、".join(missing) + " 的 check+confirm（用户明确确认后）")
+    # 终态前重跑全量门禁：confirm 之后仍可能 q-add / --defer（design-doc 阶段
+    # 合法），不能把 open/deferred 问题或劣化文档封进 phase=done（此后无解）
+    items, has_fail = run_checks(repo, ledger, "all")
+    if has_fail:
+        print("== finish ==  门禁未过，未进入终态：")
+        render_items(items)
+        return EXIT_FLOW, ("修复上述 FAIL 后重试 dd.py finish；新增/延期问题经 "
+                           "dd.py phase grilling 回流处理，答完增量更新文档")
     if ledger["phase"] != "done":
         ledger["phase"] = "done"
         add_history(ledger, "phase", "→done（finish）")
@@ -1126,10 +1282,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("q-answer", parents=[common], help="记录用户决策或延期")
     s.add_argument("id", help="问题 id（Qxxx）")
     s.add_argument("--answer", default=None, help="用户决策文本")
-    s.add_argument("--defer", action="store_true", help="延期该问题")
+    s.add_argument("--defer", action="store_true", help="延期该问题（清除已有 ADR 分配）")
     s.add_argument("--reason", default=None, help="延期原因（--defer 必填）")
     s.add_argument("--adr", action="store_true", help="该决策过 ADR 三重门，分配 ADR 文件路径")
     s.add_argument("--adr-slug", default=None, help="ADR 文件名 slug（小写 ascii）")
+    s.add_argument("--no-adr", action="store_true",
+                   help="清除该问题已有的 ADR 分配（决策不再需要 ADR；与 --adr 互斥）")
     s.set_defaults(func=cmd_q_answer)
 
     s = sub.add_parser("frontier", parents=[common], help="计算本轮可问问题（exit 1=还有待办）")
