@@ -282,6 +282,7 @@ class Builder:
         self.style = style
         self.pages: list = []
         self.by_id: dict = {}
+        self.used_ids: set = set()
         self.used_slugs: set = set()
         self.used_titles: set = set()
         self.theme_gaps: list = []
@@ -297,18 +298,11 @@ class Builder:
     def add(self, page_id, title, kind, parent, scope, source_files, priority,
             prompt, related=None, module_path=None, title_hint=None,
             required_sections=None, pack_key=None) -> dict:
-        base_id = page_id
-        n = 2
-        while page_id in self.by_id:
-            page_id = base_id + "-" + str(n)
-            n += 1
-        slug_base = slugify(page_id)
-        slug = slug_base
-        n = 2
-        while slug in self.used_slugs:
-            slug = slug_base + "-" + str(n)
-            n += 1
-        self.used_slugs.add(slug)
+        # P67: 唯一性循环用 planner._unique_id 单一实现(额外守卫空候选,
+        # 两份手抄丢掉了该守卫) —— id 方案要变只改一处
+        from .planner import _unique_id
+        page_id = _unique_id(page_id, self.used_ids)
+        slug = _unique_id(slugify(page_id), self.used_slugs)
 
         final_title = title
         if final_title in self.used_titles:
@@ -572,8 +566,8 @@ def instantiate_pack(builder: Builder, corpus: Corpus, pack: dict,
                                        "evidence": len(evidence),
                                        "reason": "insufficient evidence"})
         return None
-    if not evidence and not pack.get("always"):
-        return None
+    # (P68: 此处曾有一段不可达的空证据守卫 —— scaled_min 恒 ≥1, 上面已
+    # 把空证据的非 always 包全部返回, 残留分支只会误导调试者)
     src = pick_files(evidence, pack.get("source_keywords") or
                      ["readme", "index", "main", "config", "app", "server"],
                      profile["source_limit"] + 2)
@@ -1286,7 +1280,8 @@ def build_packs(builder: Builder, corpus: Corpus, modules: dict) -> list:
 def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
                framework_mods: set, check_warn_only: bool = False,
                style: str = "") -> dict:
-    """跑一遍主题规划。返回 {pages(plan v3 形状), cards, sheets, report}。
+    """跑一遍主题规划。返回 {pages(plan v3 形状), cards, report,
+    check_failed}(P52: 旧 docstring 承诺的 'sheets' 键从不存在)。
     style 为 plan 级风格(缺省退 config) —— 提示词与节模板都按它取口径。"""
     profile = dict(PROFILES[profile_name])
     profile["max_pages"] = config.PROFILE_BUDGETS[profile_name]
@@ -2017,9 +2012,10 @@ def cmd_plan_themes(ctx: Ctx, args, plan: dict) -> int:
     ctx.db.publish_modules(pid, plan.get("modules") or [])
 
     # 报告落盘(work/ 可再生缓存)
+    from .util import atomic_write   # P56: 中断不留半份报告
     os.makedirs(os.path.dirname(_report_path(ctx)), exist_ok=True)
-    with open(_report_path(ctx), "w", encoding="utf-8") as fh:
-        json.dump(result["report"], fh, ensure_ascii=False, indent=2)
+    atomic_write(_report_path(ctx),
+                 json.dumps(result["report"], ensure_ascii=False, indent=2))
 
     r = result["report"]
     print(f"pages: {r['pages']}  cards: {len(result['cards'])}  "
@@ -2149,8 +2145,8 @@ def render_plan_md(ctx: Ctx, plan: dict) -> str:
     lines += ["", "## Next", "",
               "评审本文件 → 调整 `wiki_plan.yaml`(标题/合并/来源) → `pwiki validate`"
               " → `pwiki digest` → `pwiki begin`。"]
+    from .util import atomic_write   # P56: 中断不留半份评审门文档
     out = os.path.join(ctx.root, "work", "plan.md")
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
+    atomic_write(out, "\n".join(lines) + "\n")
     return out

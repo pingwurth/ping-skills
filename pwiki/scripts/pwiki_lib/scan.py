@@ -360,6 +360,24 @@ def parse_manifest(path: str) -> dict:
     return d
 
 
+def _cmd_category(low: str) -> str:
+    """scripts 键 / Makefile 目标共用的分类梯(P69) —— 两份手抄的关键字集
+    曾各自漂移(scripts 认 serve/watch 不认 run, make 认 run/fmt/setup 不
+    认 serve/watch/typecheck), 只加一边的改动会静默错分另一面。"""
+    if "test" in low:
+        return "test"
+    if "lint" in low or "typecheck" in low or "check" in low or "fmt" in low:
+        return "lint"
+    if "build" in low or "compile" in low:
+        return "build"
+    if "dev" in low or "run" in low or "start" in low \
+            or low in ("serve", "watch"):
+        return "dev"
+    if "install" in low or "setup" in low:
+        return "install"
+    return "other"
+
+
 def detect_commands(manifests: list, repo: str) -> dict:
     commands = {"build": [], "test": [], "lint": [], "dev": [], "install": [], "other": []}
     for m in manifests:
@@ -367,18 +385,8 @@ def detect_commands(manifests: list, repo: str) -> dict:
         scripts = m.get("scripts") or {}
         rel_path = path if not os.path.isabs(path) else os.path.relpath(path, repo)
         for key, val in scripts.items():
-            low = key.lower()
             entry = f"{rel_path}#scripts.{key}: {val}"
-            if "test" in low:
-                commands["test"].append(entry)
-            elif "lint" in low or "typecheck" in low or "check" in low:
-                commands["lint"].append(entry)
-            elif "build" in low or "compile" in low:
-                commands["build"].append(entry)
-            elif low in ("dev", "start", "serve", "watch"):
-                commands["dev"].append(entry)
-            elif "install" in low:
-                commands["install"].append(entry)
+            commands[_cmd_category(key.lower())].append(entry)
         if os.path.basename(path) in ("Makefile", "makefile", "GNUmakefile"):
             # manifest["path"] 已被改写为 repo 相对路径 —— 读取必须并回
             # repo 解析(曾按进程 CWD 打开, 从别的目录扫描读到错误的
@@ -388,18 +396,7 @@ def detect_commands(manifests: list, repo: str) -> dict:
             for target in re.findall(r"^([A-Za-z0-9_.-]+)\s*:(?!=)", text, re.M):
                 if target.startswith("."):
                     continue
-                entry = f"make {target}"
-                low = target.lower()
-                if "test" in low:
-                    commands["test"].append(entry)
-                elif "lint" in low or "fmt" in low or "check" in low:
-                    commands["lint"].append(entry)
-                elif "build" in low or "compile" in low:
-                    commands["build"].append(entry)
-                elif "dev" in low or "run" in low or "start" in low:
-                    commands["dev"].append(entry)
-                elif "install" in low or "setup" in low:
-                    commands["install"].append(entry)
+                commands[_cmd_category(target.lower())].append(f"make {target}")
         low_path = path.lower()
         if low_path.endswith("go.mod"):
             commands["test"].append("go test ./...")
@@ -761,10 +758,10 @@ def load_inventory(ctx: Ctx) -> dict:
 def write_inventory(ctx: Ctx, inv: dict) -> str:
     """inventory 落盘的唯一实现(cmd_scan 与 modules._autoscan 共用, c069:
     两处各写一份 makedirs+json.dump 曾漂移出格式分叉)。"""
+    from .util import atomic_write   # P56: 中断不留半份清单
     out_path = inventory_path(ctx)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(inv, fh, ensure_ascii=False, indent=2)
+    atomic_write(out_path, json.dumps(inv, ensure_ascii=False, indent=2))
     return out_path
 
 

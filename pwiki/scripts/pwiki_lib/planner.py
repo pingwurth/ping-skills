@@ -54,6 +54,19 @@ def load_plan(ctx: Ctx) -> dict:
     return plan
 
 
+def load_plan_optional(ctx: Ctx):
+    """"加载计划(若有), 否则 None" 的单一实现(P60) —— 多份逐字拷贝曾各自
+    静默吞掉损坏计划的 die(config.load 对损坏 config.json 会告警, 计划
+    路径无等价物)。缺文件静默 None(正常状态); 解析/形状错(EXIT_GATE)
+    留一行 warn 再 None。"""
+    try:
+        return load_plan(ctx)
+    except SystemExit as e:
+        if e.code == config.EXIT_GATE:
+            info(f"warn: wiki_plan.yaml 不可用 — 按无计划处理({e})")
+        return None
+
+
 def mod_titles_for(item, modules_list) -> list:
     """行/计划项 → 模块标题集(gates 模块提及检查的输入)。
 

@@ -134,7 +134,8 @@ def _rename_h1(content: str, title: str) -> str:
     —— 曾对原始内容 re.sub(count=1): 页首代码栅栏里的 '#' 注释被当 H1
     改写, 真 H1 原样留着, 行标题与内容 H1 从此永久不一致且无 stale 原因
     修复它。找不到栅栏外 H1 时原样返回(不改)。"""
-    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    from .gates import split_fences   # P61: 共用切分器
+    parts = split_fences(content)
     for i, seg in enumerate(parts):
         if seg.startswith("```"):
             continue

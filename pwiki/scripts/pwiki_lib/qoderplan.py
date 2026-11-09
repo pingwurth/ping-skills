@@ -130,10 +130,10 @@ def _emit(ctx: Ctx, out_path: str) -> int:
         },
         "knowledgecard": {"notes": []},
     }
+    from .util import atomic_write   # P56: 中断不留半份导入计划
     from .yamlite import yaml_dump
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(_HEADER + yaml_dump(yaml_doc))
+    atomic_write(out_path, _HEADER + yaml_dump(yaml_doc))
 
     problems = _check_caps(documents, yaml_doc["repowiki"]["notes"])
     for w in problems:

@@ -1067,3 +1067,46 @@ def test_p45_evidence_min_drop_recorded(tmp_path, monkeypatch):
     declined = builder.theme_declined[before:]
     assert any("evidence below minimum" in str(d.get("reason"))
                for d in declined), declined
+
+
+# =========================================================================== #
+# 批次⑥: 结构收敛(P34/P69/P70 的可观测回归; 其余为纯重构, 既有 365 例覆盖)
+# =========================================================================== #
+
+def test_p34_page_prompt_mermaid_band_from_preset(monkeypatch):
+    """deep 架构页提示词的 mermaid 带派生自 STYLE_PRESETS(与门禁同源)。"""
+    from pwiki_lib import i18n
+    from pwiki_lib.styles import STYLE_PRESETS
+    monkeypatch.setitem(STYLE_PRESETS["deep"], "mermaid", (7, 10))
+    text = i18n.page_prompt("architecture", "订单服务", "deep", "zh")
+    assert "7-10" in text and "5-8" not in text, text
+    text_en = i18n.page_prompt("architecture", "svc", "deep", "en")
+    assert "7-10" in text_en, text_en
+
+
+def test_p69_cmd_category_single_ladder():
+    """scripts 键与 Makefile 目标共用一条分类梯(两侧关键字取并集)。"""
+    from pwiki_lib.scan import _cmd_category
+    assert _cmd_category("serve") == "dev"
+    assert _cmd_category("watch") == "dev"
+    assert _cmd_category("typecheck") == "lint"
+    assert _cmd_category("fmt") == "lint"
+    assert _cmd_category("run:dev") == "dev"
+    assert _cmd_category("setup") == "install"
+    assert _cmd_category("unittest") == "test"
+    assert _cmd_category("docs:build") == "build"
+
+
+def test_p60_load_plan_optional_warns_on_corrupt(tmp_path, capsys):
+    """坏计划留 warn 后按 None; 缺文件静默 None。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    assert planner.load_plan_optional(ctx) is not None   # 正常计划
+    os.remove(ctx.plan_path)
+    assert planner.load_plan_optional(ctx) is None       # 缺文件按 None
+    with open(ctx.plan_path, "w", encoding="utf-8") as fh:
+        fh.write("pages:\n  - [unclosed\n")   # 解析错(gate 码)
+    capsys.readouterr()
+    assert planner.load_plan_optional(ctx) is None
+    assert "不可用" in capsys.readouterr().err

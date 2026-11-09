@@ -45,6 +45,7 @@ LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
 
 def normalize_links(content: str, page_path: str, all_paths: set) -> tuple:
+    from . import gates   # _md_href/split_fences(P61/P66 同源)
     """把内部 .md 相对链接改写为由页面真实位置出发的正确相对路径。
 
     writer 的两类系统错误(ping 实跑):
@@ -90,14 +91,16 @@ def normalize_links(content: str, page_path: str, all_paths: set) -> tuple:
         if not target:
             return f"[{text}]({raw})" if raw != orig else m.group(0)
         rel = posix(os.path.relpath(target, page_dir or "."))
-        rel = rel.replace(" ", "%20") + (f"#{anchor}" if anchor else "")
+        # P66: 空格编码走 gates._md_href(与全部 file:// 引用链接同源; 两套
+        # 编码器 + 一次性 %2520 修补是三个必须同步的漂移点)
+        rel = gates._md_href(rel) + (f"#{anchor}" if anchor else "")
         if rel == orig and raw == orig:
             return m.group(0)
         fixed += 1
         return f"[{text}]({rel})"
 
-    # 只在代码栅栏之外改写
-    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    # 只在代码栅栏之外改写(P61: 共用切分器)
+    parts = gates.split_fences(content)
     out = "".join(p if p.startswith("```") else LINK_RE.sub(repl, p)
                   for p in parts)
     return out, fixed
@@ -562,15 +565,13 @@ def _write_indexes(ctx: Ctx, part, pages: list, modules: list, run_id: str,
     cards = [p for p in pages if config.is_card_kind(p["kind"])]
     sheets = [p for p in pages if p["kind"] == "module_sheet"]
 
-    def _mkey(m) -> str:
-        return "/" if m.get("module_id") == "root" \
-            else (m.get("path") or m.get("module_id") or "")
-
     def module_path_of(m) -> str:
         return "/" if m.get("module_id") == "root" \
             else (m.get("path") or m.get("dir") or m.get("module_id") or "")
 
-    id_path = {m.get("module_id"): _mkey(m) for m in modules}
+    # P49: 索引 key 与 module_path 字段同源(曾两套派生, 手编计划空 path
+    # + dir 时同一节点 key/module_path 互不一致)
+    id_path = {m.get("module_id"): module_path_of(m) for m in modules}
     children = {}
     for m in modules:
         pid = m.get("parent_id") or ""
@@ -581,13 +582,13 @@ def _write_indexes(ctx: Ctx, part, pages: list, modules: list, run_id: str,
         "branch": part["branch"], "exported_at": now_iso(),
         "nodes_managed": True,
         "modules": {
-            _mkey(m): {
+            module_path_of(m): {
                 "module_path": module_path_of(m),
                 "dir_name": m.get("title", ""),
                 "title": m.get("title", ""),
                 "scope": json_list(m.get("scope")),
                 "source_files": [],
-                "children": sorted(children.get(_mkey(m), [])),
+                "children": sorted(children.get(module_path_of(m), [])),
                 "depends_on": json_list(m.get("depends_on")),
                 "related_to": json_list(m.get("related_to")),
             } for m in modules},
@@ -730,11 +731,8 @@ def cmd_write(args) -> int:
     # 口径 —— 行盖章只反映写入时的口径; plan 换风格后手工修正按新口径
     # 验收, 否则 write 放行的内容被自家 validator 拒), 并把行盖章刷新成
     # 生效值, 后续 finish 的逐行合成不再翻转
-    try:
-        from .planner import load_plan, mod_titles_for, plan_modules
-        plan = load_plan(ctx)
-    except SystemExit:
-        plan = None
+    from .planner import load_plan_optional, mod_titles_for, plan_modules
+    plan = load_plan_optional(ctx)   # P60: 单一实现(坏计划留 warn)
     style = str((plan or {}).get("style") or p["style"] or ctx.style)
     # P32: mod_titles 与 submit/finish 同源 —— strict 升级层不再缺输入
     mod_titles = mod_titles_for(p, plan_modules(plan)) if plan else []
@@ -817,11 +815,8 @@ def cmd_delete(args) -> int:
     # 索引同步重写: 曾只删行删文件 —— _index.yaml / knowledge/_index.yaml /
     # repowiki-metadata.json / generation-state.json 仍挂着幻影条目指向
     # 已删文件(Qoder 导入面读的正是这些索引), 直到某次 finish 才自愈
-    try:
-        from .planner import load_plan
-        plan = load_plan(ctx)
-    except SystemExit:
-        plan = None
+    from .planner import load_plan_optional
+    plan = load_plan_optional(ctx)   # P60: 单一实现(坏计划留 warn)
     style = str((plan or {}).get("style") or ctx.style)
     try:
         pages_now = ctx.db.published_pages(pid)
@@ -852,11 +847,8 @@ def cmd_export(args) -> int:
         # 崩溃自愈路径与 finish/write/update 同口径: plan 级 style 与
         # export_style 都优先 —— 曾按 last_run 渲染, plan 改风格后的一次
         # 自愈把整库重渲染回旧风格
-        try:
-            from .planner import load_plan
-            plan = load_plan(ctx)
-        except SystemExit:
-            plan = None
+        from .planner import load_plan_optional
+        plan = load_plan_optional(ctx)   # P60: 单一实现(坏计划留 warn)
         style = str((plan or {}).get("style")
                     or (ctx.db.last_run(pid) or {"style": ""})["style"]
                     or ctx.style)
@@ -891,11 +883,8 @@ def cmd_export(args) -> int:
     # 剥注入物与注入侧同判(export_injects, plan 级 export_style 优先)
     # —— 曾只看 preset, current 模式下注入层从不注入, 作者手写的
     # cite/目录被当注入物剥掉再写回 DB(永久丢稿)
-    try:
-        from .planner import load_plan
-        plan = load_plan(ctx)
-    except SystemExit:
-        plan = None
+    from .planner import load_plan_optional
+    plan = load_plan_optional(ctx)   # P60: 单一实现(坏计划留 warn)
     absorbed = skipped = unchanged = 0
     for p in ctx.db.published_pages(pid):
         full = os.path.join(ctx.root, p["path"])

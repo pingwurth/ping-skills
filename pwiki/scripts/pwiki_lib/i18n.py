@@ -220,14 +220,14 @@ _PAGE_PROMPTS = {
     "deep": {
         "zh": {
             "overview": "为该项目创建全面的项目概述：产品目标、目标用户、核心价值、技术栈、仓库结构、快速开始、主要模块与阅读路径。",
-            "architecture": "创建架构文档：「{title}」的职责、关键组件、依赖方向、数据与调用流、边界与失败模式。配 5-8 张 mermaid 图说明结构与运行时关系（门禁硬性要求 5-8 张，少于 5 张会被 finish 拒绝）。",
+            "architecture": "创建架构文档：「{title}」的职责、关键组件、依赖方向、数据与调用流、边界与失败模式。配 {mermaid_band} 张 mermaid 图说明结构与运行时关系（门禁硬性要求 {mermaid_band} 张，少于下限会被 finish 拒绝）。",
             "feature": "为「{title}」创建功能文档：用户流程、页面状态、数据来源、调用链、边界与异常、相关组件。必须从实际页面与调用代码出发。",
             "module": "为模块「{title}」创建技术文档：职责与边界、目录结构、关键入口、核心数据结构、主要流程、依赖方向、扩展点、已知约束与坑。",
             "default": "创建「{title}」技术文档：具体实现、关键文件、数据结构、流程、依赖、边界与常见问题。",
         },
         "en": {
             "overview": "Create a comprehensive project overview: product goals, target users, core value, tech stack, repo structure, quick start, main modules and reading paths.",
-            "architecture": "Create architecture documentation for '{title}': responsibilities, key components, dependency direction, data and call flows, boundaries and failure modes. Include 5-8 mermaid diagrams (hard gate: 5-8 at finish).",
+            "architecture": "Create architecture documentation for '{title}': responsibilities, key components, dependency direction, data and call flows, boundaries and failure modes. Include {mermaid_band} mermaid diagrams (hard gate: {mermaid_band} at finish).",
             "feature": "Create feature documentation for '{title}': user flows, page states, data sources, call chains, boundaries and errors, related components. Ground them in actual pages and call code.",
             "module": "Create technical documentation for module '{title}': responsibilities and boundaries, directory layout, key entry points, core data structures, main flows, dependency direction, extension points, known constraints and pitfalls.",
             "default": "Create technical documentation for '{title}': concrete implementation, key files, data structures, flows, dependencies, boundaries and common issues.",
@@ -243,7 +243,14 @@ def page_prompt(kind: str, title: str, style: str, locale: str) -> str:
     by_locale = table.get(locale, table.get("zh", {}))
     tmpl = by_locale.get(kind) or by_locale.get("default") or \
         table.get("zh", {}).get(kind) or table.get("zh", {})["default"]
-    return tmpl.replace("{title}", title)
+    out = tmpl.replace("{title}", title)
+    if "{mermaid_band}" in out:
+        # P34: mermaid 数量带派生自 STYLE_PRESETS(与门禁同源) —— 曾手写
+        # '5-8', 预设收紧后整批架构页按旧数写作、finish 全拒
+        from .styles import preset as _preset
+        _band = _preset(style).get("mermaid") or (5, 8)
+        out = out.replace("{mermaid_band}", f"{_band[0]}-{_band[1]}")
+    return out
 
 
 def sheet_prompt(slug: str, style: str, locale: str, title: str) -> str:

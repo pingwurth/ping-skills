@@ -133,7 +133,7 @@ def rebuild_cite_block(content: str, repo: str, locale: str = "zh") -> str:
     # 栅栏感知(与校验/钳位同口径): 曾裸搜整个 content —— 正文以代码栅栏
     # 开头(内含 '# 注释' 或示例 <cite>)时, 注入位/替换落进栅栏里, 发布页
     # 带着被劈开的示例代码出厂, 且无门禁能查出来
-    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    parts = split_fences(content)
     for i, seg in enumerate(parts):
         if not seg.startswith("```") \
                 and re.search(r"<cite>.*?</cite>", seg, re.S):
@@ -171,9 +171,16 @@ def lint_mermaid(content: str) -> list:
     return errors
 
 
+def split_fences(content: str) -> list:
+    """按代码栅栏切分: 以 ``` 开头的段是栅栏, 其余是正文(P61 共用实现
+    —— 栅栏正则曾散在六个转换点各持一份, 规则要变只改这里)。"""
+    return re.split(r"(```.*?```)", content, flags=re.S)
+
+
 def strip_code_fences(content: str) -> str:
     """剥掉代码栅栏, 防止 # 注释行被当标题(qwiki bug12: ping 实跑)。"""
-    return re.sub(r"```.*?```", "", content, flags=re.S)
+    return "".join(p for p in split_fences(content)
+                   if not p.startswith("```"))
 
 
 def iter_h2(content: str):
@@ -285,7 +292,7 @@ def gate_item(content: str, item, repo: str, style: str,
     n_files = len(cited)
 
     if config.is_card_kind(kind):
-        _gate_card(content, item, p, strict, errors, warnings, n_cites, repo)
+        _gate_card(content, item, p, strict, errors, warnings, repo)
         return errors, warnings
     if kind == "module_sheet":
         _gate_sheet(content, item, p, strict, errors, warnings, n_cites)
@@ -404,7 +411,7 @@ def gate_item(content: str, item, repo: str, style: str,
     extras = {c for c in cited
               if c not in declared
               and not any(c == d or c.startswith(d + "/") for d in scope_dirs)}
-    if len(extras) > 10:
+    if len(extras) > p.get("extra_cite_files", 10):
         (errors if strict else warnings).append(
             f"citation/extra: {len(extras)} 个引用文件超出声明"
             " source_files/scope(例: " + ", ".join(sorted(extras)[:3]) + ")")
@@ -412,9 +419,10 @@ def gate_item(content: str, item, repo: str, style: str,
     if cited:
         code_cited = {c for c in cited
                       if os.path.splitext(c)[1].lower() not in config.DOC_EXTS}
-        if len(code_cited) < 2:
-            warnings.append(f"evidence/code: 代码文件引用 {len(code_cited)} <2 — "
-                            "纯文档证据不能佐证代码行为")
+        _cmin = p.get("code_evidence_min", 2)
+        if len(code_cited) < _cmin:
+            warnings.append(f"evidence/code: 代码文件引用 {len(code_cited)} "
+                            f"<{_cmin} — 纯文档证据不能佐证代码行为")
     # cite_line_ratio: 行级引用占比(qwiki 0.85 曾是 LINING 硬错; 这里降为
     # 警告保留观测, 无行号的 file:// 不再与已验证引用不可区分)
     ratio_min = p.get("cite_line_ratio")
@@ -434,7 +442,8 @@ def gate_item(content: str, item, repo: str, style: str,
             continue
         if not SECTION_SOURCES_RE.search(body):
             missing_ss += 1
-    if missing_ss and missing_ss > max(1, n_sections // 3):
+    if missing_ss and missing_ss > max(
+            1, n_sections // p.get("sections_tolerance_div", 3)):
         msg = f"{missing_ss} 个分析节缺 **章节来源** 块"
         if p["section_sources"] == "error":
             (errors if strict else warnings).append("sources/section: " + msg)
@@ -461,7 +470,7 @@ def gate_item(content: str, item, repo: str, style: str,
     return errors, warnings
 
 
-def _gate_card(content, item, p, strict, errors, warnings, n_cites, repo=""):
+def _gate_card(content, item, p, strict, errors, warnings, repo=""):
     """卡片: frontmatter kind/name 机器校验 + 证据存在性 + D16 引用。
 
     kind 解析兼容两形态: job/page 行是 kind='card'+card_kind=<种类>;
@@ -518,7 +527,7 @@ def _gate_sheet(content, item, p, strict, errors, warnings, n_cites):
         if re.search(r"^##\s+", strip_code_fences(content), re.M):
             sev.append("sheet/shape: concise 速查表只有 H1, 不写 ## 小节")
         n_sent = len([s for s in content.splitlines() if s.strip()])
-        if n_sent > 40:
+        if n_sent > p.get("sheet_max_lines", 40):
             warnings.append(f"sheet/length: {n_sent} 行 — concise 速查表应 1-3 句(每节)")
     else:
         # D16 行级口径(同卡片); 栅栏内的示例引用不算证据
@@ -624,7 +633,7 @@ def fix_off_by_one(content: str, repo: str) -> tuple:
         return m.group(0)
 
     # 栅栏感知: 示例代码里的引用不是证据, 钳位不碰(与校验口径一致)
-    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    parts = split_fences(content)
     out = "".join(p if p.startswith("```") else config.CITE_RE.sub(repl, p)
                   for p in parts)
     return out, fixed
@@ -640,7 +649,7 @@ def strip_injected_layers(content: str) -> str:
     差别剥掉: file_to_db/validate --fix 把带围栏示例的页面永久写坏,
     TOC 正则还从栅栏内标题一路吞到收尾反引号(产出未闭合代码块)。
     注入侧(rebuild_cite_block/目录注入)本就栅栏感知, 两侧自此同口径。"""
-    parts = re.split(r"(```.*?```)", content, flags=re.S)
+    parts = split_fences(content)
     return "".join(
         i18n.TOC_SECTION_RE.sub(
             "", re.sub(r"(?s)<cite>.*?</cite>\n*", "", p))
@@ -708,7 +717,7 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         # current 下注入层从不注入, 作者手写的 cite/目录被当注入物剥掉;
         # 卡/sheet 从不注入, 也不剥
         from .publish import export_injects
-        item2 = dict(item) if isinstance(item, dict) else dict(item)
+        item2 = dict(item)   # P63: sqlite3.Row 也支持 dict(), 残留三元已无差异
         item2.setdefault("kind", kind_hint or "page")
         if item2.get("kind") == "page" and export_injects(ctx, style, plan):
             content = strip_injected_layers(content)
@@ -761,7 +770,7 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         if content is None:
             continue
         base_dir = os.path.dirname(path)
-        prose = "".join(x for x in re.split(r"(```.*?```)", content, flags=re.S)
+        prose = "".join(x for x in split_fences(content)
                         if not x.startswith("```"))
         for m in re.finditer(
                 r"\[[^\]]*\]\((?!file://|http)([^)#]+\.md(?:#[^)\s]*)?)\)",
@@ -781,9 +790,8 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         "global": {"errors": errors_total, "warnings": warnings_total},
     }
     out = os.path.join(ctx.root, "work", "validation-report.json")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(report, fh, ensure_ascii=False, indent=2)
+    from .util import atomic_write   # P56: 中断不留半份报告
+    atomic_write(out, json.dumps(report, ensure_ascii=False, indent=2))
     return report, (config.EXIT_GATE if errors_total else config.EXIT_OK)
 
 

@@ -71,10 +71,11 @@ def cmd_init(args) -> int:
     }
     for k, v in old.items():
         cfg.setdefault(k, v)
+    from .util import atomic_write   # P56: 中断不留半份 config(曾以默认
+    # 配置静默跑完整轮 begin/submit/finish)
     os.makedirs(ctx.root, exist_ok=True)
     ctx.ensure_publish_tree()   # P1: 骨架随 init 落位, 首次 finish 不再要 --yes
-    with open(cfg_path, "w", encoding="utf-8") as fh:
-        _json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    atomic_write(cfg_path, _json.dumps(cfg, ensure_ascii=False, indent=2))
     part = ctx.partition()
     print(f"initialized: {ctx.root}")
     print(f"  repo={ctx.repo}  branch={part['branch']}  locale={ctx.locale}")
@@ -471,13 +472,38 @@ def _orphan_save(ctx: Ctx, page_id: str, content: str) -> str:
     c034: page_id 来自计划(唯一人工编辑面), 只被校验过非空 —— 含 '/' 或
     以 '/' 开头的 id 会把孤儿稿写到 work/orphans 之外(最高到绝对路径)。
     越界 id 一律落安全名(不 die: 孤儿保存是"稿件不丢"的最后通道)。"""
+    from .util import atomic_write   # P56: 孤儿稿是"稿件不丢"的最后通道
     safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(page_id))
     d = os.path.join(ctx.root, "work", config.ORPHAN_SUBMIT_DIR)
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, f"{safe_id}-{uuid.uuid4().hex[:6]}.md")
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(content)
+    atomic_write(path, content)
     return path
+
+
+def _orphan_die(ctx: Ctx, run_id: str, page_id: str, content: str,
+                die_msg: str, log_detail: str,
+                event: str = "orphan_submit",
+                code: int = None) -> None:
+    """孤儿稿三连的单一咽喉(P57): 存稿 + run_log 审计 + die —— cmd_submit
+    的十个守卫块曾各自手抄这三步, 第十处(token_lost)已经忘掉 log 调用。
+    die_msg 里用 {saved} 占位。"""
+    saved = _orphan_save(ctx, page_id, content)
+    ctx.db.log(run_id, event, f"{page_id}: {log_detail}, 稿件存 {saved}")
+    die(die_msg.format(saved=saved),
+        config.EXIT_PRECOND if code is None else code)
+
+
+def _adoptable_token(job_row, supplied):
+    """(token, violated) —— c034 单写便利判定的单一实现(P59): 省略 --claim
+    仅在"从未被换发过"(attempts==1)时可采纳行内令牌; 重认领后行内令牌
+    可能属于别的 writer, 省略即违规(防 writer 互踩的核心规则, 三处手抄
+    曾各自漂移)。"""
+    processing = str(job_row["state"]) == "processing"
+    if supplied is None:
+        token = str(job_row["claim_token"] or "") if processing else ""
+        return token, processing and int(job_row["attempts"] or 0) > 1
+    return supplied, False
 
 
 def cmd_submit(args) -> int:
@@ -495,35 +521,28 @@ def cmd_submit(args) -> int:
 
     run = ctx.db.active_run(part["id"])
     if not run:
-        saved = _orphan_save(ctx, args.page_id, content)
         # run 已消失(如被 begin --force 取消)—— 审计走 manual 频道
-        ctx.db.log("manual", "orphan_submit",
-                   f"{args.page_id}: 无活动 run, 稿件存 {saved}")
-        die(f"无活动 run — 先 `pwiki begin`; 稿件已保存 {saved}",
-            config.EXIT_PRECOND)
+        _orphan_die(ctx, "manual", args.page_id, content,
+                    "无活动 run — 先 `pwiki begin`; 稿件已保存 {saved}",
+                    "无活动 run")
     if run["state"] == "LINING":
         # c037: finish 正在 LINING 校验本批 completed 内容 —— 此刻 submit
         # (尤其 --force)会换掉被校验的稿件; 等 finish 出结果再动。
         # 先读稿再挡: stdin 稿曾在此连 orphan 目录都进不去
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: run LINING 中, 稿件存 {saved}")
-        die(f"run 正在 LINING(finish 校验中) — 等 finish 完成 or 失败后再提交"
-            f"(稿件已保存 {saved})", config.EXIT_PRECOND)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    "run 正在 LINING(finish 校验中) — 等 finish 完成 or "
+                    "失败后再提交(稿件已保存 {saved})", "run LINING 中")
     job = ctx.db.job(run["id"], args.page_id)
     if job is None:
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: 未知 job, 稿件存 {saved}")
-        die(f"未知 job: {args.page_id} (run {run['id']}) — 稿件已保存 {saved}",
-            config.EXIT_PRECOND)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    f"未知 job: {args.page_id} (run {run['id']}) — "
+                    "稿件已保存 {saved}", "未知 job")
 
     if job["state"] == "completed" and not args.force:
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: job 已 completed, 稿件存 {saved}")
-        die(f"job {args.page_id} 已 completed(重做用 `pwiki regenerate`) — "
-            f"稿件已保存 {saved}", config.EXIT_PRECOND)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    f"job {args.page_id} 已 completed(重做用 "
+                    "`pwiki regenerate`) — 稿件已保存 {saved}",
+                    "job 已 completed")
 
     # 认领匹配: --claim 携带 next 发放的令牌(并行 writer 必传; 令牌失配 =
     # 租约已被回收/重认领 → 孤儿稿路径)。省略时按单写便利模式取当前令牌,
@@ -531,23 +550,20 @@ def cmd_submit(args) -> int:
     # 属于别的 writer, 过期 writer 省略 --claim 会顶掉在写 writer 的稿
     supplied = getattr(args, "claim", None)
     # token 的最终取值在 gate_item 之后按重读的行状态决定(见下)
-    if supplied is None and job["state"] == "processing" \
-            and int(job["attempts"] or 0) > 1:
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: 重认领后省略 --claim, 稿件存 {saved}")
-        die(f"job {args.page_id} 已被重新认领过(attempts={job['attempts']}) — "
+    _, reclaim_omit = _adoptable_token(job, supplied)
+    if reclaim_omit:
+        _orphan_die(
+            ctx, run["id"], args.page_id, content,
+            f"job {args.page_id} 已被重新认领过(attempts={job['attempts']}) — "
             "行内令牌可能属于其他 writer; 用你最近一次 `pwiki next` 输出的"
-            f"令牌加 --claim 重交(稿件已保存 {saved}; 令牌丢失则等租约过期"
-            "后重新 next 认领)", config.EXIT_PRECOND)
+            "令牌加 --claim 重交(稿件已保存 {saved}; 令牌丢失则等租约过期"
+            "后重新 next 认领)", "重认领后省略 --claim")
     if supplied is not None and not ctx.db.match_claim(
             run["id"], args.page_id, supplied):
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: claim token 失配, 稿件存 {saved}")
-        die(f"claim token 失配(租约已被回收并可能被其他 writer 认领) — "
-            f"稿件已保存 {saved}, 重新 `pwiki next` 取新令牌",
-            config.EXIT_PRECOND)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    "claim token 失配(租约已被回收并可能被其他 writer 认领)"
+                    " — 稿件已保存 {saved}, 重新 `pwiki next` 取新令牌",
+                    "claim token 失配")
 
     # P31: 有效样式链与 finish 同序(job > run > plan > ctx) —— 曾缺 plan
     # 层: 未盖章行 submit 按 ctx、finish 按 plan 各判各的, 双重门禁互斥。
@@ -588,21 +604,19 @@ def cmd_submit(args) -> int:
     job_now = ctx.db.job(run["id"], args.page_id)
     state_now = job_now["state"] if job_now is not None else ""
     if state_now == "completed" and not args.force:
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: 提交途中已被他稿完成, 稿件存 {saved}")
-        die(f"job {args.page_id} 已 completed(重做用 `pwiki regenerate`) — "
-            f"稿件已保存 {saved}", config.EXIT_PRECOND)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    f"job {args.page_id} 已 completed(重做用 "
+                    "`pwiki regenerate`) — 稿件已保存 {saved}",
+                    "提交途中已被他稿完成")
     if supplied is None:
-        if state_now == "processing" and int(job_now["attempts"] or 0) > 1:
-            saved = _orphan_save(ctx, args.page_id, content)
-            ctx.db.log(run["id"], "orphan_submit",
-                       f"{args.page_id}: 门禁期间被重认领, 稿件存 {saved}")
-            die(f"job {args.page_id} 在提交期间被其他 writer 重新认领"
-                f"(attempts={job_now['attempts']}) — 稿件已保存 {saved}; "
+        token, reclaim_omit = _adoptable_token(job_now, supplied)
+        if reclaim_omit:
+            _orphan_die(
+                ctx, run["id"], args.page_id, content,
+                f"job {args.page_id} 在提交期间被其他 writer 重新认领"
+                f"(attempts={job_now['attempts']}) — 稿件已保存 {{saved}}; "
                 "带 --claim(你最近一次 next 的令牌)重交, 或等租约过期后"
-                "重新 next 认领", config.EXIT_PRECOND)
-        token = job_now["claim_token"] if state_now == "processing" else ""
+                "重新 next 认领", "门禁期间被重认领")
         if token:
             # 省略 --claim 采纳行内令牌只在单写便利模式下安全(attempts==1
             # 分不清"同一 writer"与"从不转发令牌的编排方派来的别人")——
@@ -616,20 +630,17 @@ def cmd_submit(args) -> int:
     if problems and not args.force:
         for p in problems:
             print(f"  rejected: {p}", file=sys.stderr)
-        # P4: 门禁拒绝也保稿 —— 这是 cmd_submit 唯一曾不落 orphan 的退出
-        # 路径, stdin 稿(--file -)被消费后整篇蒸发, 连 work/orphan-submits/
-        # 都进不去(头注释承诺 stdin 草稿绝不丢); 其余九个拒绝分支都保
-        saved = _orphan_save(ctx, args.page_id, content)
+        # P4+P57: 门禁拒绝也保稿(曾唯一不落 orphan 的退出路径, stdin 稿
+        # 被消费后整篇蒸发); 回 pending 即释放认领(无需也无法续租)
         if state_now == "processing":
-            # 回 pending 即释放认领(set_job_state 已清 token/租约)—— 无需
-            # 也无法续租; 曾在此调 extend_lease, 恒为 0 行 no-op
             ctx.db.set_job_state(run["id"], args.page_id, "pending",
                                  error="; ".join(problems[:3]),
                                  claim_token=token)
-        ctx.db.log(run["id"], "submit_rejected",
-                   f"{args.page_id}: {problems[:3]} (被拒稿件存 {saved})")
-        die(f"submit 被拒({args.page_id}) — 修稿重交(--force 强过, "
-            f"--lenient 放宽); 被拒稿件已保存 {saved}", config.EXIT_GATE)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    f"submit 被拒({args.page_id}) — 修稿重交(--force 强过, "
+                    "--lenient 放宽); 被拒稿件已保存 {saved}",
+                    f"{problems[:3]}", event="submit_rejected",
+                    code=config.EXIT_GATE)
 
     # summary/key_topics 先算好, 随终写进同一守卫事务(P9): 曾在终写之后的
     # 一句裸自动提交 —— 竞争 finish 在两步之间置 LINING 并快照 jobs(),
@@ -657,18 +668,15 @@ def cmd_submit(args) -> int:
         summary=summary,
         key_topics=json.dumps(topics, ensure_ascii=False))
     if verdict == "busy":
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: finish 进行中(LINING/已终态), 稿件存 {saved}")
-        die(f"run 正在 finish(LINING/发布)或已终态 — 提交与快照竞态, "
-            f"稿件已保存 {saved}; 等 finish 出结果后重交", config.EXIT_PRECOND)
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    "run 正在 finish(LINING/发布)或已终态 — 提交与快照竞态, "
+                    "稿件已保存 {saved}; 等 finish 出结果后重交",
+                    "finish 进行中(LINING/已终态)")
     if verdict == "token_lost":
-        # P28: 补 run_log 审计行 —— 曾只存文件不记账, 该孤儿从记录在案的
-        # run_log 协调通道消失(其余九个孤儿分支都写 orphan_submit)
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: 终写时租约被回收, 稿件存 {saved}")
-        die(f"提交时租约刚好被回收 — 稿件已保存 {saved}", config.EXIT_PRECOND)
+        # P28(经 P57 咽喉): 曾只存文件不记账, 该孤儿从 run_log 审计通道消失
+        _orphan_die(ctx, run["id"], args.page_id, content,
+                    "提交时租约刚好被回收 — 稿件已保存 {saved}",
+                    "终写时租约被回收")
 
     # key_topics 进活术语表(摘要/话题本体已随终写同事务落行, 见上)
     if topics:
@@ -766,13 +774,12 @@ def _fail_skip_guard(ctx: Ctx, run, job, args) -> str:
         die(f"job {args.page_id} 已 completed — 重做用 `pwiki regenerate`, "
             "确认撤销完成态加 --force", config.EXIT_PRECOND)
     supplied = getattr(args, "claim", None)
-    if supplied is None and job["state"] == "processing" \
-            and int(job["attempts"] or 0) > 1:
+    token, reclaim_omit = _adoptable_token(job, supplied)   # P59 单一实现
+    if reclaim_omit:
         die(f"job {args.page_id} 已被重新认领过(attempts={job['attempts']}) — "
             "行内令牌可能属于其他 writer; 带 --claim(你最近一次 next 输出的"
             "令牌)再 fail/skip", config.EXIT_PRECOND)
-    return supplied if supplied is not None else (
-        job["claim_token"] if job["state"] == "processing" else "")
+    return token
 
 
 def cmd_fail(args) -> int:
@@ -868,7 +875,7 @@ def cmd_regenerate(args) -> int:
             f"重试 `pwiki regenerate {args.page_id}`", config.EXIT_PRECOND)
     # path 必须在此显式派生(plan 条目不带 path; 与 begin/update 同口径) ——
     # 曾以 path='' 入队, finish 打开 <root> 直接 IsADirectoryError 且复崩
-    if kind == "card":
+    if config.is_card_kind(kind):   # P48: 禁裸 == 比较的单一入口口径
         job_item = card_job(item, ctx.locale)
     else:
         job_item = dict(item)
@@ -1133,11 +1140,11 @@ def cmd_finish(args) -> int:
                                    or needs_review) else "COMPLETED"
     # 终态写入带状态复核: begin --force 刚取消本 run 时(守卫放开的历史
     # 窗口), 曾无条件把 CANCELLED 复活成 COMPLETED/PARTLY_COMPLETED
-    cur = ctx.db.conn.execute(
-        "UPDATE run SET state=?, stage='done', finished_at=? "
-        "WHERE id=? AND state='LINING'",
-        (final, now_iso(), run["id"]))
-    if cur.rowcount == 0:
+    # (P58: 手抄 SQL 收敛到 db.update_run_guarded —— c022 的任何收紧自动
+    # 覆盖终态写, 两份副本不再各自漂移)
+    if not ctx.db.update_run_guarded(
+            run["id"], ("LINING",), state=final, stage="done",
+            finished_at=now_iso()):
         die(f"run {run['id']} 已不处于 LINING(被并发 cancel/force?) — "
             "不复活已取消的 run", config.EXIT_PRECOND)
     ctx.db.log(run["id"], "run_finished",
