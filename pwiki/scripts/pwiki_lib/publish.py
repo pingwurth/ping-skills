@@ -791,7 +791,10 @@ def cmd_delete(args) -> int:
         # EBUSY/EACCES 文件让 DB 宣称"已全删"而树上挂着半堆 + 裸 traceback
         import shutil
         leftover = []
-        for base in (ctx.content_dir(), ctx.knowledge_dir()):
+        # P26: meta/ 一并清 —— 单条目路径会重写 repowiki-metadata.json /
+        # generation-state.json, --all 曾留着全量幽灵条目(Qoder 导入面读的
+        # 正是这些索引)
+        for base in (ctx.content_dir(), ctx.knowledge_dir(), ctx.meta_dir()):
             if os.path.isdir(base):
                 shutil.rmtree(base, ignore_errors=True)
                 if os.path.isdir(base):
@@ -837,6 +840,11 @@ def cmd_export(args) -> int:
     ctx = Ctx(args).load()
     pid = ctx.partition()["id"]
     if args.direction == "db_to_file":
+        # P39: --force 是 file_to_db 的基线越权开关, db_to_file 无条件重
+        # 渲染 —— 曾被解析后静默丢弃, 看起来像记录在案的强制语义
+        if getattr(args, "force", False):
+            die("--force 只用于 file_to_db(越过无基线守卫); "
+                "db_to_file 本就无条件重渲染", config.EXIT_PRECOND)
         pages = ctx.db.published_pages(pid)
         if not pages:
             die("DB 无已发布条目", config.EXIT_PRECOND)

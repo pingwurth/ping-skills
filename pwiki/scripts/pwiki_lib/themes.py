@@ -203,8 +203,31 @@ def load_overrides(ctx: Ctx) -> dict:
         scope, _, title = str(key).partition("|")
         if title:
             aliases[(scope, title)] = str(val)
-    return {"title_maps": {k: dict(v) for k, v in maps.items() if isinstance(v, dict)},
-            "title_aliases": aliases}
+    # P29: platform_rules 是 (子串, 标题) 对的序列(make_leaves 按对解包),
+    # 其余键是映射 —— 曾只验"值是映射": dict 形态通过过滤后在解包处裸
+    # ValueError 打死 plan --themes, 列表形态反被静默丢成死配置。两种
+    # 自然写法都收, 坏形状大声警告 + 忽略(docstring 自述契约)
+    pr = (maps.get("platform_rules") if isinstance(maps, dict) else None)
+    norm_maps = {}
+    for k, v in maps.items():
+        if k == "platform_rules":
+            continue
+        if isinstance(v, dict):
+            norm_maps[k] = dict(v)
+    if pr is not None:
+        pairs = []
+        if isinstance(pr, dict):
+            pairs = [[str(a), str(b)] for a, b in pr.items()]
+        elif isinstance(pr, list) and all(
+                isinstance(x, (list, tuple)) and len(x) == 2 for x in pr):
+            pairs = [[str(a), str(b)] for a, b in pr]
+        else:
+            info(f"warn: {ctx.overrides_path} title_maps.platform_rules 需要"
+                 " {子串: 标题} 映射或 [[子串, 标题], …] 列表"
+                 f"(得到 {type(pr).__name__}) — 该键忽略")
+        if pairs:
+            norm_maps["platform_rules"] = pairs
+    return {"title_maps": norm_maps, "title_aliases": aliases}
 
 
 def merge_manual(new_items: list, old_items: list, manual_fields,
@@ -375,8 +398,10 @@ def make_leaves(builder: Builder, corpus: Corpus, parent: dict, spec: dict,
                 low = stem.lower()
                 if low in FEATURE_EXCLUDE or low in (ls.get("exclude") or []):
                     continue
-                if ".test" in low or ".spec" in low or low.startswith("test") \
-                        or low.startswith("spec"):
+                # P41: 测试文件谓词与全库同源(P_TEST) —— 手搓词干检查与
+                # pick_files/gates 的谓词已分歧(foo_test.go、__tests__/
+                # 等漏拦, 关键词丰富的测试助手进 feature 页 source_files)
+                if match_any(f["path"].lower(), P_TEST):
                     continue
                 matched = None
                 low_path = f["path"].lower()
@@ -1745,6 +1770,9 @@ def _plan_cards(ctx: Ctx, inv: dict, corpus: Corpus, files: list,
     all_text = [f for f in files if f.get("lang") in cz.TEXT_LANGS]
     deps = collect_dependencies(inv)
 
+    card_ids: set = set()
+    card_titles: set = set()
+
     def add_card(kind, name, slug, source_files, prompt):
         srcs = []
         for p in source_files:
@@ -1752,7 +1780,24 @@ def _plan_cards(ctx: Ctx, inv: dict, corpus: Corpus, files: list,
                 srcs.append(p)
         if not srcs:
             return
-        cards.append({"id": "card-" + slug, "kind": kind, "title": name,
+        # P18: id/标题唯一性守卫(planner.seed_cards 同规) —— slugify 对
+        # '@azure/storage' 与 'azure-storage' 同值, DEP_DISPLAY 又会把
+        # 'tauri' 与 '@tauri-apps/api' 都映射到 'Tauri': 重复 id 阻塞
+        # begin(validate 的重复检查), 撞标题则 _die_on_path_collision
+        # 打死 plan --themes
+        cid = "card-" + slug
+        n = 2
+        while cid in card_ids:
+            cid = f"card-{slug}-{n}"
+            n += 1
+        card_ids.add(cid)
+        title = str(name)
+        n = 2
+        while title in card_titles:
+            title = f"{name}({n})"
+            n += 1
+        card_titles.add(title)
+        cards.append({"id": cid, "kind": kind, "title": title,
                       "scope": ["**"], "source_files": srcs[:8], "prompt": prompt})
 
     def dep_score(name):
@@ -2026,8 +2071,12 @@ def render_plan_md(ctx: Ctx, plan: dict) -> str:
     lines += ["## Page tree", ""]
 
     def emit(parent_id, depth=0):
+        # P22: ordinal 经 as_int 容错 —— 手编 wiki_plan.yaml 的显式空
+        # `ordinal:` 解析为 None, .get 默认值不生效, sorted 裸 TypeError
+        from .util import as_int
         for p in sorted(children.get(parent_id, []),
-                        key=lambda x: (x.get("ordinal", 0), x.get("id", ""))):
+                        key=lambda x: (as_int(x.get("ordinal"), 0),
+                                       str(x.get("id") or ""))):
             flags = []
             if p.get("pack_key"):
                 flags.append(p["pack_key"])
@@ -2083,9 +2132,11 @@ def render_plan_md(ctx: Ctx, plan: dict) -> str:
             lines.append("- evidence_thin pages: " +
                          ", ".join(str(p.get("id")) for p in thin_pages))
     if check.get("skeleton_scope_pages"):
-        lines += ["", "## Skeleton-scope pages (声明 vs 现状)", ""]
-        lines +=("这些页面覆盖占位目录; 其 prompt 要求 README 声明标注为「声明」, "
-                 "不得写成已交付行为:")
+        # P21: 曾 `lines +=("句子")` —— list += str 按字符扩展, plan.md 在
+        # 此发出数十个单字符行
+        lines += ["", "## Skeleton-scope pages (声明 vs 现状)", "",
+                  "这些页面覆盖占位目录; 其 prompt 要求 README 声明标注为"
+                  "「声明」, 不得写成已交付行为:", ""]
         lines += ["- " + str(p) for p in check["skeleton_scope_pages"]]
     lines += ["", "## Next", "",
               "评审本文件 → 调整 `wiki_plan.yaml`(标题/合并/来源) → `pwiki validate`"

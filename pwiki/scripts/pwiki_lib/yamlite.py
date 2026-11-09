@@ -36,8 +36,10 @@ def _yaml_scalar(v) -> str:
     if s == "" or re.search(r'[:#\[\]{},&*!|>\'"%@`]', s) or s != s.strip() \
             or s.startswith(("-", "?")) or "\n" in s or "\t" in s \
             or s.lower() in ("null", "true", "false", "yes", "no", "on", "off", "~") \
-            or _NUM_RE.match(s):
-        # json.dumps 产出合法的 YAML 双引号标量(含 \n 转义)
+            or _NUM_RE.match(s) \
+            or re.fullmatch(r"[+-]?(nan|inf|infinity)", s, re.IGNORECASE):
+        # json.dumps 产出合法的 YAML 双引号标量(含 \n 转义); inf/nan 形的
+        # 字符串也要引号 —— 否则裸写后被解析侧按 float 收走(P46 往返)
         return json.dumps(s, ensure_ascii=False)
     return s
 
@@ -167,11 +169,12 @@ def _parse_scalar(tok: str):
     # scope 字符串, 消费方解码失败回空列表 —— 条目被"什么都不跟踪")
     if tok[:1] in ("&", "*"):
         raise ValueError(f"yaml: 锚点/别名不支持: {tok!r}")
-    # c003: PEP 515 下划线数字与 nan/inf —— 裸 int()/float() 认, 发射侧
-    # _NUM_RE 不认 → 不加引号写回, 重读后类型从字符串变数值, 破坏"引擎
-    # 写文件精确往返"。这里保持字符串身份(发射侧同样裸写, 往返即精确)。
-    if "_" not in tok and not re.fullmatch(
-            r"[+-]?(nan|inf|infinity)", tok, re.IGNORECASE):
+    # c003: PEP 515 下划线数字 —— 裸 int()/float() 认, 发射侧 _NUM_RE 不认
+    # → 不加引号写回, 重读后类型从字符串变数值, 破坏"引擎写文件精确往返",
+    # 保持字符串身份。nan/inf 相反: 发射侧把非有限 float 裸写成 inf/nan
+    # (str(v)), 解析侧必须转回 float 往返才精确(P46; 字符串 'inf' 由发射
+    # 侧加引号保住字符串身份)。
+    if "_" not in tok:
         try:
             return int(tok)
         except ValueError:
@@ -223,7 +226,12 @@ class _YLine:
 
 
 _KV_RE = re.compile(
-    r'^("(?P<qk>[^"]*)"|\'(?P<sk>[^\']*)\'|(?P<pk>[^:#][^:]*?))\s*:\s*(?P<val>.*)$')
+    r'^("(?P<qk>[^"]*)"|\'(?P<sk>[^\']*)\'|'
+    r'(?P<pk>[^:#][^:]*?(?::[^:\s]+)*))\s*:\s*(?P<val>.*)$')
+# P40: 裸键允许"后跟非空白的冒号"段(a:b / go:generate) —— YAML 里它们是
+# 键的一部分; 曾绑到第一个 ':' 之前的最短前缀, 'a:b: v' 被静默重塑成
+# {'a': 'b: v'}(违"拿不准就报错, 绝不静默吞字段"); 发射侧对含 ':' 键加
+# 引号, 往返精确。
 
 
 def _is_seq_line(ln) -> bool:

@@ -683,3 +683,254 @@ def test_p28_token_lost_orphan_audited(tmp_path, monkeypatch):
     assert rows and "租约被回收" in rows[-1]["detail"], \
         "token_lost 孤儿从 run_log 审计通道消失"
     assert ctx.db.job(run["id"], job["page_id"])["state"] != "completed"
+
+
+# =========================================================================== #
+# 批次④: 解析面与输入健壮性(P16/P18/P21/P22/P26/P27/P29/P30/P33/P36/P39/
+# P40/P41/P42/P43/P46/P47)
+# =========================================================================== #
+
+def test_p16_parse_pyproject_pep621(tmp_path):
+    """[project] 只认 PEP 621 dependencies 数组 —— 标量键不再是依赖。"""
+    from pwiki_lib.scan import parse_pyproject
+    f = tmp_path / "pyproject.toml"
+    f.write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n'
+        'requires-python = ">=3.10"\n'
+        'dependencies = [\n  "requests>=2.28",\n  "pydantic>=2",\n]\n\n'
+        '[tool.poetry.dependencies]\npython = "^3.10"\nhttpx = "^0.27"\n',
+        encoding="utf-8")
+    out = parse_pyproject(str(f))
+    assert out["name"] == "demo"
+    assert out["dependencies"] == ["requests>=2.28", "pydantic>=2",
+                                   "python", "httpx"], out["dependencies"]
+
+
+def test_p42_ignore_dirs_cover_default_ignores():
+    """inventory 的 walk 忽略集以 config.DEFAULT_IGNORES 为基(Pods 等
+    不再进得了 inventory 却永不标 stale)。"""
+    from pwiki_lib import config, scan
+    assert config.DEFAULT_IGNORES <= scan.IGNORE_DIRS, \
+        config.DEFAULT_IGNORES - scan.IGNORE_DIRS
+
+
+def test_p43_setup_signals_reads_readme_excerpt():
+    """src-layout 库(pyproject 无入口)靠 README 摘录判快速开始页。"""
+    from pwiki_lib.planner import _setup_signals
+    inv = {"manifests": [{"path": "pyproject.toml"}], "entry_points": [],
+           "readme": {"path": "README.md", "excerpt": "# Demo\n\nGetting Started here"}}
+    assert _setup_signals(inv) is True
+
+
+def test_p27_review_keeps_prior_mutations(tmp_path):
+    """`plan --sheets standard --review` 同调用: sheets 变更真的落盘。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    n_before = len(planner.plan_pages(planner.load_plan(ctx)))
+    assert _cli(["plan", "--sheets", "standard", "--review",
+                 "--repo", repo.path, "--root", root]) == config.EXIT_OK
+    n_after = len(planner.plan_pages(planner.load_plan(ctx)))
+    assert n_after > n_before, "--review 把同调用的 --sheets 变也丢回内存"
+
+
+def test_p29_platform_rules_both_shapes(tmp_path, capsys):
+    """title_maps.platform_rules: dict/列表两形态都收, 坏形状警告+忽略。"""
+    from pwiki_lib import themes
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    ov = os.path.join(ctx.repo, "pwiki.yaml")
+    with open(ov, "w", encoding="utf-8") as fh:
+        fh.write("title_maps:\n  platform_rules:\n    ipc: IPC 层\n")
+    m = themes.load_overrides(ctx)["title_maps"]
+    assert m["platform_rules"] == [["ipc", "IPC 层"]], m
+    with open(ov, "w", encoding="utf-8") as fh:
+        fh.write("title_maps:\n  platform_rules:\n    - [web, Web 桥]\n")
+    assert themes.load_overrides(ctx)["title_maps"]["platform_rules"] == \
+        [["web", "Web 桥"]]
+    with open(ov, "w", encoding="utf-8") as fh:
+        fh.write("title_maps:\n  platform_rules: oops\n")
+    capsys.readouterr()
+    assert "platform_rules" not in themes.load_overrides(ctx)["title_maps"]
+    assert "platform_rules" in capsys.readouterr().err
+
+
+def test_p30_qoder_lint_nested_shapes(tmp_path, capsys):
+    """嵌套坏形状按门禁错报(退出码 2), 不再裸 AttributeError。"""
+    repo, root = _fixture(tmp_path)
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("repowiki:\n  - a\n", encoding="utf-8")
+    capsys.readouterr()
+    assert _cli(["qoder-plan", "--lint", str(bad), "--repo", repo.path,
+                 "--root", root]) == config.EXIT_GATE
+    assert "必须是映射" in capsys.readouterr().out
+    bad.write_text("documents: ok\nrepowiki:\n  documents: notalist\n",
+                   encoding="utf-8")
+    capsys.readouterr()
+    assert _cli(["qoder-plan", "--lint", str(bad), "--repo", repo.path,
+                 "--root", root]) == config.EXIT_GATE
+    assert "documents 必须是列表" in capsys.readouterr().out
+
+
+def test_p33_layers_non_dict_article(tmp_path):
+    """模型输出的字符串列表条目按问题记账, 不再裸 AttributeError。"""
+    from pwiki_lib import layers
+    ctx = _ctx(*_fixture(tmp_path)[:2])
+    added, problems = layers.apply_layer_result(
+        ctx, {"limits": {}}, {"profile": "standard", "articles": []},
+        '<result>{"articles": ["overview"]}</result>')
+    assert added == []
+    assert any("必须是映射" in p for p in problems), problems
+
+
+def test_p36_emit_truncates_goal(tmp_path):
+    """超限 goal 按 _trunc_bytes 截断发出 —— Qoder 加载器不再中切 CJK。"""
+    from pwiki_lib import planner
+    from pwiki_lib.qoderplan import CAP_GOAL_BYTES
+    from pwiki_lib.yamlite import yaml_load
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    target = next(p for p in plan["pages"] if p.get("kind") == "page")
+    target["objective"] = "目标。" * 6000      # ~36KB, 远超 10K 帽
+    planner.save_plan(ctx, plan)
+    out = os.path.join(root, "qoder-out.yaml")
+    assert _cli(["qoder-plan", "--emit", out, "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    doc = yaml_load(open(out, encoding="utf-8").read())
+    goals = {str(d["title"]): str(d["goal"]) for d in doc["repowiki"]["documents"]}
+    g = goals[str(target["title"])]
+    assert len(g.encode("utf-8")) <= CAP_GOAL_BYTES, "goal 超限仍原样发出"
+
+
+def test_p39_export_force_db_to_file_rejected(tmp_path):
+    """db_to_file 不吃 --force —— 解析后静默丢弃的死开关改为显式拒绝。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    with pytest.raises(SystemExit) as ei:
+        _cli(["export", "--direction", "db_to_file", "--force",
+              "--repo", repo.path, "--root", root])
+    assert ei.value.code == config.EXIT_PRECOND
+
+
+def test_p40_yamlite_colon_keys(tmp_path):
+    """未加引号的冒号键按 YAML 语义成键, 不再静默重塑。"""
+    from pwiki_lib.yamlite import yaml_dump, yaml_load
+    assert yaml_load("go:generate: true") == {"go:generate": True}
+    assert yaml_load("a:b: v") == {"a:b": "v"}
+    assert yaml_load("url: http://x") == {"url": "http://x"}
+    # 往返: 含冒号的键发射侧加引号, 精确回读
+    data = {"go:generate": True, "url": "http://x", "plain": 1}
+    assert yaml_load(yaml_dump(data)) == data
+
+
+def test_p46_yamlite_inf_roundtrip(tmp_path):
+    """非有限 float 与 'inf' 字符串各自精确往返。"""
+    from pwiki_lib.yamlite import yaml_dump, yaml_load
+    assert yaml_load(yaml_dump({"x": float("inf")}))["x"] == float("inf")
+    assert yaml_load(yaml_dump({"y": float("nan")}))["y"] != \
+        yaml_load(yaml_dump({"y": float("nan")}))["y"]   # nan != nan
+    assert yaml_load(yaml_dump({"s": "inf"}))["s"] == "inf"
+
+
+def test_p26_delete_all_clears_meta(tmp_path):
+    """delete --all 连 meta/ 一起清 —— Qoder 导入面不再读幽灵条目。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    meta = os.path.join(root, "zh", "meta")
+    assert os.path.isfile(os.path.join(meta, "repowiki-metadata.json"))
+    assert _cli(["delete", "--all", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    assert not os.path.isdir(meta), "meta/ 索引残留幽灵条目"
+
+
+def test_p47_search_top_zero_returns_empty(tmp_path, capsys):
+    """--top 0 尊重空集请求, 不再强塞一条结果。"""
+    from pwiki_lib.search import cmd_search
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    capsys.readouterr()
+    assert cmd_search(_ns(repo, root, query="服务", top=0,
+                          json=True)) == config.EXIT_OK
+    out_lines = capsys.readouterr().out.splitlines()
+    start = next(i for i, l in enumerate(out_lines) if l.startswith("{"))
+    payload = json.loads("\n".join(out_lines[start:]))
+    assert payload["results"] == [], payload
+
+
+def test_p21_p22_render_plan_md_robust(tmp_path):
+    """骨架页说明整句成行(P21); 空 ordinal 排序容错(P22)。"""
+    from pwiki_lib import themes
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = {"pages": [{"id": "p1", "title": "页一", "parent": "",
+                       "ordinal": None, "kind": "page"},
+                      {"id": "p2", "title": "页二", "parent": "",
+                       "ordinal": 0, "kind": "page"}],
+            "cards": []}
+    work = os.path.join(root, "work")
+    os.makedirs(work, exist_ok=True)
+    with open(os.path.join(work, "themes-report.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump({"check": {"skeleton_scope_pages": ["svc"]}}, fh)
+    out = themes.render_plan_md(ctx, plan)          # P22: 不再 TypeError
+    text = open(out, encoding="utf-8").read()
+    assert "这些页面覆盖占位目录" in text
+    assert "- svc" in text
+    assert not [ln for ln in text.splitlines() if ln.strip() and len(ln) == 1], \
+        "plan.md 仍有单字符行(P21)"
+
+
+def test_p18_plan_cards_dedup_ids_and_titles(tmp_path, monkeypatch):
+    """slug 撞车('@azure/storage' vs 'azure-storage')与 DEP_DISPLAY 撞标题
+    都在 _plan_cards 内消解, 不再阻塞 begin / 打死 plan --themes。"""
+    from collections import Counter
+    from pwiki_lib import themes
+    from pwiki_lib.corpus import Corpus
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    inv = {"manifests": [{"path": "README.md",
+                          "dependencies": {"tauri": "1",
+                                           "@tauri-apps/api": "2",
+                                           "@acme/util": "3",
+                                           "acme-util": "4"}}]}
+    monkeypatch.setattr(themes, "collect_dependencies",
+                        lambda inv_: Counter({"tauri": 1, "@tauri-apps/api": 1,
+                                              "@acme/util": 1,
+                                              "acme-util": 1}))
+    monkeypatch.setattr(themes, "DEP_SCORES", {})
+    monkeypatch.setattr(themes, "ARCH_SHAPING_DEPS",
+                        {"tauri", "@tauri-apps/api", "@acme/util",
+                         "acme-util"})
+    monkeypatch.setattr(themes, "DEP_DISPLAY",
+                        {"tauri": "Tauri", "@tauri-apps/api": "Tauri"})
+    corpus = Corpus(ctx.repo, [{"path": "README.md", "lang": "markdown",
+                                "lines": 3}], {}, set())
+    cards = themes._plan_cards(ctx, inv, corpus, [], "standard")
+    ids = [c["id"] for c in cards]
+    titles = [c["title"] for c in cards]
+    assert len(ids) == len(set(ids)), f"重复卡片 id: {ids}"
+    assert len(titles) == len(set(titles)), f"撞标题: {titles}"
+    assert {"card-acme-util", "card-acme-util-2"} <= set(ids)
+    assert {"Tauri", "Tauri(2)"} <= set(titles)
+
+
+def test_p41_feature_leaf_excludes_test_paths(tmp_path):
+    """feature 叶过滤与全库测试谓词同源(foo_test.go/__tests__ 不再漏进)。"""
+    from pwiki_lib.corpus import match_any
+    from pwiki_lib.themes import P_TEST
+    for p in ("src/api/foo_test.go", "core/foo_test.rs",
+              "src/tests/handler.ts", "src/pages/__tests__/Home.tsx"):
+        assert match_any(p.lower(), P_TEST), p

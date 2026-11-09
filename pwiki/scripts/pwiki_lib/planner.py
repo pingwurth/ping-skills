@@ -618,11 +618,16 @@ def _manifest_paths(inv: dict) -> list:
 
 def _setup_signals(inv: dict) -> bool:
     names = {os.path.basename(p).lower() for p in _manifest_paths(inv)}
-    readme = (inv.get("readme") or {}).get("path", "").lower()
+    rd = inv.get("readme") or {}
+    # P43: 摘录才是探测对象 —— 曾对固定 README 文件名测 'getting'/'quick'
+    # (永假, 第三析取是死代码), scan 提供的摘录从未被看(src-layout 库的
+    # 快速开始页因此被省略, 而探测存在正是为该场景)
+    readme_text = (str(rd.get("excerpt") or "") + " "
+                   + str(rd.get("path") or "")).lower()
     return bool(names & {"makefile", "docker-compose.yml", "docker-compose.yaml",
                          "dockerfile", "package.json", "pom.xml", "go.mod"}
                 or inv.get("entry_points")
-                or any(k in readme for k in ("getting", "quick", "start")))
+                or any(k in readme_text for k in ("getting", "quick", "start")))
 
 
 def _dev_signals(inv: dict) -> bool:
@@ -985,7 +990,10 @@ def cmd_plan(args) -> int:
     if getattr(args, "review", False):
         from . import themes
         themes.render_plan_md(ctx, plan)
-        changed = False   # review 只写 work/, 不动 plan
+        # P27: 不再重置 changed —— 曾把同调用早先的 --sheets/--deps/
+        # --aliases 变更(只在内存)一并丢弃, 评审渲染的计划描述了一个
+        # 从未持久化的状态; review 本身仍只写 work/, 是否存盘由前面的
+        # 变更标志决定
     if changed:
         assign_paths(plan, ctx.locale)
         plan["schema_version"] = max(3, int(plan.get("schema_version") or 2))

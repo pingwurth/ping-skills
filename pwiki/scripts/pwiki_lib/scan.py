@@ -20,7 +20,7 @@ from . import config
 from .config import Ctx, now_iso
 from .util import posix, git
 
-IGNORE_DIRS = {
+IGNORE_DIRS = set(config.DEFAULT_IGNORES) | {
     ".git", ".hg", ".svn", ".idea", ".vscode", ".vs",
     # D20: AI 工具/助手配置目录不是产品源码 —— yudao 验收实跑曾把
     # .opencode/skills(103 md / 24k 行)当成了一个模块
@@ -39,6 +39,9 @@ IGNORE_DIRS = {
     "openwiki", ".terraform", ".serverless", ".docusaurus",
     ".wiki", ".pwiki",
 }
+# P42: 以 config.DEFAULT_IGNORES 为基(曾重打 ~27 项且漏了 Pods/DerivedData
+# —— inventory 的 walk 只认本集合, 而 expand_scope 的快照跟踪另认
+# DEFAULT_IGNORES: iOS 仓库的 Pods 进了 inventory 却永不标 stale)。
 
 # glob 条目(*.egg-info 等)单独筛出: os.walk 过滤是精确名匹配,
 # 混在集合里曾永不命中(pip install -e . 的 pkg/foo.egg-info 整棵被扫)
@@ -228,15 +231,38 @@ def parse_pyproject(path: str) -> dict:
     if m:
         out["version"] = m.group(1)
     section = None
+    in_deps_array = False
     for line in text.splitlines():
         s = line.strip()
+        if in_deps_array:
+            # P16: PEP 621 dependencies 数组可跨行 —— 逐项收引号项
+            m2 = re.match(r'^["\']([^"\'#]+?)["\']\s*,?\s*(#.*)?$', s)
+            if m2:
+                out["dependencies"].append(m2.group(1).strip())
+                continue
+            if s.startswith("]"):
+                in_deps_array = False
+            continue
         if s.startswith("[") and s.endswith("]"):
             section = s
             continue
-        if section in ("[project]", "[tool.poetry.dependencies]", "[tool.uv]") and re.match(r"^[A-Za-z0-9_.-]+\s*=", s):
+        if section == "[project]" and re.match(r"^dependencies\s*=\s*\[", s):
+            # 真依赖只在 PEP 621 数组里 —— 曾把 [project] 的每个标量键
+            # (name/version/requires-python/…)全当依赖, 真依赖整批丢失
+            inline = s.split("=", 1)[1]
+            for m2 in re.finditer(r'["\']([^"\'#]+?)["\']', inline):
+                out["dependencies"].append(m2.group(1).strip())
+            if not inline.rstrip().endswith("]"):
+                in_deps_array = True
+            continue
+        if section in ("[tool.poetry.dependencies]", "[tool.uv]") \
+                and re.match(r'^[A-Za-z0-9_.-]+\s*=\s*["\']', s):
             out["dependencies"].append(s.split("=", 1)[0].strip())
         if section == "[tool.uv.workspace]" and s.startswith("- "):
             out["workspace_members"].append(s[2:].strip().strip("'\""))
+    seen = set()
+    out["dependencies"] = [d for d in out["dependencies"]
+                           if not (d in seen or seen.add(d))]
     return out
 
 

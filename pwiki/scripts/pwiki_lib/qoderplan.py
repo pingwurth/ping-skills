@@ -106,8 +106,11 @@ def _emit(ctx: Ctx, out_path: str) -> int:
             parent = by_id.get(str(p.get("parent")))
             if parent is not None:
                 parent_title = str(parent.get("title") or "").strip()
+        # P36: goal 也过字节帽(_trunc_bytes 不切多字节字符) —— 曾只截
+        # title/note/hints, 超限 goal 仅告警仍原样发出, Qoder 的加载器
+        # 会在 CJK 字符中间硬字节截断(乱码)
         doc = {"title": _trunc_bytes(title, CAP_TITLE_BYTES),
-               "goal": goal}
+               "goal": _trunc_bytes(goal, CAP_GOAL_BYTES)}
         if parent_title and parent_title != title:
             # parent 必须写**截断后**的父标题 —— loader 拿修剪后的 title
             # 回溯匹配, 全量父标题对超限父档永不命中 → 子档静默降级顶层
@@ -260,16 +263,32 @@ def _lint(ctx: Ctx, path: str) -> int:
         # yamlite 放行列表顶层的文档 —— 这里 .get 会裸 AttributeError
         print(f"error: YAML 顶层必须是映射, 得到 {type(doc).__name__}")
         return config.EXIT_GATE
+    # P30: 嵌套形状守卫(与顶层守卫同类) —— repowiki:/knowledgecard: 非映射
+    # 或 documents:/notes: 非列表曾裸 AttributeError traceback(退出码 1,
+    # 非契约 2); lint 的本职就是验形状, 坏形状按门禁错报
+    for key in ("repowiki", "knowledgecard"):
+        v = doc.get(key)
+        if v is not None and not isinstance(v, dict):
+            print(f"error: {key} 必须是映射, 得到 {type(v).__name__}")
+            return config.EXIT_GATE
+    rw = doc.get("repowiki") or {}
+    kc = doc.get("knowledgecard") or {}
+    for name, v in (("repowiki.documents", rw.get("documents")),
+                    ("repowiki.notes", rw.get("notes")),
+                    ("knowledgecard.notes", kc.get("notes"))):
+        if v is not None and not isinstance(v, list):
+            print(f"error: {name} 必须是列表, 得到 {type(v).__name__}")
+            return config.EXIT_GATE
     version = doc.get("version")
     if version not in (0, 1):
         info(f"warn: version {version!r} 非 0/1 — 按警告处理后按 1 继续")
-    template = str(((doc.get("repowiki") or {}).get("template")) or "")
+    template = str(rw.get("template") or "")
     if template and template not in PRESET_TEMPLATES:
         info(f"warn: repowiki.template {template!r} 不是预设名"
              f"({PRESET_TEMPLATES}) — 被忽略, 全局模板置空")
-    docs = (doc.get("repowiki") or {}).get("documents") or []
-    notes = (doc.get("repowiki") or {}).get("notes") or []
-    knotes = (doc.get("knowledgecard") or {}).get("notes") or []
+    docs = rw.get("documents") or []
+    notes = rw.get("notes") or []
+    knotes = kc.get("notes") or []
     warns = _check_caps(docs, notes) + _check_caps([], knotes)
     for w in warns:
         print(f"warn: {w}")

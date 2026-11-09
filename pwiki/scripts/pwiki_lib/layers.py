@@ -210,6 +210,12 @@ def apply_layer_result(ctx, plan: dict, state: dict, text: str,
         allowed = {str(m.get("path") or m.get("id") or "").rstrip("/")
                    for m in plan_modules(plan)} | {"/"}
     for i, a in enumerate(arts):
+        # P33: 模型输出字符串列表/截断 JSON 时不再裸 AttributeError
+        # ('str' 对象无属性 'get') 打穿退出码契约 —— 按门禁错记问题项
+        if not isinstance(a, dict):
+            problems.append(f"article {i}: 条目必须是映射"
+                            f"(得到 {type(a).__name__})")
+            continue
         slug = str(a.get("slug") or "").strip()
         title = str(a.get("title") or "").strip()
         atype = str(a.get("type") or "").strip()

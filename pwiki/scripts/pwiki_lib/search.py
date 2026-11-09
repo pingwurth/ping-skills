@@ -101,7 +101,10 @@ def cmd_search(args) -> int:
             score += 5.0
         results.append((score, d))
     results.sort(key=lambda x: -x[0])
-    top = results[: max(1, args.top)]
+    # P47: 尊重调用者的空集请求 —— max(1, ·) 曾把 --top 0/负值静默翻成
+    # "至少一条", 编排方对被要求抑制的页面执行了动作
+    n_top = args.top if isinstance(args.top, int) else 10
+    top = results[:n_top] if n_top > 0 else []
 
     if args.json:
         payload = []
