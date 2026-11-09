@@ -181,7 +181,10 @@ def _strip_injected(content: str) -> str:
 
 def _d19_guard(ctx: Ctx, yes: bool) -> None:
     """D19: 可疑的新根(一次要造 >1 级缺失目录)停下来确认 —— `clalude`
-    typo 实跑曾凭空调出一棵 wiki 树。合法新根的父目录已存在。"""
+    typo 实跑曾凭空调出一棵 wiki 树。合法新根的目录骨架由 init/begin/
+    update 落位(Ctx.ensure_publish_tree, P1): 全新 workspace 的首次 finish
+    不再需要 --yes; 守卫只对骨架之外的多级缺失(根漂移/手删目录/typo)
+    触发, 确认用 --yes。"""
     for sub in (os.path.join(ctx.locale, "content"), os.path.join("knowledge", ctx.locale)):
         target = os.path.join(ctx.root, sub)
         if os.path.exists(target):
@@ -728,12 +731,15 @@ def cmd_write(args) -> int:
     # 验收, 否则 write 放行的内容被自家 validator 拒), 并把行盖章刷新成
     # 生效值, 后续 finish 的逐行合成不再翻转
     try:
-        from .planner import load_plan
+        from .planner import load_plan, mod_titles_for, plan_modules
         plan = load_plan(ctx)
     except SystemExit:
         plan = None
     style = str((plan or {}).get("style") or p["style"] or ctx.style)
-    errs, warns = gates.gate_item(content, p, ctx.repo, style, phase="lining")
+    # P32: mod_titles 与 submit/finish 同源 —— strict 升级层不再缺输入
+    mod_titles = mod_titles_for(p, plan_modules(plan)) if plan else []
+    errs, warns = gates.gate_item(content, p, ctx.repo, style,
+                                  phase="lining", mod_titles=mod_titles)
     for w in warns:
         info(f"warn: {w}")
     # 差一引用是机械可修(compose 落盘时钳位) —— 与 finish 同口径排除,
@@ -747,11 +753,18 @@ def cmd_write(args) -> int:
         for e in errs:
             print(f"  rejected: {e}", file=sys.stderr)
         return config.EXIT_GATE
-    ctx.db.save_page_content(pid, args.page_id, content)
-    if str(p["style"] or "") != style:
-        ctx.db.conn.execute(
-            "UPDATE page SET style=? WHERE partition_id=? AND page_id=?",
-            (style, pid, args.page_id))
+    # P65: 保存与重盖章同事务(两句裸自动提交之间中断会留"新内容+旧样式
+    # 戳", 下次 finish 按陈旧风格组合该页); UPDATE 走 db.set_page_style
+    # 单一入口(与 snapshot 的重盖章同源)
+    ctx.db.begin()
+    try:
+        ctx.db.save_page_content(pid, args.page_id, content)
+        if str(p["style"] or "") != style:
+            ctx.db.set_page_style(pid, args.page_id, style)
+        ctx.db.commit()
+    except Exception:
+        ctx.db.rollback()
+        raise
     target = os.path.join(ctx.root, p["path"])
     os.makedirs(os.path.dirname(target), exist_ok=True)
     all_paths = ctx.db.published_paths(pid)
@@ -840,8 +853,14 @@ def cmd_export(args) -> int:
                     or (ctx.db.last_run(pid) or {"style": ""})["style"]
                     or ctx.style)
         for p in pages:
+            # P2: 每行按自己的盖章风格渲染(与 publish_run 逐行合成、
+            # file_to_db 的剥除判定同口径) —— 曾整库用单一 plan/run 级
+            # 风格重渲染: 行戳 deep 的页被按 concise 注入 TOC/cite, 随后
+            # file_to_db 按行戳(deep→不剥)把注入层永久吸收进 page.content
+            # (违反"注入物只存在于导出文件, 永不写回 page.content"防线)
+            row_style = str(p["style"] or style)
             target = os.path.join(ctx.root, p["path"])
-            exported, _ = compose_export_content(ctx, p, style, all_paths,
+            exported, _ = compose_export_content(ctx, p, row_style, all_paths,
                                                  plan=plan)
             atomic_write(target, exported)
         print(f"db_to_file: 重写 {len(pages)} 个文件(崩溃自愈路径)")

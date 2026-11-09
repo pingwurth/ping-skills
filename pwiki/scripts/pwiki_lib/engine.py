@@ -51,6 +51,7 @@ def cmd_init(args) -> int:
     }
     import json as _json
     os.makedirs(ctx.root, exist_ok=True)
+    ctx.ensure_publish_tree()   # P1: 骨架随 init 落位, 首次 finish 不再要 --yes
     with open(os.path.join(ctx.root, config.CONFIG_NAME), "w",
               encoding="utf-8") as fh:
         _json.dump(cfg, fh, ensure_ascii=False, indent=2)
@@ -87,6 +88,7 @@ def cmd_begin(args) -> int:
     pages, cards, modules = plan_pages(plan), plan_cards(plan), plan_modules(plan)
     modules_by_id = {m.get("id"): m for m in modules}
     ph = plan_hash(pages, cards)
+    ctx.ensure_publish_tree()   # P1: 与 init 同源落骨架(begin/update 皆然)
     active = ctx.db.active_run(part["id"])
     if active and not args.force:
         s = _jobs_summary(ctx.db, active["id"])
@@ -460,7 +462,7 @@ def _orphan_save(ctx: Ctx, page_id: str, content: str) -> str:
 
 def cmd_submit(args) -> int:
     from . import gates
-    from .planner import load_plan, plan_modules
+    from .planner import load_plan, mod_titles_for, plan_modules
 
     ctx = Ctx(args).load()
     part = ctx.partition()
@@ -527,22 +529,21 @@ def cmd_submit(args) -> int:
             f"稿件已保存 {saved}, 重新 `pwiki next` 取新令牌",
             config.EXIT_PRECOND)
 
-    style = job["style"] or str(run["style"] or ctx.style)
+    # P31: 有效样式链与 finish 同序(job > run > plan > ctx) —— 曾缺 plan
+    # 层: 未盖章行 submit 按 ctx、finish 按 plan 各判各的, 双重门禁互斥。
+    # 排队路径都盖章, 只有手编/旧库行会走到 plan 兜底(惰性解析)
+    style = str(job["style"] or run["style"] or "")
+    if not style:
+        try:
+            style = str(load_plan(ctx).get("style") or ctx.style)
+        except SystemExit:
+            style = str(ctx.style)
     mod_titles = []
     # 计划 YAML 只为解模块标题而解析 —— 卡片(12-60 张/run)从不带
     # module, 白付 ~24-80ms/张; 无模块的 job 整段跳过
     if _json_list(job["modules"]) or job["module"]:
         try:
-            plan = load_plan(ctx)
-            wanted = {str(x).rstrip("/") for x in _json_list(job["modules"])}
-            if job["module"]:
-                wanted.add(str(job["module"]))
-            for m in plan_modules(plan):
-                keys = {str(m.get("id") or ""),
-                        str(m.get("path") or "").rstrip("/"),
-                        str(m.get("dir") or "").rstrip("/")}
-                if keys & wanted and m.get("title"):
-                    mod_titles.append(str(m["title"]))
+            mod_titles = mod_titles_for(job, plan_modules(load_plan(ctx)))
         except SystemExit:
             pass
 
@@ -1002,15 +1003,21 @@ def cmd_finish(args) -> int:
     # LINING: 对每个 completed job 按风格跑硬门禁。jobs 单读直传 publish
     # (SELECT * 含稿体 blob —— finish 曾在数秒内整队读两遍)。
     # 循环在 try 里: 门禁层抛非 OSError 异常曾裸奔, run 卡死 LINING
+    from .planner import mod_titles_for
+    all_mods = plan_modules(plan)
     lining_failed = []
     all_jobs = ctx.db.jobs(run["id"])
     try:
         for job in all_jobs:
             if job["state"] != "completed" or not job["content"]:
                 continue
+            # P32: mod_titles 与 submit 同源 —— 曾只有 submit 传, 模块提及
+            # 检查的 strict 升级层是死代码, 规则在本应强制执行的 LINING
+            # 从不生效(页发布而模块分配静默未兑现)
             errs, _warns = gates.gate_item(
                 job["content"], job, ctx.repo,
-                str(job["style"] or fallback_style), phase="lining")
+                str(job["style"] or fallback_style), phase="lining",
+                mod_titles=mod_titles_for(job, all_mods))
             errs = [e for e in errs
                     if not gates.is_auto_fixable(e)]   # 发布层钳位(见 publish)
             if args.lenient and not args.force:

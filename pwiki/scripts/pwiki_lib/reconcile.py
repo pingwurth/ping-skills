@@ -108,7 +108,11 @@ def _move_published_file(ctx: Ctx, plan: dict, pub, content: str,
     all_paths = set(all_paths)
     all_paths.discard(old_path)
     all_paths.add(new_path)
-    style = str((plan or {}).get("style") or ctx.style)
+    # P3: 落盘按行自己的盖章风格(与 publish_run 逐行合成、file_to_db 的
+    # 剥除判定同口径) —— 曾用 plan 级风格: deep 行撞 concise 计划时文件被
+    # 注入 TOC 而行戳仍 deep, file_to_db 由此把注入层吸收进 page.content
+    # (与 export db_to_file 同族; 行戳在此不变更, 保持与 DB 内容一致)
+    style = str(pub["style"] or (plan or {}).get("style") or ctx.style)
     exported, _ = publish.compose_export_content(ctx, row, style, all_paths,
                                                  plan=plan)
     new_full = os.path.join(ctx.root, new_path)

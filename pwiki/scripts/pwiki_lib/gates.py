@@ -441,10 +441,15 @@ def gate_item(content: str, item, repo: str, style: str,
             warnings.append("sources/diagram: " + msg)
 
     # --- 指派模块须在正文出现 ---
+    # 严重度走预设键(r5 P32): deep 的模块锚定架构页升错误(strict 时),
+    # concise 的种子页常挂根模块(标题即仓库名, 全文不必复述)保持警告
     for name in (mod_titles or []):
         if name and name not in content:
-            (errors if strict else warnings).append(
-                f"shape/module: 指派模块 {name!r} 未在正文出现")
+            msg = f"shape/module: 指派模块 {name!r} 未在正文出现"
+            if p.get("module_mention") == "error":
+                (errors if strict else warnings).append(msg)
+            else:
+                warnings.append(msg)
     return errors, warnings
 
 
@@ -628,8 +633,12 @@ def strip_injected_layers(content: str) -> str:
 
 def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     """已发布/计划页面树的内容验证。返回 (report, exit_code)。"""
-    from .planner import (card_path_for, modules_by_id, page_path_for,
-                          plan_cards, plan_pages)
+    from .planner import (card_path_for, mod_titles_for, modules_by_id,
+                          page_path_for, plan_cards, plan_modules,
+                          plan_pages)
+    # P32: 模块提及检查与 submit/finish 同源(曾 validate 从不传
+    # mod_titles, strict 升级层死代码) —— 计划模块表一次取齐
+    all_mods = plan_modules(plan)
     errors_total, warnings_total = [], []
     pages = plan_pages(plan)
     cards = plan_cards(plan)
@@ -649,6 +658,8 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     # 内链目标集提前算好(one 的 --fix 重合成与末尾内链 pass 共用)
     all_paths = set(page_paths.values()) | set(card_paths.values())
 
+    # P32: 模块提及检查与 submit/finish 同源(曾 validate 从不传
+    # mod_titles, strict 升级层死代码) —— 计划模块表一次取齐
     def one(item, path, kind_hint=""):
         nonlocal fix
         full = os.path.join(ctx.root, path)
@@ -680,7 +691,9 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         item2.setdefault("kind", kind_hint or "page")
         if item2.get("kind") == "page" and export_injects(ctx, style, plan):
             content = strip_injected_layers(content)
-        errs, warns = gate_item(content, item2, ctx.repo, style, phase="lining")
+        errs, warns = gate_item(content, item2, ctx.repo, style,
+                                phase="lining",
+                                mod_titles=mod_titles_for(item, all_mods))
         if fix:
             # 顺序: 先 D23 钳位再 D18 收割 —— 曾先收割, 未钳位的行号被抄进
             # 新的 **章节来源** 块, 钳位守卫(a<=n)永远够不着, --fix 不收敛
@@ -700,7 +713,8 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
                 # 复查保持原严重度(lining) —— 曾降回 submit 口径, 只要含
                 # 一处可机械修复的引用, 其余风格错误全部跟着降成警告
                 errs, warns2 = gate_item(content3, item2, ctx.repo, style,
-                                         phase="lining")
+                                         phase="lining",
+                                         mod_titles=mod_titles_for(item, all_mods))
                 warns = warns + warns2
         entry = {"path": path, "errors": errs, "warnings": warns}
         report_pages.append(entry)

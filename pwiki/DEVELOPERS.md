@@ -45,6 +45,12 @@ D1 模块覆盖断言(modules.decompose 退出非零) · D2 services 包(≥3 �
 · D15 引用分档(styles.cites_band) · D16 知识层引用(styles→gates)
 · D17 渲染先于校验(publish 先写 _module.yaml 再 validate --content)
 · D18 机械章节来源修复(gates.fix_section_sources) · D19 typo 守卫(publish._d19_guard)
+  - r5 批②样式戳口径: 有效样式链全站统一 job/行戳 > run > plan > ctx
+    (submit/finish 同序; export db_to_file、D22 改名落盘、validate、update
+    漂移复检一律按行自己的盖章渲染/复检 —— 注入侧与剥除侧永不分叉);
+    模块提及检查严重度走预设键 module_mention(deep=error, concise=warn);
+    发布骨架由 init/begin/update 落位(Ctx.ensure_publish_tree), D19 只剩
+    漂移检测职责, 全新 workspace 首次 finish 无需 --yes。
 · D20 AI 目录非产品源(scan.IGNORE_DIRS) · D21 pack 锚定(themes, 框架例外=aliases 目标)
 · D22 title_check(writer 报告→reconcile) · D23 行数口径+差一钳位(gates)
 · D24 arch-notes 须验证(digest 证据规则节)。

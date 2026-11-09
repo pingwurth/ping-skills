@@ -31,12 +31,20 @@ def _ns(repo, root, **kw):
 
 def _drive_to_lining(tmp_path, style="concise"):
     """全生命周期推到 finish 的 D19 拒绝点 —— run 停在 LINING(既测 P7 的
-    PRECOND 放行契约, 也给 P8/P15 提供"LINING 窗口"现场)。"""
+    PRECOND 放行契约, 也给 P8/P15 提供"LINING 窗口"现场)。
+
+    P1 修复后 init/begin 会落发布骨架, 全新 workspace 不再触发 D19 ——
+    这里拆掉骨架模拟根漂移(目录被手删/typo 的现场)。"""
+    import shutil
     from pwiki_lib import engine
     repo, root = _fixture(tmp_path, style=style)
     assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
         config.EXIT_OK
     _write_all_jobs(repo, root, style=style)
+    # 拆掉整个 locale 目录(两级缺失)才触发 D19; 只拆 content 只剩一级
+    import contextlib
+    with contextlib.suppress(OSError):
+        shutil.rmtree(os.path.join(root, "zh"))
     with pytest.raises(SystemExit) as ei:
         _cli(["finish", "--repo", repo.path, "--root", root])   # 无 --yes
     assert ei.value.code == config.EXIT_PRECOND
@@ -344,3 +352,188 @@ def test_p37_rename_db_mutations_rollback_together(tmp_path, monkeypatch):
     assert cmd_reconcile(_ns(repo, root, all=True)) == config.EXIT_OK
     row = ctx.db.published_page(pid, target["page_id"])
     assert row["title"] == before[0] + "改名"
+
+
+# =========================================================================== #
+# 批次②: 样式戳/导出双渲染器(P1/P2/P3/P31/P32/P65)
+# =========================================================================== #
+
+def _publish_deep(tmp_path):
+    """deep 全生命周期发布(短稿过不了 deep 分档 —— --force 全放, 同
+    test_full_lifecycle_deep 口径)。返回 (repo, root, ctx, pid)。"""
+    repo, root = _fixture(tmp_path, style="deep")
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root, style="deep")
+    assert _cli(["finish", "--force", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    return repo, root, ctx, ctx.partition()["id"]
+
+
+def test_p01_fresh_finish_needs_no_yes(tmp_path):
+    """init/begin 落发布骨架后, 全新 workspace 首次 finish 无需 --yes。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK      # 无 --yes(D19 只对骨架外漂移触发)
+    ctx = _ctx(repo, root)
+    assert ctx.db.active_run(ctx.partition()["id"]) is None
+
+
+def test_p02_db_to_file_respects_row_stamps(tmp_path):
+    """deep 行撞 concise 计划: db_to_file 按行戳渲染(不注入), 注入层不
+    被 file_to_db 吸收进 page.content(content_hash 不变)。"""
+    from pwiki_lib import planner
+    repo, root, ctx, pid = _publish_deep(tmp_path)
+    deep = next(p for p in ctx.db.published_pages(pid)
+                if p["kind"] == "page" and p["style"] == "deep")
+    h0 = deep["content_hash"]
+    plan = planner.load_plan(ctx)
+    plan["style"] = "concise"
+    planner.save_plan(ctx, plan)
+    assert _cli(["export", "--direction", "db_to_file", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    with open(os.path.join(root, deep["path"]), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "## 目录" not in text, "deep 行被按 concise 注入了编号目录"
+    assert _cli(["export", "--direction", "file_to_db", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    after = ctx.db.published_page(pid, deep["page_id"])
+    assert after["content_hash"] == h0, "注入层被吸收进 page.content"
+
+
+def test_p03_rename_composes_row_style(tmp_path):
+    """D22 改名落盘按行自己的盖章风格: deep 行撞 concise 计划不注入
+    目录, 行戳保持 deep(file_to_db 剥除判定与文件一致)。"""
+    from pwiki_lib import planner
+    from pwiki_lib.reconcile import cmd_reconcile
+    repo, root, ctx, pid = _publish_deep(tmp_path)
+    deep = next(p for p in ctx.db.published_pages(pid)
+                if p["kind"] == "page" and p["style"] == "deep")
+    plan = planner.load_plan(ctx)
+    plan["style"] = "concise"
+    planner.save_plan(ctx, plan)
+    ctx.db.reconcile_add(pid, "title_mismatch",
+                         {"page_id": deep["page_id"],
+                          "proposed": str(deep["title"]) + "改名"})
+    assert cmd_reconcile(_ns(repo, root, all=True)) == config.EXIT_OK
+    row = ctx.db.published_page(pid, deep["page_id"])
+    assert row["style"] == "deep", "改名把行戳翻成了 plan 级风格"
+    with open(os.path.join(root, row["path"]), encoding="utf-8") as fh:
+        text = fh.read()
+    assert "## 目录" not in text, "改名文件被按 concise 注入了目录"
+
+
+def test_p31_unstamped_submit_follows_plan(tmp_path, capsys):
+    """未盖章行的有效样式链与 finish 同序(job>run>plan>ctx)。"""
+    from pwiki_lib import engine, planner
+    repo, root = _fixture(tmp_path)          # ctx.style=concise
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    plan = planner.load_plan(ctx)
+    plan["style"] = "deep"                    # 与 ctx 相反
+    planner.save_plan(ctx, plan)
+    # 模拟手编/旧库的未盖章行: job 与 run 的 style 都抹掉
+    ctx.db.conn.execute("UPDATE run SET style='' WHERE id=?", (run["id"],))
+    claimed = ctx.db.claim_jobs(run["id"], count=9)
+    job = next(j for j in claimed if j["kind"] == "page")
+    ctx.db.conn.execute(
+        "UPDATE page_job SET style='' WHERE run_id=? AND page_id=?",
+        (run["id"], job["page_id"]))
+    capsys.readouterr()
+    assert engine.cmd_submit(_ns(
+        repo, root, page_id=job["page_id"], file=_write_job_file(root, job),
+        summary="", key_topics="", report=None, lenient=False, force=False,
+        claim=job["claim_token"])) == config.EXIT_OK
+    assert "style=deep" in capsys.readouterr().out, \
+        "submit 仍按 ctx(concise)判样式 —— 与 finish 的 plan 层分叉"
+
+
+def test_p32_module_mention_enforced_at_lining(tmp_path, capsys, monkeypatch):
+    """指派模块未提及: 严重度走预设键 —— deep 的 LINING 升错误(曾只有
+    submit 传 mod_titles, strict 升级层是死代码), concise 保持警告(种子页
+    常挂根模块, 不强迫复述仓库名); finish 布线把 mod_titles 传进门禁。"""
+    from pwiki_lib import gates
+    ctx = _ctx(*_fixture(tmp_path)[:2])
+    # 深度页措辞(不含模块名; 带一条真实引用避开 citation/none 硬错)
+    content = ("# 页\n\n## 概述\n\n正文。\n\n"
+               "- [README.md:1](file://README.md#L1-L1)\n")
+    item = {"kind": "page", "title": "页", "modules": '["services"]'}
+    # submit 阶段恒为警告
+    errs, warns = gates.gate_item(content, item, ctx.repo, "deep",
+                                  phase="submit", mod_titles=["后端服务"])
+    assert not errs and any("后端服务" in w for w in warns)
+    # LINING 按 preset 分档: deep=error, concise=warn
+    errs, _ = gates.gate_item(content, item, ctx.repo, "deep",
+                              phase="lining", mod_titles=["后端服务"])
+    assert any("后端服务" in e for e in errs), "deep 的 strict 升级层未生效"
+    errs2, warns2 = gates.gate_item(content, item, ctx.repo, "concise",
+                                    phase="lining", mod_titles=["后端服务"])
+    assert not errs2 and any("后端服务" in w for w in warns2)
+
+    # finish 布线: LINING 循环确实把 mod_titles 喂给了门禁
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    seen = []
+    orig = gates.gate_item
+
+    def spy(content, item, repo_, style, phase="submit", mod_titles=None, **kw):
+        seen.append((phase, mod_titles))
+        return orig(content, item, repo_, style, phase=phase,
+                    mod_titles=mod_titles, **kw)
+
+    monkeypatch.setattr(gates, "gate_item", spy)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    lining_calls = [m for ph, m in seen if ph == "lining"]
+    assert lining_calls and any(lining_calls), \
+        "finish 的 LINING 门禁没传 mod_titles(strict 层无输入)"
+
+
+def test_p65_write_save_and_restyle_atomic(tmp_path, monkeypatch):
+    """write 的保存与重盖章同事务: 中途崩溃不留"新内容+旧样式戳"。"""
+    from pwiki_lib import planner
+    from pwiki_lib.db import WikiDB
+    from pwiki_lib.publish import cmd_write
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    target = next(p for p in ctx.db.published_pages(pid)
+                  if p["kind"] == "page")
+    # 计划切 deep → write 按新口径验收并把行重盖章(触发两段写)
+    plan = planner.load_plan(ctx)
+    plan["style"] = "deep"
+    planner.save_plan(ctx, plan)
+    new_file = _write_job_file(root, target)
+    with open(new_file, "a", encoding="utf-8") as fh:
+        fh.write("\n追加一段, 内容与原稿不同。\n")
+
+    def boom(self, *a, **k):
+        raise RuntimeError("crash after save")
+
+    monkeypatch.setattr(WikiDB, "set_page_style", boom)
+    with pytest.raises(RuntimeError, match="crash after save"):
+        cmd_write(_ns(repo, root, page_id=target["page_id"], file=new_file,
+                      lenient=False, force=True))
+    row = ctx.db.published_page(pid, target["page_id"])
+    assert row["style"] == "concise", "重盖章前崩溃, 行戳已被单独改写"
+    assert "追加一段" not in row["content"], "内容保存未随回滚撤销"
+    assert not ctx.db.conn.in_transaction
+    monkeypatch.undo()
+    assert cmd_write(_ns(repo, root, page_id=target["page_id"],
+                         file=new_file, lenient=False, force=True)) == \
+        config.EXIT_OK
+    row = ctx.db.published_page(pid, target["page_id"])
+    assert row["style"] == "deep" and "追加一段" in row["content"]

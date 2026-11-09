@@ -28,6 +28,9 @@ STYLE_PRESETS = {
         "size_hard": False,            # 尺寸类只在 LINING 且此键为真时升错误
         "section_sources": "warn",     # 章节来源缺失 = 警告
         "diagram_sources": "warn",
+        # 指派模块未提及: concise 的种子页常挂根模块(标题是仓库名), 全文
+        # 不必复述 —— 警告即可; deep 的模块锚定架构页按模块写, 升错误
+        "module_mention": "warn",
         "knowledge_citations": {"card": 0, "sheet": 0},   # 证据走 source_files
         "sheets": "short",             # 1-3 句, 无链接无图
         "export": "legacy",            # 注入 <cite> + ## 目录(幂等不落库)
@@ -49,6 +52,7 @@ STYLE_PRESETS = {
         "size_hard": True,             # 尺寸类 LINING 硬错(deep 口径)
         "section_sources": "error",    # 章节来源缺失 = 错误
         "diagram_sources": "error",
+        "module_mention": "error",     # 模块锚定架构页须点名所属模块(r5 P32)
         "knowledge_citations": {"card": 3, "sheet": 1},   # D16 错误级
         "sheets": "full",
         "export": "as-written",        # writer 自带 cite 块; 门禁查块==正文集合

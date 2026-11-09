@@ -54,6 +54,30 @@ def load_plan(ctx: Ctx) -> dict:
     return plan
 
 
+def mod_titles_for(item, modules_list) -> list:
+    """行/计划项 → 模块标题集(gates 模块提及检查的输入)。
+
+    P32: submit/finish/validate --content/write/update 五处同源 —— 曾只有
+    submit 传 mod_titles, gates 的 strict 升级层(`errors if strict`)是死
+    代码, 模块分配规则在 LINING 从不强制。item 兼容 dict(计划项)与
+    sqlite3.Row(job/page 行, 走 gates.rowget)。"""
+    from .gates import rowget
+    from .util import json_list
+    wanted = {str(x).rstrip("/")
+              for x in json_list(rowget(item, "modules", None))}
+    single = rowget(item, "module", None)
+    if single:
+        wanted.add(str(single))
+    titles = []
+    for m in modules_list or []:
+        keys = {str(m.get("id") or ""),
+                str(m.get("path") or "").rstrip("/"),
+                str(m.get("dir") or "").rstrip("/")}
+        if keys & wanted and m.get("title"):
+            titles.append(str(m["title"]))
+    return titles
+
+
 def save_plan(ctx: Ctx, plan: dict) -> None:
     """落盘(v3 头部注释 + 主体); 调用方负责"不覆盖手工编辑"的合并语义。
 

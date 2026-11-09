@@ -147,6 +147,7 @@ def refresh_baseline_for(ctx: Ctx, page_ids: list) -> None:
 def cmd_update(args) -> int:
     ctx = Ctx(args).load()
     part = ctx.partition()
+    ctx.ensure_publish_tree()   # P1: 与 init/begin 同源落发布骨架
     if not part["published_snapshot_id"]:
         die("还没有已发布 wiki — 先跑全量(`pwiki begin`)", config.EXIT_PRECOND)
     if ctx.db.active_run(part["id"]):
@@ -312,6 +313,8 @@ def cmd_update(args) -> int:
     style_stale = []
     if style_drift:
         from . import gates
+        from .planner import mod_titles_for   # plan_modules 已在模块级导入
+        drift_mods = plan_modules(plan)
         for pub in published.values():
             # 卡片也按风格分档(concise 0 行级 / deep ≥3)—— 曾按字面元组
             # 跳过, concise→deep 切换后旧卡永不再排, validate --content
@@ -321,7 +324,8 @@ def cmd_update(args) -> int:
             if pub["style"] == plan_style:
                 continue
             errs, _ = gates.gate_item(pub["content"], pub, ctx.repo,
-                                      plan_style, phase="lining")
+                                      plan_style, phase="lining",
+                                      mod_titles=mod_titles_for(pub, drift_mods))
             errs = [e for e in errs if not gates.is_auto_fixable(e)]
             if errs:
                 item = next((x for x in pages + cards

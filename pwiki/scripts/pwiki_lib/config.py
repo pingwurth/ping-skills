@@ -319,3 +319,12 @@ class Ctx:
 
     def meta_dir(self) -> str:
         return os.path.join(self.root, self.locale, "meta")
+
+    def ensure_publish_tree(self) -> None:
+        """发布根目录骨架落位(P1): init/begin/update 早期创建 content/
+        knowledge/meta 三目录 —— D19 守卫只对"骨架之外的多级缺失"(根
+        漂移/typo)触发。曾无任何生命周期步骤创建 <locale>/content, 全新
+        workspace 的首次 finish 必须用未写入文档的 --yes, 否则退出码 3
+        卡 LINING。幂等; 只读命令不调用(不物化 workspace)。"""
+        for d in (self.content_dir(), self.knowledge_dir(), self.meta_dir()):
+            os.makedirs(d, exist_ok=True)

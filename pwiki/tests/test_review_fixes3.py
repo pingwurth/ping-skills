@@ -902,21 +902,31 @@ def test_p2_39_style_drift_requeues_cards(tmp_path):
 
 
 def test_p2_40_db_to_file_uses_plan_style(tmp_path):
-    """#40: 崩溃自愈渲染曾按 last_run 风格 —— plan 改风格后一次自愈把
-    整库渲染回旧风格。"""
+    """#40(r5 P2 收敛): 崩溃自愈渲染按**每行盖章风格**(与 publish_run
+    逐行合成、file_to_db 剥除判定同口径) —— 行戳是行的真值; plan 改风格
+    由 update 的漂移复检重盖章后再渲染, 自愈路径不把整库翻成行还没过检
+    的风格(曾按 last_run 渲染 + 曾按 plan 渲染, 都与逐行戳分叉)。"""
     from pwiki_lib import planner
     repo, root = _published_custom(tmp_path)
     ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
     pay_file = os.path.join(root, "zh", "content", "支付.md")
     assert "<cite>" in open(pay_file, encoding="utf-8").read(), \
         "前置: concise 发布文件含注入 cite"
     plan = planner.load_plan(ctx)
     plan["style"] = "deep"
     planner.save_plan(ctx, plan)
+    # 行戳仍是 concise → 自愈渲染保持注入(与 finish 的逐行合成逐字节同)
     assert _cli(["export", "--direction", "db_to_file",
                  "--repo", repo.path, "--root", root]) == config.EXIT_OK
     text = open(pay_file, encoding="utf-8").read()
-    assert "<cite>" not in text, "db_to_file 按旧 run 风格重注入了 cite"
+    assert "<cite>" in text, "行戳 concise 的页被按 plan(deep) 漏注 cite"
+    # 行被重盖章为 deep(update 漂移复检过检后的口径) → 自愈不再注入
+    ctx.db.set_page_style(pid, "pay", "deep")
+    assert _cli(["export", "--direction", "db_to_file",
+                 "--repo", repo.path, "--root", root]) == config.EXIT_OK
+    text = open(pay_file, encoding="utf-8").read()
+    assert "<cite>" not in text, "deep 行戳仍被注入 cite"
 
 
 def test_p2_41_spaced_path_citations(tmp_path):

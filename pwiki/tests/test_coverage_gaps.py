@@ -279,8 +279,10 @@ def test_bug15_orphan_module_yaml_pruned_on_republish(tmp_path):
 
 
 def test_d19_guard_blocks_deep_missing_root_without_yes(tmp_path):
-    """D19: 发布到需一次造 >1 级缺失目录的新根, 不加 --yes 即拒
-    (exit 3, 且先于任何建树); run 留在 LINING 可恢复, --yes 放行。"""
+    """D19: 发布根出现骨架之外的多级缺失(locale 目录被手删/根漂移),
+    不加 --yes 即拒(exit 3, 且先于任何建树); run 留在 LINING 可恢复,
+    --yes 放行。r5 P1 后 init/begin 落发布骨架 —— 全新 workspace 的首次
+    finish 不再触发 D19, 守卫只剩漂移检测职责。"""
     repo, root = _fixture(tmp_path, style="concise")
     nested_parent = tmp_path / "deep" / "nest"     # 两级目录都不存在
     nested_parent.mkdir(parents=True)
@@ -289,6 +291,8 @@ def test_d19_guard_blocks_deep_missing_root_without_yes(tmp_path):
     root = nested_root
     assert _cli(["begin", "--repo", repo.path, "--root", root]) == config.EXIT_OK
     _write_all_jobs(repo, root, style="concise")
+    # 模拟漂移: begin 落好的 locale 骨架被手删(content+zh 两级缺失)
+    shutil.rmtree(os.path.join(root, "zh"))
     with pytest.raises(SystemExit) as ei:
         _cli(["finish", "--repo", repo.path, "--root", root])
     assert ei.value.code == config.EXIT_PRECOND
