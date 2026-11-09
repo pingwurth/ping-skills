@@ -573,6 +573,16 @@ class WikiDB:
         claimed = []
         self.begin()
         try:
+            # 事务内复查 run 仍处活动态(同胞 create_run_guarded /
+            # complete_job_guarded 都在事务内复查, 本方法曾漏): cmd_next
+            # 读到活动 run 后、本事务拿到写锁前, 并发 cancel 可已置
+            # CANCELLED 并释放全部认领 —— 无状态谓词时照样向死 run 认领,
+            # 留下永久 processing 行(无任何清理路径再触达它)
+            _run = self.conn.execute("SELECT state FROM run WHERE id=?",
+                                     (run_id,)).fetchone()
+            if _run is None or _run["state"] not in config.ACTIVE_RUN_STATES:
+                self.rollback()
+                return []
             self.conn.execute(
                 "UPDATE page_job SET state='pending', claim_token='', "
                 "last_error='lease_expired_reclaimed' "
@@ -607,11 +617,15 @@ class WikiDB:
 
     def leased_jobs(self, run_id: str):
         # 消费方(status/pause/cancel/regenerate)只读 page_id 与租约时间
-        # —— SELECT * 曾为每个在写行拖 10-30KB 稿体
+        # —— SELECT * 曾为每个在写行拖 10-30KB 稿体。
+        # 只报**未过期**的在写租约: 过期行的复位只发生在 claim_jobs(仅
+        # next 触发)—— 曾不过滤, writer 全部死亡且租约自然过期后 pause
+        # 永远被拒, 错误信息还承诺"租约过期后再 pause"这一永不兑现的恢复
         return self.conn.execute(
             "SELECT page_id, lease_expires_at FROM page_job "
             "WHERE run_id=? AND state='processing' AND claim_token!='' "
-            "ORDER BY claimed_at", (run_id,)).fetchall()
+            "AND lease_expires_at!='' AND lease_expires_at>? "
+            "ORDER BY claimed_at", (run_id, now_iso())).fetchall()
 
     def release_all_claims(self, run_id: str) -> int:
         """cancel 用: 释放所有认领(回 pending)。"""
@@ -653,6 +667,31 @@ class WikiDB:
             # —— 不再谎报成功(c022/c042: 幽灵 id 曾 exit 0 还污染 run_log)
             return False
         return True
+
+    def set_job_state_guarded(self, run_id: str, expected_run_states,
+                              page_id: str, state: str, **kw):
+        """带 run 状态前置的 job 状态写(P15/c037 同族的检查-进-事务)。
+
+        fail/skip 的 LINING 防护曾是纯检查后行动: _fail_skip_guard 读一次
+        run 状态, set_job_state 是无前置的裸 UPDATE —— finish 取计数快照
+        与 jobs() 快照之间落笔时, 已完成 job 被翻 failed 从发布集蒸发,
+        而 run 终态用陈旧计数仍报 COMPLETED。单 BEGIN IMMEDIATE 内复查
+        run 仍处 expected_run_states 再写(与 submit 的
+        complete_job_guarded 同串行化)。
+        返回 True=已写 / False=claim token 失配 / None=run 状态不符。"""
+        self.begin()
+        try:
+            row = self.conn.execute("SELECT state FROM run WHERE id=?",
+                                    (run_id,)).fetchone()
+            if row is None or row["state"] not in tuple(expected_run_states):
+                self.rollback()
+                return None
+            ok = self.set_job_state(run_id, page_id, state, **kw)
+            self.commit()
+            return ok
+        except BaseException:
+            self.rollback()
+            raise
 
     def set_job_report(self, run_id: str, page_id: str, report: dict) -> None:
         self.conn.execute(

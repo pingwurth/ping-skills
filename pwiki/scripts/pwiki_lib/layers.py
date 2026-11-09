@@ -17,7 +17,7 @@ from .config import Ctx, now_iso
 from .planner import (plan_limits, plan_modules, plan_pages, render_module_tree,
                       save_plan)
 from .styles import preset
-from .util import die, info
+from .util import as_int, die, info
 
 RESULT_RE = re.compile(r"(?s)<result>\s*(\{.*?\})\s*</result>")
 FENCE_JSON_RE = re.compile(r"(?s)```(?:json)?\s*(\{.*\})\s*```")
@@ -183,15 +183,23 @@ def apply_layer_result(ctx, plan: dict, state: dict, text: str,
     limits = plan_limits(plan, state.get("profile", "standard"))
     depth = 0
     parent_node = None
+    # 存量条目形状守卫(P33 家族): 文档明示可"手工挽救"的
+    # work/plan-layers.json 里一条标量曾让 a["slug"] TypeError 裸崩
+    # (exit 1, 打破本命令的退出码契约)—— 坏条目跳过并计入 problems
+    bad_articles = [a for a in state.get("articles", [])
+                    if not isinstance(a, dict)]
+    problems += [f"存量条目不是映射(跳过): {a!r}" for a in bad_articles]
+    articles = [a for a in state.get("articles", [])
+                if isinstance(a, dict)]
     if parent_slug:
-        parent_node = next((a for a in state["articles"]
-                            if a["slug"] == parent_slug), None)
+        parent_node = next((a for a in articles
+                            if a.get("slug") == parent_slug), None)
         if parent_node is None:
             return [], [f"unknown parent slug: {parent_slug}"]
-        depth = parent_node["depth"] + 1
+        depth = as_int(parent_node.get("depth"), 0) + 1
         if depth > limits["max_depth"]:
             return [], [f"parent {parent_slug} already at max_depth"]
-    existing = {a["slug"] for a in state["articles"]}
+    existing = {a.get("slug") for a in articles}
     # Qoder: 子篇 modules ⊆ 父篇 modules(或 Module Tree 里的后代);
     # 父模块自身与回溯到 "/" 的祖先链保留在视图里。
     parent_modules = set(x.rstrip("/") or "/" for x in

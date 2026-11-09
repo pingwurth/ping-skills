@@ -364,6 +364,10 @@ def cmd_next(args) -> int:
     from .util import as_int
     lease = as_int(ctx.config.get("lease_minutes"),
                    config.DEFAULT_LEASE_MINUTES)
+    # 下界钳位: 手编 0/负数使每条租约即刻过期(回收谓词是严格小于)——
+    # 并行场景下每次 next 都回收在写 job 换新令牌重发, 所有 submit 永久
+    # 孤儿化且零诊断指向配置; 至少 1 分钟
+    lease = max(1, lease)
     claimed = ctx.db.claim_jobs(run["id"], count=batch, lease_minutes=lease)
     summary = _jobs_summary(ctx.db, run["id"])
     if not claimed:
@@ -800,9 +804,15 @@ def cmd_fail(args) -> int:
     part, run = _active(ctx)
     job = ctx.db.job(run["id"], args.page_id)
     token = _fail_skip_guard(ctx, run, job, args)
-    ok = ctx.db.set_job_state(run["id"], args.page_id, "failed",
-                              error=args.error or "unspecified",
-                              claim_token=token)
+    # 状态写带 run 前置(P15): 检查后 run 被并发 finish 置 LINING 时, 裸
+    # UPDATE 曾把已计入发布集的 completed 翻 failed —— run 终态按陈旧
+    # 计数照报 COMPLETED, 该页从 wiki 静默蒸发
+    ok = ctx.db.set_job_state_guarded(
+        run["id"], config.CANCELABLE_RUN_STATES, args.page_id, "failed",
+        error=args.error or "unspecified", claim_token=token)
+    if ok is None:
+        die(f"run {run['id']} 正在 finish(LINING) — 等 finish 出结果后"
+            "再 fail(P15)", config.EXIT_PRECOND)
     if ok is False:
         die("claim token 失配 — 该 job 已被回收/重认领", config.EXIT_PRECOND)
     ctx.db.log(run["id"], "page_failed", f"{args.page_id}: {args.error}")
@@ -815,8 +825,13 @@ def cmd_skip(args) -> int:
     part, run = _active(ctx)
     job = ctx.db.job(run["id"], args.page_id)
     token = _fail_skip_guard(ctx, run, job, args)
-    ok = ctx.db.set_job_state(run["id"], args.page_id, "skipped",
-                              notes=args.reason or "", claim_token=token)
+    # 状态写带 run 前置(cmd_fail/P15 同款)
+    ok = ctx.db.set_job_state_guarded(
+        run["id"], config.CANCELABLE_RUN_STATES, args.page_id, "skipped",
+        notes=args.reason or "", claim_token=token)
+    if ok is None:
+        die(f"run {run['id']} 正在 finish(LINING) — 等 finish 出结果后"
+            "再 skip(P15)", config.EXIT_PRECOND)
     if ok is False:
         die("claim token 失配 — 该 job 已被回收/重认领", config.EXIT_PRECOND)
     ctx.db.log(run["id"], "page_skipped", f"{args.page_id}: {args.reason}")

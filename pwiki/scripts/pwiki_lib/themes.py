@@ -2037,8 +2037,10 @@ def cmd_plan_themes(ctx: Ctx, args, plan: dict) -> int:
             print(f"[coverage] ERROR orphan dir not represented: {d}",
                   file=__import__("sys").stderr)
         return config.EXIT_GATE
-    # D21 框架模块 = plan aliases 的目标模块(yudao 规则数据化)
-    framework_mods = {str(r.get("module")) for r in (plan.get("aliases") or [])}
+    # D21 框架模块 = plan aliases 的目标模块(yudao 规则数据化);
+    # 非 dict 条目跳过(--aliases 入口已校验, 这里防御坏行/旧库)
+    framework_mods = {str(r.get("module")) for r in (plan.get("aliases") or [])
+                      if isinstance(r, dict)}
     profile_name = ctx.config.get("profile", "standard")
     if profile_name not in PROFILES:
         # config 值不经过 argparse choices 校验 —— 曾在 run_themes 裸

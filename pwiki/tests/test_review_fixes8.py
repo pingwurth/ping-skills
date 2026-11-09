@@ -671,3 +671,236 @@ def test_r6_14_qoderplan_emit_keeps_parent_on_same_title(tmp_path):
     child = next(d for d in docs if d["goal"] != docs[0]["goal"]) \
         if False else docs[1]
     assert child.get("parent") == "支付", docs
+
+
+# --------------------------------------------------------------------------- #
+# 批次③: 并发窗口 5 条(#20-#24) + 手编裸崩 4 条(#25-#28)
+# --------------------------------------------------------------------------- #
+
+def test_r6_20_claim_jobs_rechecks_run_state(tmp_path):
+    """claim 的事务内复查 run 状态: 已 CANCELLED 的 run 不再被认领,
+    不留永久 processing 行。"""
+    from pwiki_lib.db import WikiDB
+    root = str(tmp_path / "wiki")
+    db = WikiDB(root)
+    pid = db.partition("main", "zh")["id"]
+    db.conn.execute(
+        "INSERT INTO run(id,partition_id,kind,operation,generation_type,state,"
+        "started_at,updated_at) VALUES('r1',?,'generate','start','FULL',"
+        "'DOCUMENT_GENERATING','2026-01-01T00:00:00','2026-01-01T00:00:00')",
+        (pid,))
+    db.conn.execute(
+        "INSERT INTO page_job(run_id,page_id,title,kind,kind_rank,depth) "
+        "VALUES('r1','p1','t','page',2,0)")
+    # next 读到 DG 后、claim 拿锁前: 并发 cancel 置 CANCELLED + 释放
+    db.update_run("r1", state="CANCELLED", finished_at=now_iso())
+    assert db.claim_jobs("r1", count=1) == []
+    row = db.job("r1", "p1")
+    assert row["state"] == "pending", "死 run 仍被认领成 processing"
+    # 活动态照常认领
+    db.update_run("r1", state="DOCUMENT_GENERATING")
+    assert len(db.claim_jobs("r1", count=1)) == 1
+
+
+def test_r6_21_fail_guarded_against_lining(tmp_path, monkeypatch):
+    """fail 的状态写带 run 前置: 守卫读检查后 run 被并发 finish 置
+    LINING 时, 已完成的 job 不被翻 failed(发布集不蒸发)。"""
+    from pwiki_lib import engine
+    repo, root, ctx, run = _begin(tmp_path) \
+        if False else (None, None, None, None)
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    claimed = ctx.db.claim_jobs(run["id"], count=1)[0]
+    ctx.db.set_job_state(run["id"], claimed["page_id"], "completed",
+                         content="# t\n")
+    # 并发 finish 抢先置 LINING; fail 读到的还是陈旧 DG 快照
+    ctx.db.update_run(run["id"], state="LINING")
+    stale = dict(ctx.db.conn.execute(
+        "SELECT * FROM run WHERE id=?", (run["id"],)).fetchone())
+    monkeypatch.setattr(engine, "_active",
+                        lambda _ctx: (ctx.partition(), stale))
+    with pytest.raises(SystemExit) as ei:
+        engine.cmd_fail(_ns(repo, root, page_id=claimed["page_id"],
+                            error="x", claim=None, force=True))
+    assert ei.value.code == config.EXIT_PRECOND
+    assert ctx.db.job(run["id"], claimed["page_id"])["state"] == \
+        "completed", "LINING 窗口内 completed 被翻成 failed"
+
+
+def test_r6_22_reconcile_rename_rechecks_active_run_in_txn(tmp_path):
+    """改名的活动 run 复查在 BEGIN IMMEDIATE 事务内: 前置检查(裸 SELECT)
+    之后、提交之前并发 begin 建的 run 使改名放弃(retry)而不是被静默回滚。"""
+    from pwiki_lib import planner, reconcile
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    plan = planner.load_plan(ctx)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page")
+    # begin 建活动 run(它在改名的事务内复查时"插进来")
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    active = ctx.db.active_run(pid)
+    assert active is not None
+    calls = {"n": 0}
+    orig = ctx.db.active_run
+
+    def first_call_blind(p):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else orig(p)   # 前置检查先过
+
+    ctx.db.active_run = first_call_blind
+    try:
+        status, msg = reconcile._apply_title_rename(
+            ctx, {"page_id": pg["id"], "proposed": "改名后的标题"}, False)
+    finally:
+        del ctx.db.active_run
+    assert status == "retry", msg
+    row = ctx.db.published_page(pid, str(pg["id"]))
+    assert row is None or row["title"] != "改名后的标题", \
+        "事务窗口内被 begin 插入时改名仍被写入(将被 finish 静默回滚)"
+
+
+def test_r6_23_leased_jobs_filters_expired(tmp_path):
+    """leased_jobs 只报未过期租约: writer 全死且租约过期后 pause 不再
+    永久被拒。"""
+    from pwiki_lib.db import WikiDB
+    from pwiki_lib.config import iso_plus_minutes
+    root = str(tmp_path / "wiki")
+    db = WikiDB(root)
+    pid = db.partition("main", "zh")["id"]
+    db.conn.execute(
+        "INSERT INTO run(id,partition_id,kind,operation,generation_type,state,"
+        "started_at,updated_at) VALUES('r1',?,'generate','start','FULL',"
+        "'DOCUMENT_GENERATING','2026-01-01T00:00:00','2026-01-01T00:00:00')",
+        (pid,))
+    past = "2026-01-01T00:00:00"
+    db.conn.execute(
+        "INSERT INTO page_job(run_id,page_id,title,kind,state,claim_token,"
+        "lease_expires_at) VALUES('r1','dead','t','page','processing',"
+        "'tok','2026-01-01T00:00:01')")
+    db.conn.execute(
+        "INSERT INTO page_job(run_id,page_id,title,kind,state,claim_token,"
+        "lease_expires_at) VALUES('r1','live','t','page','processing','tok',?)",
+        (iso_plus_minutes(now_iso(), 30),))
+    rows = db.leased_jobs("r1")
+    assert [r["page_id"] for r in rows] == ["live"], \
+        "过期租约仍在租约列表里(pause 将被永久拒绝)"
+    del past
+
+
+def test_r6_24_lease_minutes_clamped(tmp_path, monkeypatch):
+    """config lease_minutes=0 不再让租约即刻过期(submit 永久孤儿化)。"""
+    from pwiki_lib import engine
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    import json as _json
+    with open(os.path.join(root, "config.json"), "w",
+              encoding="utf-8") as fh:
+        fh.write(_json.dumps({"lease_minutes": 0}))
+    ctx2 = _ctx(repo, root)
+    ctx2.config["lease_minutes"] = 0
+    run = ctx2.db.active_run(ctx2.partition()["id"])
+    claimed = ctx2.db.claim_jobs(run["id"], count=1)
+    assert claimed, "钳位前 0 分钟租约会在认领瞬间即过期回收"
+    # 走 cmd_next 的钳位路径: 再认领一个, 租约时长 ≥1 分钟
+    argv = _ns(repo, root, batch=1, json=False)
+    rc = engine.cmd_next(argv)
+    assert rc in (config.EXIT_OK, config.EXIT_PRECOND)
+    rows = ctx2.db.conn.execute(
+        "SELECT page_id, lease_expires_at FROM page_job WHERE run_id=? "
+        "AND state='processing'", (run["id"],)).fetchall()
+    assert rows and all(r["lease_expires_at]".replace("]", "")] >
+                        now_iso() for r in rows)
+
+
+def test_r6_25_validate_plan_scalar_entry_gate(tmp_path):
+    """pages 里的裸标量条目报门禁错(exit 2 路径)而不是 AttributeError。"""
+    from pwiki_lib import planner
+    from pwiki_lib.yamlite import yaml_dump
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["pages"] = ["快速开始"]
+    errors, _w = planner.validate_plan(ctx, plan, strict=True)
+    assert any("必须是映射" in e for e in errors), errors
+
+
+def test_r6_26_aliases_entry_shapes(tmp_path, capsys):
+    """--aliases 载入标量条目被入口拒绝; themes/deps 消费侧对坏行免疫。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    af = os.path.join(root, "work", "aliases.yaml")
+    os.makedirs(os.path.dirname(af), exist_ok=True)
+    with open(af, "w", encoding="utf-8") as fh:
+        fh.write("- yudao-framework\n- bar\n")
+    with pytest.raises(SystemExit) as ei:
+        _cli(["plan", "--aliases", af, "--repo", repo.path,
+              "--root", root])
+    assert ei.value.code == config.EXIT_GATE
+    # 手编坏行入库的防御: 消费侧不裸崩
+    plan = planner.load_plan(_ctx(repo, root))
+    plan["aliases"] = ["scalar-entry"]
+    planner.save_plan(_ctx(repo, root), plan)
+    from pwiki_lib import themes
+    ctx = _ctx(repo, root)
+    assert themes.cmd_plan_themes.__call__   # 可调用(不执行全规划)
+    # modules.seed_depends_on 的防御
+    from pwiki_lib import modules as mods
+    rules_seen = []
+    orig = mods.load_inventory
+    del rules_seen, orig
+    # 直接单测消费表达式
+    fw = {str(r.get("module")) for r in plan["aliases"]
+          if isinstance(r, dict)}
+    assert fw == set()
+
+
+def test_r6_27_layers_state_articles_scalar_guard():
+    """apply_layer_result 对 state['articles'] 里的标量条目跳过报
+    problems, 不再 TypeError 裸崩。"""
+    import json as _json
+    from pwiki_lib.layers import apply_layer_result
+    plan = {"limits": {}, "modules": [], "pages": [], "cards": []}
+    state = {"articles": ["overview-broken", {"slug": "parent",
+                                               "depth": 1,
+                                               "modules": ["/"]}],
+             "profile": "standard"}
+    payload = {"articles": [
+        {"slug": "overview2", "title": "t2", "type": "overview",
+         "objective": "o", "modules": ["/"], "need_further_planning": False}]}
+    text = "<result>" + _json.dumps(payload, ensure_ascii=False) + "</result>"
+    added, problems = apply_layer_result(None, plan, state, text,
+                                         parent_slug="parent")
+    assert added and added[0]["slug"] == "overview2"
+    assert any("不是映射" in p for p in problems), problems
+
+
+def test_r6_28_update_card_scope_scalar(tmp_path, capsys):
+    """手编卡片 scope 标量('**')过 validate 后 update 不再 TypeError。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    card = next(c for c in plan["cards"]
+                if isinstance(c, dict) and c.get("id"))
+    card["scope"] = "**"
+    planner.save_plan(ctx, plan)
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK

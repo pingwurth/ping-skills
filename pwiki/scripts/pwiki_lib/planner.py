@@ -341,6 +341,16 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
 
     if not pages and not cards:
         errors.append("pages 与 cards 均为空")
+    # 条目形状先于一切 .get(P33 家族): 裸标量条目(`- 快速开始`)曾
+    # AttributeError 裸栈打死 validate/begin(exit 1 而非门禁的 2)——
+    # 报错后短路, 后续循环不再触碰坏条目
+    for label, items in (("pages", pages), ("cards", cards)):
+        bad = [x for x in items if not isinstance(x, dict)]
+        if bad:
+            errors.append(f"{label} 条目必须是映射(got "
+                          f"{type(bad[0]).__name__}): {bad[0]!r}")
+    if any(not isinstance(x, dict) for x in pages + cards):
+        return errors, warnings
     ids = [str(p.get("id", "")).strip() for p in pages] + \
           [str(c.get("id", "")).strip() for c in cards]
     dup = {i for i in ids if ids.count(i) > 1}
@@ -1005,6 +1015,14 @@ def cmd_plan(args) -> int:
         if not isinstance(loaded, list):
             die(f"别名规则文件顶层必须是列表: {args.aliases}"
                 f"(got {type(loaded).__name__})", config.EXIT_GATE)
+        # 条目形状入库前校验(validate_plan 有同样检查, 但 --aliases 路径
+        # 从不跑 validate): 标量/缺键条目曾持久化进 wiki_plan.yaml, 让
+        # plan --themes 与 plan --deps 双双 AttributeError 裸崩
+        for i, a in enumerate(loaded):
+            if not isinstance(a, dict) or not a.get("patterns") \
+                    or not a.get("module"):
+                die(f"别名规则第 {i + 1} 条需要 patterns+module 映射: "
+                    f"{a!r}", config.EXIT_GATE)
         plan["aliases"] = loaded
         info(f"aliases: 从 {args.aliases} 载入 {len(plan['aliases'])} 条")
         changed = True

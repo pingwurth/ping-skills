@@ -311,10 +311,12 @@ def cmd_update(args) -> int:
                        p.get("source_files") or [])
     for c in cards:
         # P10: 卡片的陈旧对账与基线同口径(scope ∪ source_files) —— 曾只看
-        # source_files, 卡片声明 scope 后 scope 文件的变更永不把它标 stale
+        # source_files, 卡片声明 scope 后 scope 文件的变更永不把它标 stale。
+        # 走 _as_list 解码: 手编 `scope: "**"`(标量)曾让 + 拼接 TypeError
+        # 裸崩(基线路径 96 行一直是容错的, 只有这处绕过解码)
         check_item(c, published.get(str(c.get("id"))),
-                   list((c.get("source_files") or [])
-                        + (c.get("scope") or [])))
+                   list(_as_list(c.get("source_files"))
+                        + _as_list(c.get("scope"))))
     removed_items = [pid for pid in published if pid not in
                      ({str(p.get("id")) for p in pages} |
                       {str(c.get("id")) for c in cards})]

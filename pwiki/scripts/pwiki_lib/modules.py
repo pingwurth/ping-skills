@@ -674,9 +674,12 @@ def seed_depends_on(ctx: Ctx, plan: dict) -> int:
             if k and k not in ("", "."):
                 alias.setdefault(k, mid)
 
-    # plan 级别名表(fnmatch 模式 → 模块 id)
+    # plan 级别名表(fnmatch 模式 → 模块 id); 非 dict 条目跳过
+    # (--aliases 入口已校验, 这里防御坏行/旧库 —— 曾裸 rule.get 崩)
     alias_rules = []
     for rule in plan.get("aliases") or []:
+        if not isinstance(rule, dict):
+            continue
         target = str(rule.get("module", ""))
         if target in ids:
             alias_rules.append((list(rule.get("patterns") or []), target))

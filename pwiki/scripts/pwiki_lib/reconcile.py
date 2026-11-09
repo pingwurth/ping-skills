@@ -198,6 +198,15 @@ def _apply_title_rename(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
         # 文件旧路径的三方分歧, read/pages/export 全程服务该不一致态
         ctx.db.begin()
         try:
+            # 事务内复查活动 run(c036 同窗): 前置检查是裸 SELECT, 检查与
+            # 本事务之间并发 begin 建的 run 会按盘上旧标题排 job, 其
+            # finish 用旧标题行 INSERT OR REPLACE 把改名静默回滚、新路径
+            # 文件当 moved-out 孤儿清掉 —— BEGIN IMMEDIATE 与 begin 的
+            # create_run_guarded 串行化, 复查看到就放弃
+            if ctx.db.active_run(pid) is not None:
+                ctx.db.rollback()
+                return ("retry", "存在活动 run — 先 finish/cancel 再和解"
+                        "(避免发布回滚改名; 本项保留待处理)")
             if pub is not None:
                 # 发布层: 改 H1 + 更新 DB(content 引用不动) + 移文件。
                 # H1 改写栅栏感知(_rename_h1, P13); 标题插值走 lambda/拼接
