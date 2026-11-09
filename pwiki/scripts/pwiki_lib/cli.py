@@ -87,10 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         _add_common(p)
         return p
 
-    p = sp("init", "初始化工作区(config.json + wiki.db)")
-    p.add_argument("--profile", choices=config.PROFILE_NAMES, default="standard")
-    p.add_argument("--style", choices=config.STYLES, default=config.DEFAULT_STYLE)
-    p.add_argument("--export-style", choices=config.EXPORT_STYLES, default="legacy")
+    p = sp("init", "初始化工作区(config.json + wiki.db); 重跑=合并保留手工键")
+    # default=None(P35): 省略 = 沿用现有 config.json 的值, 不再用默认值
+    # 覆盖手工编辑; 首次 init 时 cmd_init 落默认
+    p.add_argument("--profile", choices=config.PROFILE_NAMES, default=None)
+    p.add_argument("--style", choices=config.STYLES, default=None)
+    p.add_argument("--export-style", choices=config.EXPORT_STYLES, default=None)
 
     p = sp("scan", "确定性仓库扫描 → work/inventory.json")
     p.add_argument("--max-files", type=int, default=50000)

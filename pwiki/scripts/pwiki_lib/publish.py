@@ -668,7 +668,7 @@ def _source_hashes(ctx: Ctx, p) -> dict:
 # --------------------------------------------------------------------------- #
 
 def cmd_pages(args) -> int:
-    ctx = Ctx(args).load()
+    ctx = Ctx(args).load(create=False)   # P44: 只读不物化工作区
     pages = ctx.db.published_pages(ctx.partition()["id"])
     if args.json:
         print(json.dumps([{"id": p["page_id"], "title": p["title"],
@@ -696,7 +696,7 @@ def cmd_pages(args) -> int:
 
 
 def cmd_read(args) -> int:
-    ctx = Ctx(args).load()
+    ctx = Ctx(args).load(create=False)   # P44: 只读不物化工作区
     p = ctx.db.published_page(ctx.partition()["id"], args.page_id)
     if not p:
         die(f"未发布条目: {args.page_id}", config.EXIT_PRECOND)

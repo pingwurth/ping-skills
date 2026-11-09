@@ -41,19 +41,39 @@ def _json_list(raw):
 
 def cmd_init(args) -> int:
     ctx = Ctx(args).load()
+    import json as _json
+    cfg_path = os.path.join(ctx.root, config.CONFIG_NAME)
+    # P35: 已初始化的工作区重跑 init = 合并而非覆盖 —— 手工 config.json
+    # 编辑(lease_minutes/locale/export_style…, 无 CLI 开关的唯一调节途径)
+    # 曾被全新默认值无声抹掉, 长跑 writer 的租约全部提前过期
+    old = {}
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path, encoding="utf-8") as fh:
+                loaded = _json.load(fh)
+            if isinstance(loaded, dict):
+                old = loaded
+        except (OSError, ValueError):
+            pass   # 解析失败 Ctx.load 已给过告警, 按全新处理
+        info("note: 工作区已初始化 — 保留 config.json 手工键, "
+             "仅应用本次显式给出的选项")
     cfg = {
         "repo": ctx.repo,
         "locale": ctx.locale,
-        "profile": getattr(args, "profile", "standard"),
-        "style": getattr(args, "style", config.DEFAULT_STYLE),
-        "export_style": getattr(args, "export_style", "legacy"),
-        "lease_minutes": config.DEFAULT_LEASE_MINUTES,
+        "profile": getattr(args, "profile", None)
+        or old.get("profile") or "standard",
+        "style": getattr(args, "style", None)
+        or old.get("style") or config.DEFAULT_STYLE,
+        "export_style": getattr(args, "export_style", None)
+        or old.get("export_style") or "legacy",
+        "lease_minutes": old.get("lease_minutes",
+                                 config.DEFAULT_LEASE_MINUTES),
     }
-    import json as _json
+    for k, v in old.items():
+        cfg.setdefault(k, v)
     os.makedirs(ctx.root, exist_ok=True)
     ctx.ensure_publish_tree()   # P1: 骨架随 init 落位, 首次 finish 不再要 --yes
-    with open(os.path.join(ctx.root, config.CONFIG_NAME), "w",
-              encoding="utf-8") as fh:
+    with open(cfg_path, "w", encoding="utf-8") as fh:
         _json.dump(cfg, fh, ensure_ascii=False, indent=2)
     part = ctx.partition()
     print(f"initialized: {ctx.root}")

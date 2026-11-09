@@ -634,6 +634,14 @@ def instantiate_pack(builder: Builder, corpus: Corpus, pack: dict,
             continue
         child_ev = corpus.collect(child, pool=evidence)
         if len(child_ev) < scaled_min(child, 2, profile):
+            # P45: 证据不足的静默丢弃也入 theme_declined —— 人审门要能区分
+            # "仓库没有该子主题"与"被大小底线切掉"(D12 要关掉的盲点)
+            builder.theme_declined.append({
+                "pack": pack["key"], "child": child.get("key"),
+                "title": child.get("title"),
+                "reason": f"evidence below minimum: {len(child_ev)} file(s), "
+                          f"needs {scaled_min(child, 2, profile)} "
+                          "(D12 evidence gate)"})
             continue
         # D12 证据门 tier 1: 关键词门控子项需要 ≥1 个非文档非锁文件且路径含关键词
         strong_ev = [f for f in child_ev if not is_weak_evidence(f["path"])]

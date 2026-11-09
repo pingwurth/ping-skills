@@ -934,3 +934,136 @@ def test_p41_feature_leaf_excludes_test_paths(tmp_path):
     for p in ("src/api/foo_test.go", "core/foo_test.rs",
               "src/tests/handler.ts", "src/pages/__tests__/Home.tsx"):
         assert match_any(p.lower(), P_TEST), p
+
+
+# =========================================================================== #
+# 批次⑤: 契约杂项(P10/P11/P35/P38/P44/P45)
+# =========================================================================== #
+
+def test_p35_init_merges_manual_config(tmp_path):
+    """重跑 init 合并保留手工 config.json 键, 只应用显式选项。"""
+    import json as _json
+    repo, root = _fixture(tmp_path)
+    cfg_path = os.path.join(root, "config.json")
+    cfg = _json.load(open(cfg_path, encoding="utf-8"))
+    cfg["lease_minutes"] = 99
+    with open(cfg_path, "w", encoding="utf-8") as fh:
+        _json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    # 无选项重跑: 手工键全保留
+    assert _cli(["init", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    cfg2 = _json.load(open(cfg_path, encoding="utf-8"))
+    assert cfg2["lease_minutes"] == 99, "手工 lease_minutes 被默认值覆盖"
+    assert cfg2["style"] == "concise"
+    # 显式 --style deep: 只改 style, 手工键仍在
+    assert _cli(["init", "--style", "deep", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    cfg3 = _json.load(open(cfg_path, encoding="utf-8"))
+    assert cfg3["style"] == "deep" and cfg3["lease_minutes"] == 99
+
+
+def test_p38_relative_root_anchored_to_repo(tmp_path):
+    """显式相对 --root 与默认根同基准(repo), 不再按进程 CWD 分裂。"""
+    from pwiki_lib.config import Ctx
+    repo, root = _fixture(tmp_path)
+    ctx_rel = Ctx(types.SimpleNamespace(repo=repo.path, root=".pwiki"))
+    ctx_def = Ctx(types.SimpleNamespace(repo=repo.path))
+    assert ctx_rel.root == ctx_def.root, \
+        "键入的 --root .pwiki 与省略指向了不同的树"
+    assert ctx_rel.root.startswith(repo.path)
+
+
+def test_p44_readonly_commands_do_not_materialize(tmp_path):
+    """search 在未初始化仓库上不再顺手创建 wiki.db。"""
+    import subprocess
+    fresh = tmp_path / "fresh"
+    (fresh / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(fresh), check=True)
+    from pwiki_lib.search import cmd_search
+    with pytest.raises(SystemExit) as ei:
+        cmd_search(types.SimpleNamespace(
+            repo=str(fresh), root=str(tmp_path / "nope-wiki"), locale="zh",
+            query="x", top=5, json=False))
+    assert ei.value.code == config.EXIT_PRECOND
+    assert not any(tmp_path.rglob("wiki.db")), "只读命令物化了工作区"
+
+
+def test_p10_card_scope_changes_mark_stale(tmp_path):
+    """卡片声明 scope+source_files 时, scope 文件变更也把卡片标 stale。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    card = plan["cards"][0]
+    card["scope"] = ["services/user/"]
+    card["source_files"] = ["Makefile"]
+    planner.save_plan(ctx, plan)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    repo.write("services/user/m0.py", "# changed\n" + "Y = 2\n" * 24)
+    repo.commit("touch card scope file")
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx2 = _ctx(repo, root)
+    run = ctx2.db.active_run(ctx2.partition()["id"])
+    assert run is not None
+    queued = {j["page_id"] for j in ctx2.db.jobs(run["id"])}
+    assert str(card["id"]) in queued, \
+        f"卡片 scope 变更未标 stale(队列: {queued})"
+
+
+def test_p11_update_does_not_revive_skipped(tmp_path):
+    """显式 skip 过的页面不因 update 的 new_item 复活。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    victim = next(j for j in ctx.db.jobs(run["id"])
+                  if j["kind"] == "page" and j["state"] == "pending")
+    assert _cli(["skip", victim["page_id"], "--reason", "不要这页",
+                 "--repo", repo.path, "--root", root]) == config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    repo.write("Makefile", "build:\n\techo changed\n")
+    repo.commit("touch tracked file")
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx2 = _ctx(repo, root)
+    run2 = ctx2.db.active_run(ctx2.partition()["id"])
+    if run2 is not None:
+        queued = {j["page_id"] for j in ctx2.db.jobs(run2["id"])}
+        assert victim["page_id"] not in queued, \
+            f"skip 决定被 update 翻案(队列: {queued})"
+
+
+def test_p45_evidence_min_drop_recorded(tmp_path, monkeypatch):
+    """scaled_min 证据门切掉的子项进 theme_declined(人审可见)。"""
+    from pwiki_lib import themes
+    from pwiki_lib.themes import Builder
+
+    class _NoEvCorpus:
+        by_path = {}
+        modules = {}
+
+        def collect(self, spec, pool=None):
+            return []
+
+        def grep(self, files, needles, limit=20):
+            return []
+
+    builder = Builder(_NoEvCorpus(), {"source_limit": 4, "pack_scale": 1.0}, "zh",
+                      {"title_maps": {}, "title_aliases": {}}, style="deep")
+    pack = {"key": "t", "title": "T", "kind": "cross", "patterns": ["src/"],
+            "always": True, "children": [{"key": "c1", "title": "子项",
+                                          "patterns": ["src/"]}]}
+    before = len(builder.theme_declined)
+    themes.instantiate_pack(builder, _NoEvCorpus(), pack,
+                            {"source_limit": 4, "pack_scale": 1.0}, set())
+    declined = builder.theme_declined[before:]
+    assert any("evidence below minimum" in str(d.get("reason"))
+               for d in declined), declined

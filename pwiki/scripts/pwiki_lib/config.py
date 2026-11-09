@@ -210,7 +210,12 @@ class Ctx:
             die(f"repo path not found: {self.repo}", EXIT_ENV)
         cfg_root = getattr(args, "root", None)
         if cfg_root:
-            self.root = os.path.abspath(cfg_root)
+            # P38: 显式相对 --root 一律锚定 repo(与默认根同基准) —— 曾按
+            # 进程 CWD abspath, 同一个 '--root .pwiki' 键入与省略指向两棵
+            # 不同的树, 状态静默分裂到两个 wiki.db
+            _rel = cfg_root if os.path.isabs(cfg_root) \
+                else os.path.join(self.repo, cfg_root)
+            self.root = os.path.abspath(_rel)
         else:
             # 默认 <repo>/.pwiki; --root .qoder/repowiki 得 Qoder-IDE 兼容布局
             self.root = os.path.join(self.repo, DEFAULT_ROOT_DIRNAME)
@@ -224,7 +229,12 @@ class Ctx:
         self._partition = None
         self._file_hash_cache = {}
 
-    def load(self) -> "Ctx":
+    def load(self, create: bool = True) -> "Ctx":
+        if not create and not os.path.isfile(os.path.join(self.root, DB_NAME)):
+            # P44: 只读命令不再顺手物化工作区 —— search/pages/read 在未
+            # init 的仓库上试探, 曾把 wiki.db + partition 行写进分析目标
+            self._die(f"工作区未初始化({self.root} 下无 {DB_NAME}) — "
+                      "先 `pwiki init`(只读命令不创建工作区)", EXIT_PRECOND)
         cfg_path = os.path.join(self.root, CONFIG_NAME)
         if os.path.isfile(cfg_path):
             try:

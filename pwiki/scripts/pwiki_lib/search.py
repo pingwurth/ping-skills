@@ -53,7 +53,7 @@ def _fields(content: str):
 
 
 def cmd_search(args) -> int:
-    ctx = Ctx(args).load()
+    ctx = Ctx(args).load(create=False)   # P44: 只读不物化工作区
     pages = ctx.db.published_pages(ctx.partition()["id"])
     if not pages:
         print("没有已发布条目 — 先跑完一次 begin→…→finish")

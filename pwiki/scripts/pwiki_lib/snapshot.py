@@ -249,6 +249,10 @@ def cmd_update(args) -> int:
     def check_item(item, pub, sources):
         pid = item.get("id")
         if pub is None:
+            # P11: 用户显式 skip 过的项不复活 —— "跳过是用户决定, 任何后续
+            # run 都不该翻案"; 曾按 new_item 重新排队还整页 LLM 重写
+            if str(pid) in skipped_ids:
+                return
             stale.append((item, "new_item"))
             return
         srcs = expand_dirs(sources)
@@ -296,6 +300,9 @@ def cmd_update(args) -> int:
             if before != after:
                 stale.append((item, "catalog_changed"))
 
+    # P11: 跳过集一次取齐(begin --missing 同源 —— update 曾把从未发布的
+    # 跳过项当 new_item 复活)
+    skipped_ids = ctx.db.skipped_page_ids(part["id"])
     for p in pages:
         if p.get("kind") == "module_sheet" and modules_changed:
             stale.append((p, "modules_changed"))
@@ -303,8 +310,11 @@ def cmd_update(args) -> int:
             check_item(p, published.get(str(p.get("id"))),
                        p.get("source_files") or [])
     for c in cards:
+        # P10: 卡片的陈旧对账与基线同口径(scope ∪ source_files) —— 曾只看
+        # source_files, 卡片声明 scope 后 scope 文件的变更永不把它标 stale
         check_item(c, published.get(str(c.get("id"))),
-                   c.get("source_files") or c.get("scope") or [])
+                   list((c.get("source_files") or [])
+                        + (c.get("scope") or [])))
     removed_items = [pid for pid in published if pid not in
                      ({str(p.get("id")) for p in pages} |
                       {str(c.get("id")) for c in cards})]
