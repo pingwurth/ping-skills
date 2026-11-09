@@ -786,6 +786,12 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     # %20, 验证器不解码则引擎自家产出全数误报死链; ②栅栏内的示例链接
     # 是内容不是导航(改写侧同样跳过栅栏)。内容复用 one() 读过的。
     from urllib.parse import unquote
+    # 跳过前缀与 normalize_links 同源(publish.LINK_SKIP_PREFIXES): 校验器
+    # 自持的 lookahead 曾漏 #/mailto: —— 邮箱链接发布器保留、校验器硬错
+    from .publish import LINK_SKIP_PREFIXES
+    _lookahead = "(?!" + "|".join(LINK_SKIP_PREFIXES) + ")"
+    _link_re = re.compile(
+        rf"\[[^\]]*\]\({_lookahead}([^)#]+\.md(?:#[^)\s]*)?)\)")
     for pg in pages:
         path = page_paths[str(pg.get("id"))]
         content = contents.get(path)
@@ -794,9 +800,7 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         base_dir = os.path.dirname(path)
         prose = "".join(x for x in split_fences(content)
                         if not x.startswith("```"))
-        for m in re.finditer(
-                r"\[[^\]]*\]\((?!file://|http)([^)#]+\.md(?:#[^)\s]*)?)\)",
-                prose):
+        for m in _link_re.finditer(prose):
             rel = unquote(m.group(1).split("#", 1)[0])
             target = posix(os.path.normpath(os.path.join(base_dir, rel)))
             if target not in all_paths:

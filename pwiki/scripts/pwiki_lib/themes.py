@@ -1665,7 +1665,11 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
                 if not is_never_cite(p_)
             ]
 
-        # tier 0: 全仓同名伴生(与 primary 同 4 字符 stem 前缀), 上限 2
+        # tier 0: 全仓同名伴生(与 primary 同 4 字符 stem 前缀), 上限 2。
+        # 近乎免费的 stem 前缀测试放在七重合取最前(谓词全纯, 重排语义等
+        # 价)—— 曾垫底, 每个薄页对全仓每个文件先跑完 is_generated(21
+        # 模式)+P_TEST(12)+is_never_cite 的模式电池, 合成 10k 文件实测
+        # ~7x 纯字符串匹配开销
         comp_dirs: list = []
         if page["source_files"]:
             prim_path = page["source_files"][0]
@@ -1673,13 +1677,13 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
             if len(prim) >= 4:
                 comp = [
                     f for f in files
-                    if f["path"] not in page["source_files"]
+                    if stem_of(f["path"]).lower()[:4] == prim[:4]
+                    and f["path"] not in page["source_files"]
                     and f["path"] != prim_path
                     and f.get("lang") in hand_langs
                     and not is_generated(f["path"])
                     and not match_any(f["path"], P_TEST)
                     and not is_never_cite(f["path"])
-                    and stem_of(f["path"]).lower()[:4] == prim[:4]
                 ]
                 take(comp, cap=2)
                 comp_dirs = [dirname(s) for s in got]

@@ -43,6 +43,12 @@ def _md_anchor(text: str) -> str:
 
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
+# "非导航链接"跳过前缀 —— 内链改写(normalize_links)与校验(validate_content
+# 的 links/internal)共用的单一来源: 两套检测器曾各持一份 lookahead/startswith,
+# 邮箱链接 `(mailto:x@example.md)` 发布器原样保留、校验器报硬错, 同一链接
+# 两个相反判定
+LINK_SKIP_PREFIXES = ("file://", "http", "#", "mailto:")
+
 
 def normalize_links(content: str, page_path: str, all_paths: set) -> tuple:
     from . import gates   # _md_href/split_fences(P61/P66 同源)
@@ -69,7 +75,7 @@ def normalize_links(content: str, page_path: str, all_paths: set) -> tuple:
     def repl(m):
         nonlocal fixed
         text, raw = m.group(1), m.group(2)
-        if raw.startswith(("file://", "http", "#", "mailto:")):
+        if raw.startswith(LINK_SKIP_PREFIXES):
             return m.group(0)
         orig = raw
         if "%2520" in raw:

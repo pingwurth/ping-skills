@@ -44,7 +44,12 @@ def snapshot_hashes(ctx: Ctx, pages: list, modules: list, cards=None,
 
     (证据: Qoder mtree rhash —— 发布时对跟踪集逐文件哈希。)
     给 baseline 时先比 (size, mtime): 命中即复用旧哈希 —— 10k 文件的
-    no-change update 曾整读 ~200MB, 现在只剩 stat()。"""
+    no-change update 曾整读 ~200MB, 现在只剩 stat()。
+    取舍(文档化的失配窗口, r6 #34): 同尺寸编辑落在同一 mtime tick 内会
+    复用旧哈希 —— 本机 ext4 是 ns 级 st_mtime, 人类节奏下概率可忽略;
+    NFS/SMB 等 1s 粒度挂载或紧凑脚本循环写入可命中, 陈旧直到文件再被
+    触碰。兜底: `update --from-commit` 走 git diff 不受此影响
+    (Ctx.file_sha 同款缓存同款取舍)。"""
     entries, seen = {}, set()
     pages = [dict(p) if not isinstance(p, dict) else p for p in pages]
     modules = [dict(m) if not isinstance(m, dict) else m for m in modules]
@@ -113,14 +118,23 @@ def snapshot_run(ctx: Ctx, run, plan: dict, pages=None) -> str:
     hashes = snapshot_hashes(ctx, pages, modules, cards, baseline=old)
     snapshot_id = uuid.uuid4().hex[:16]
     # 增量写: 只 upsert 变化行 + 删除离集行(全表删写曾让 3 页增量 finish
-    # 重写 10k 跟踪行; upsert_file_hashes 本就是为此而设)
+    # 重写 10k 跟踪行; upsert_file_hashes 本就是为此而设)。
+    # 三写同装一个事务(P25 只修了 upsert 内部批次): 哈希行与分区基线
+    # 曾横跨三个独立提交 —— 崩在中间留下分叉基线, 异常路径落
+    # DOCUMENT_FAILED 后 update 看到一次性虚假 modules_changed
     changed = {p: e for p, e in hashes.items()
                if p not in old or old[p]["sha256"] != e["sha256"]}
-    ctx.db.upsert_file_hashes(pid, changed)
-    ctx.db.delete_file_hashes(pid, set(old) - set(hashes))
-    ctx.db.set_baseline(pid, snapshot_id, ctx.commit or "",
-                        plan_hash(plan_pages(plan), plan_cards(plan)),
-                        modules_hash(plan_modules(plan)), run["id"])
+    ctx.db.begin()
+    try:
+        ctx.db.upsert_file_hashes(pid, changed)
+        ctx.db.delete_file_hashes(pid, set(old) - set(hashes))
+        ctx.db.set_baseline(pid, snapshot_id, ctx.commit or "",
+                            plan_hash(plan_pages(plan), plan_cards(plan)),
+                            modules_hash(plan_modules(plan)), run["id"])
+        ctx.db.commit()
+    except BaseException:
+        ctx.db.rollback()
+        raise
     return snapshot_id
 
 

@@ -904,3 +904,113 @@ def test_r6_28_update_card_scope_scalar(tmp_path, capsys):
     planner.save_plan(ctx, plan)
     assert _cli(["update", "--repo", repo.path, "--root", root]) == \
         config.EXIT_OK
+
+
+# --------------------------------------------------------------------------- #
+# 批次④: 次级/环境相关 + 性能(#31/#33/#34/#35/#36/#37)
+# --------------------------------------------------------------------------- #
+
+def test_r6_31_inventory_repo_mismatch_invalid(tmp_path):
+    """清单携带的 repo 与当前仓库对不上(克隆被移动)→ 视为无效触发重扫,
+    不再静默分析旧路径。"""
+    from pwiki_lib import scan as scan_mod
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    inv = {"repo": "/nonexistent/old-location", "files": [{"path": "a.py"}]}
+    scan_mod.write_inventory(ctx, inv)
+    assert scan_mod.load_inventory(ctx) == {}, \
+        "旧路径清单仍被信任(decompose 将静默分析旧位置)"
+    # 归一化等价写法不误伤
+    inv2 = {"repo": repo.path + "/", "files": []}
+    scan_mod.write_inventory(ctx, inv2)
+    assert scan_mod.load_inventory(ctx) == inv2
+    # 一致的 repo 正常返回
+    inv3 = {"repo": repo.path, "files": []}
+    scan_mod.write_inventory(ctx, inv3)
+    assert scan_mod.load_inventory(ctx) == inv3
+
+
+def test_r6_33_snapshot_writes_single_txn(tmp_path, monkeypatch):
+    """基线三写同事务: set_baseline 崩溃时哈希行一并回滚, 不留分叉基线。"""
+    from pwiki_lib import snapshot
+    from pwiki_lib.db import WikiDB
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    n_before = ctx.db.conn.execute(
+        "SELECT COUNT(*) c FROM file_hash WHERE partition_id=?",
+        (pid,)).fetchone()["c"]
+    assert n_before > 0
+
+    def boom(*a, **kw):
+        raise RuntimeError("r6: set_baseline 崩在提交前")
+
+    monkeypatch.setattr(WikiDB, "set_baseline", boom)
+    plan = __import__("pwiki_lib.planner", fromlist=["load_plan"]).load_plan(ctx)
+    ctx2 = _ctx(repo, root)
+    run_row = {"id": "synthetic", "generation_type": "FULL"}
+    with pytest.raises(RuntimeError):
+        snapshot.snapshot_run(ctx2, run_row, plan)
+    n_after = ctx2.db.conn.execute(
+        "SELECT COUNT(*) c FROM file_hash WHERE partition_id=?",
+        (pid,)).fetchone()["c"]
+    assert n_after == n_before, "哈希行已提交而基线未写(分叉基线)"
+
+
+def test_r6_35_link_grammar_single_source(tmp_path):
+    """mailto: 结尾 .md 的链接与发布器同判(不捕获不报错), 真内链仍校验。"""
+    from pwiki_lib.gates import validate_content
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page")
+    row = ctx.db.published_page(ctx.partition()["id"], str(pg["id"]))
+    assert row is not None and row["path"]
+    target = os.path.join(root, row["path"])
+    with open(target, encoding="utf-8") as fh:
+        body = fh.read()
+    body += "\n\n联系 [团队](mailto:team@example.md) 与断链 [死链](no-such.md)。\n"
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    report, code = validate_content(ctx, plan)
+    flat = "\n".join(report["global"]["errors"])
+    assert "mailto:team@example.md" not in flat, \
+        "mailto 链接被校验器报死链(与发布器判定相反)"
+    assert "no-such.md" in flat, "真断链漏检"
+
+
+def test_r6_37_join_confined_last_segment_symlink(tmp_path):
+    """末段是指向仓外的符号链接文件仍拦截; 目录链 memo 不改变判定。"""
+    from pwiki_lib.util import join_confined
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    inner = repo / "src" / "inner.py"
+    inner.write_text("x = 1\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("escape\n", encoding="utf-8")
+    os.symlink(outside, repo / "src" / "evil.py")
+    os.symlink(inner, repo / "src" / "good.py")     # 仓内目标: 放行
+    r = str(repo)
+    assert join_confined(r, "src/inner.py") is not None
+    assert join_confined(r, "src/../src/inner.py") is not None
+    assert join_confined(r, "../outside.py") is None, "../ 逃逸漏拦"
+    assert join_confined(r, "src/evil.py") is None, \
+        "末段符号链接逃逸漏拦(memo 化改造的回归)"
+    assert join_confined(r, "src/good.py") is not None
+    # 同一目录重复调用(memo 命中路径)判定不变
+    for _ in range(3):
+        assert join_confined(r, "src/evil.py") is None
+        assert join_confined(r, "src/inner.py") is not None

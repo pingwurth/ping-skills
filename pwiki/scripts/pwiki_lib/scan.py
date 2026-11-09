@@ -774,9 +774,22 @@ def load_inventory(ctx: Ctx) -> dict:
         return {}
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            inv = json.load(fh)
     except (OSError, ValueError):
         return {}
+    if not isinstance(inv, dict):
+        return {}
+    # 清单携带的 repo 必须与当前仓库一致: 克隆被移动/.pwiki 从备份恢复后,
+    # 旧路径清单曾照常喂给 decompose —— 标题降级、workspace 成员丢失、
+    # corpus 按旧路径全空, 零警告 exit 0; 复制场景更是持续分析过时副本。
+    # 对不上视为无效 → 调用方触发 _autoscan(幂等, 只多一次重扫)。
+    # abspath 归一(不比 realpath: 对已移动的旧路径无意义, 且符号链接形态
+    # 的 repo 误判代价只是一次重扫)
+    inv_repo = inv.get("repo")
+    if isinstance(inv_repo, str) and inv_repo \
+            and os.path.abspath(inv_repo) != os.path.abspath(ctx.repo):
+        return {}
+    return inv
 
 
 def write_inventory(ctx: Ctx, inv: dict) -> str:

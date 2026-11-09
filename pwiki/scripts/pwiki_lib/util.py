@@ -29,6 +29,17 @@ def dirname(p: str) -> str:
 
 
 _REALPATH_CACHE: dict = {}
+# 目录级 realpath memo(join_confined 用; 进程内 FS 不变, 与 _REALPATH_CACHE
+# 同一安全性假设)。无上限增长是有意为之: 键是被分析仓库的目录集, 有界
+_DIR_REALPATH_CACHE: dict = {}
+
+
+def _realpath_dir(path: str) -> str:
+    hit = _DIR_REALPATH_CACHE.get(path)
+    if hit is None:
+        hit = os.path.realpath(path)
+        _DIR_REALPATH_CACHE[path] = hit
+    return hit
 """repo → realpath 根的进程级缓存(join_confined 是最热助手, 一次运行
 曾对同一 repo 做 5 万+ 次两段 realpath 链; 仓库根在进程内视为常量)。"""
 
@@ -39,7 +50,12 @@ def join_confined(repo: str, rel: str):
     绝对路径(POSIX `/` 或 Windows 盘符)丢弃 repo; `../` 链与符号链接
     逃逸都在 commonpath 校验下拦截。返回的是绝对规范路径或 None ——
     调用方把 None 当"非法路径"处理, 且**不得**再区分仓外文件的存在性
-    (那会变成宿主文件存在性/行数 oracle)。"""
+    (那会变成宿主文件存在性/行数 oracle)。
+
+    解析走目录链 memo(跟踪集遍历里同一目录成百上千次, 全路径 realpath
+    曾是每文件一遍 ~10k 次全组件重走); 末段单独保留 —— 直接跳过末段
+    解析的变体会漏掉"末段是指向仓外的符号链接文件"(实测从拦截退化为
+    漏放), 故末段 islink 才付一次 realpath。"""
     p = str(rel or "").replace("\\", "/").strip()
     if not p or p.startswith("/") or re.match(r"^[A-Za-z]:", p):
         return None
@@ -47,9 +63,12 @@ def join_confined(repo: str, rel: str):
     if root is None:
         root = os.path.realpath(os.path.abspath(repo))
         _REALPATH_CACHE[repo] = root
-    full = os.path.normpath(os.path.join(root, p))
+    lex = os.path.normpath(os.path.join(root, p))
     # normpath 只消 `..` 字面量; 已存在的符号链接段由 realpath 收口
-    full = os.path.realpath(full)
+    full = os.path.join(_realpath_dir(os.path.dirname(lex)),
+                        os.path.basename(lex))
+    if os.path.islink(full):
+        full = os.path.realpath(full)
     try:
         if os.path.commonpath([root, full]) != root:
             return None
