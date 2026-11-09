@@ -55,7 +55,7 @@ python3 <skill>/scripts/dd.py status --repo <repo>
 | | |
 |---|---|
 | LLM 做 | 先 `dd.py kb-scan`（可带 `--openwiki` 自报 MCP 可用性）；按台账 kb.primary 优先用知识库做事实调研（codegraph→codegraph_explore；repowise→search_codebase/get_answer；pwiki→pwiki 检索；wiki→openwiki MCP 或直读目录内 markdown；graphify→图查询），**primary 只是默认建议，可按问题性质改用任一可用源**；无知识库则降级直接读码。对照 `references/question-dimensions.md` 逐维度识别问题 |
-| 脚本做 | 先 `dd.py phase analyzing` 进入分析阶段；`dd.py q-add --dimension <d> --title <t> --body <b> --recommendation <r> [--depends-on Q001,Q002] [--facts <自查事实>]`（支持 `--batch questions.json` 批量；analyzing 阶段首个 q-add 自动进入 grilling） |
+| 脚本做 | 先 `dd.py phase analyzing` 进入分析阶段（intake 唯一解锁命令）；`dd.py q-add --dimension <d> --title <t> --body <b> --recommendation <r> [--depends-on Q001,Q002] [--facts <自查事实>]`（支持 `--batch questions.json` 批量；analyzing 阶段首个 q-add 自动进入 grilling） |
 | 问用户 | 不问——本阶段产出问题，不作答 |
 | 禁止推进 | 未做过任何事实调研就提问（先查再问）；q-add 期间禁止写正式文档 |
 
@@ -119,6 +119,8 @@ finish 校验双文档 confirmed 后置 phase=done 并打印交付摘要。最�
 
 所有子命令 stdout = 人类可读摘要 + **末行唯一一条** `next_step: <指令>`；详细日志写 `--log`（默认 `<repo>/.agent/design-doc-writer/dd.log`）。
 
+记录在案的例外：**argparse 参数错误**（拼错 flag / 缺失必填参数）发生在日志重定向前——usage 打印到 **stderr**、stdout 为空、exit 2。只读 stdout 的驱动方对此应有兜底。
+
 ## 命令速查
 
 ```bash
@@ -128,7 +130,7 @@ dd.py q-add --dimension <d> --title <t> --body <b> --recommendation <r> [--depen
 dd.py q-answer <QID> --answer "<决策>" [--adr --adr-slug <ascii>] | <QID> --defer --reason "<原因>"
 dd.py frontier                       # exit 1 = 还有待办
 dd.py phase <intake|analyzing|grilling|analysis-doc|design-doc|done>
-dd.py manifest --enable ui,cache | --disable release --reason "<t>"
+dd.py manifest --enable ui,cache --reason "<t>" | --disable release --reason "<t>"   # --reason 每次必填
 dd.py status                         # 中断恢复入口
 dd.py check [--doc analysis|design|all]
 dd.py confirm --doc <analysis|design> --because "<用户确认原话摘要>"

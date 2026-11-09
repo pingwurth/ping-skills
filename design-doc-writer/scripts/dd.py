@@ -136,37 +136,34 @@ def _restore_stderr() -> None:
         _STDERR_REDIRECT = None
 
 
-def setup_logging(log_path: Path) -> None:
-    """全部输出写日志文件；stderr 一并重定向（进程退出时恢复）。
+def setup_logging(log_path: Path, create_dirs: bool = True) -> None:
+    """全部输出写日志文件；stderr 重定向到同一句柄（进程退出时恢复）。
 
-    对齐 sensors-analyze 现行为：每次调用 mode="w" 重建日志文件，
-    命令头由本函数写入。
+    对齐 sensors-analyze 现行为：每次调用 mode="w" 重建日志文件，命令头由
+    调用方写入。单一文件句柄承载日志与 stderr——两个独立句柄各持各的偏移，
+    会把对方的写入互相覆盖（stderr 诊断被静默销毁）。
+
+    create_dirs=False 且父目录不存在时直接跳过文件日志（只读探测不产生
+    .agent/ 目录副作用）。IO 失败抛 OSError，由 main 统一转 exit 2。
     """
     global _STDERR_REDIRECT, _ATEXIT_REGISTERED
+    _restore_stderr()
     LOG.setLevel(logging.DEBUG)
     for h in list(LOG.handlers):  # 幂等：摘掉上次配置的 handler
         LOG.removeHandler(h)
         h.close()
+    if not create_dirs and not log_path.parent.is_dir():
+        return  # 只读探测（无台账的 status）：不建目录、不落日志
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(str(log_path), encoding="utf-8", mode="w")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     LOG.addHandler(fh)
-    try:
-        f = open(str(log_path), "a", encoding="utf-8")
-    except OSError:
-        pass  # 保留原始 stderr 作回退
-    else:
-        if _STDERR_REDIRECT is not None:
-            try:
-                _STDERR_REDIRECT.close()
-            except OSError:
-                pass
-        _STDERR_REDIRECT = f
-        sys.stderr = f
-        if not _ATEXIT_REGISTERED:
-            atexit.register(_restore_stderr)
-            _ATEXIT_REGISTERED = True
+    sys.stderr = fh.stream
+    _STDERR_REDIRECT = fh
+    if not _ATEXIT_REGISTERED:
+        atexit.register(_restore_stderr)
+        _ATEXIT_REGISTERED = True
 
 
 # ==================== 错误类型 ====================
@@ -201,7 +198,13 @@ def default_log_path(repo: Path) -> Path:
 
 
 def validate_ledger(data: object) -> list[str]:
-    """结构校验，返回错误清单（空 = 合法）。"""
+    """结构校验，返回错误清单（空 = 合法）。
+
+    覆盖所有后续会被解引用的字段（docs.*.path / manifest.sections 项形状 /
+    kb / question.round·depends_on·adr / history 项）——部分损坏的台账必须在
+    此拦下并走「台账结构非法」通道，而不是加载通过后以 KeyError/TypeError
+    崩溃、被误报成引擎 bug。
+    """
     errs: list[str] = []
     if not isinstance(data, dict):
         return ["台账不是 JSON 对象"]
@@ -227,6 +230,18 @@ def validate_ledger(data: object) -> list[str]:
                 errs.append(f"questions[{i}].status 非法：{q.get('status')!r}")
             if q.get("dimension") not in DIMENSIONS:
                 errs.append(f"questions[{i}].dimension 非法：{q.get('dimension')!r}")
+            if "round" in q and not isinstance(q["round"], int):
+                errs.append(f"questions[{i}].round 非法：{q['round']!r}")
+            deps = q.get("depends_on", [])
+            if not isinstance(deps, list) or any(not isinstance(d, str) for d in deps):
+                errs.append(f"questions[{i}].depends_on 非法（须为问题 id 列表）")
+            adr = q.get("adr")
+            if adr is not None and (
+                not isinstance(adr, dict)
+                or not isinstance(adr.get("needed"), bool)
+                or not isinstance(adr.get("path"), str) or not adr.get("path")
+            ):
+                errs.append(f"questions[{i}].adr 非法（须为 null 或含 needed/path）")
     docs = data.get("docs")
     if not isinstance(docs, dict):
         errs.append("docs 缺失")
@@ -235,13 +250,32 @@ def validate_ledger(data: object) -> list[str]:
             dd = docs.get(d)
             if not isinstance(dd, dict) or dd.get("status") not in ("draft", "confirmed"):
                 errs.append(f"docs.{d}.status 非法：{docs.get(d)!r}")
+            elif not isinstance(dd.get("path"), str) or not dd.get("path"):
+                errs.append(f"docs.{d}.path 缺失或非非空字符串")
     man = data.get("manifest")
     if not isinstance(man, dict) or not isinstance(man.get("sections"), list):
         errs.append("manifest.sections 缺失或非列表")
+    else:
+        for i, s in enumerate(man["sections"]):
+            if (not isinstance(s, dict) or s.get("doc") not in ("analysis", "design")
+                    or not isinstance(s.get("id"), str) or not s.get("id")
+                    or not isinstance(s.get("title"), str) or not s.get("title")
+                    or not isinstance(s.get("enabled"), bool)):
+                errs.append(f"manifest.sections[{i}] 非法（须为 doc/id/title/enabled 对象）")
+    kb = data.get("kb")
+    if (not isinstance(kb, dict) or not isinstance(kb.get("detected"), list)
+            or not isinstance(kb.get("openwiki_mcp"), bool)
+            or not (kb.get("primary") is None or isinstance(kb.get("primary"), str))):
+        errs.append("kb 非法（须含 detected 列表 / openwiki_mcp 布尔 / primary 字符串或 null）")
     if not isinstance(data.get("adrs_dir"), str) or not data.get("adrs_dir"):
         errs.append("adrs_dir 缺失")
-    if not isinstance(data.get("history"), list):
+    hist = data.get("history")
+    if not isinstance(hist, list):
         errs.append("history 不是列表")
+    else:
+        for i, h in enumerate(hist):
+            if not isinstance(h, dict) or not isinstance(h.get("event"), str):
+                errs.append(f"history[{i}] 非法（须含 event 字符串）")
     return errs
 
 
@@ -254,8 +288,9 @@ def load_ledger(repo: Path) -> dict:
         )
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        raise DDError(f"台账损坏，无法解析：{p}（{e}）", next_="台账只能经 dd.py 子命令修改；损坏时备份后重新 init") from e
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise DDError(f"台账损坏，无法解析（须 UTF-8）：{p}（{e}）",
+                      next_="台账只能经 dd.py 子命令修改；损坏时备份后重新 init") from e
     errs = validate_ledger(data)
     if errs:
         raise DDError("台账结构非法（" + "；".join(errs) + "）",
@@ -511,8 +546,8 @@ def check_doc(repo: Path, ledger: dict, doc_key: str, confirm_mode: bool = False
         return items, set()
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        items.append(Item("FAIL", "doc-read", f"文档读取失败：{e}"))
+    except (OSError, UnicodeDecodeError) as e:
+        items.append(Item("FAIL", "doc-read", f"文档读取失败（须 UTF-8）：{e}"))
         return items, set()
     lines = text.splitlines()
     states = _fence_states(lines)
@@ -719,14 +754,17 @@ def _detect_docs_root(repo: Path) -> str:
 
 
 def _agent_ignored(repo: Path) -> bool:
+    """目标库 .gitignore 是否已忽略 .agent/（git 语义等价形都算：.agent、/.agent、**/.agent）。"""
     gi = repo / ".gitignore"
     if not (repo / ".git").exists():
         return True  # 非 git 仓库，不做提醒
     if not gi.is_file():
         return False
     for line in gi.read_text(encoding="utf-8").splitlines():
-        s = line.strip().rstrip("/")
-        if s == ".agent":
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("!"):
+            continue
+        if s.rstrip("/") in (".agent", "/.agent", "**/.agent"):
             return True
     return False
 
@@ -907,8 +945,9 @@ def _assert_acyclic(ledger: dict) -> None:
 def cmd_q_add(args, repo: Path) -> tuple[int, str]:
     ledger = load_ledger(repo)
     if ledger["phase"] == "intake":
+        # 指引必须可直接执行：kb-scan 不改阶段，只有 phase 命令能解锁 intake
         raise DDError("phase=intake，先完成输入收集（kb-scan 与事实调研）再提问",
-                      next_="先 dd.py kb-scan 并做事实调研")
+                      next_="先 dd.py phase analyzing 进入分析阶段，再 dd.py kb-scan 做事实调研")
     if ledger["phase"] == "done":
         raise DDError("phase=done 已终态", next_="流程已完成；如需修订请开启新特性")
     auto = False
@@ -921,8 +960,8 @@ def cmd_q_add(args, repo: Path) -> tuple[int, str]:
     if args.batch:
         try:
             batch = json.loads(Path(args.batch).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            raise DDError(f"--batch 文件读取失败：{e}", next_="检查 questions.json 路径与格式（对象数组，按依赖顺序排列）") from e
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise DDError(f"--batch 文件读取失败（须 UTF-8）：{e}", next_="检查 questions.json 路径与格式（对象数组，按依赖顺序排列）") from e
         if not isinstance(batch, list) or not batch:
             raise DDError("--batch 须为非空 JSON 数组", next_="检查 questions.json 格式")
         for spec in batch:
@@ -1027,8 +1066,17 @@ def cmd_frontier(args, repo: Path) -> tuple[int, str]:
                            "或裁剪掉下游问题")
     if stats["open"] > 0:  # 理论上不会走到（open 必在 frontier/blocked 之一）
         return EXIT_FLOW, "仍有 open 问题：dd.py status 检查台账"
-    return EXIT_OK, ("frontier 已清零：向用户复述完整理解求 shared-understanding 确认，"
-                     "确认后 dd.py phase analysis-doc")
+    # 阶段感知的收尾指引：给出的 phase 指令必须本身合法（PHASE_EDGES 可达）
+    cur = ledger["phase"]
+    if cur == "grilling":
+        return EXIT_OK, ("frontier 已清零：向用户复述完整理解求 shared-understanding 确认，"
+                         "确认后 dd.py phase analysis-doc")
+    if cur == "analyzing":
+        return EXIT_OK, ("frontier 已清零：向用户复述完整理解求确认，随后依次 "
+                         "dd.py phase grilling、dd.py phase analysis-doc"
+                         "（analyzing 不能直达 analysis-doc，需经 grilling）")
+    return EXIT_OK, (f"frontier 已清零；当前阶段 {cur} 无需再取轮，"
+                     "按 dd.py status 的 next_step 推进")
 
 
 def cmd_phase(args, repo: Path) -> tuple[int, str]:
@@ -1323,28 +1371,42 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # argparse 错误发生在日志重定向前，保证 usage 可见
+    # argparse 错误发生在日志重定向前，保证 usage 可见（stdout 为空、usage 走
+    # stderr、exit 2——这是协议记录在案的例外，见 SKILL.md 退出码表）
     parser = build_parser()
     args = parser.parse_args(argv)
 
     repo = Path(getattr(args, "repo", ".")).resolve()
     log = Path(getattr(args, "log", None) or default_log_path(repo))
-    setup_logging(log)
-    LOG.info(f"[cmd] dd.py {' '.join(argv)}  repo={repo}")
+    # 阶段 0 只读探测：无台账的 status 不创建 .agent/ 目录树（--log 显式指定除外）
+    probe_only = (args.cmd == "status" and getattr(args, "log", None) is None
+                  and not ledger_path(repo).is_file())
 
+    code: int
+    nxt: str
     try:
+        setup_logging(log, create_dirs=not probe_only)
+    except OSError as e:
+        print(f"错误: 日志初始化失败：{e}")
+        print("next_step: 检查 --log 路径与权限后重试")
+        return EXIT_ERR
+    try:
+        LOG.info(f"[cmd] dd.py {' '.join(argv)}  repo={repo}")
         code, nxt = args.func(args, repo)
     except DDError as e:
         print(f"错误: {e.msg}")
         nxt = e.next_ or "按 SKILL.md 工作流修正后重试"
+        code = EXIT_ERR
+    except OSError as e:
+        print(f"错误: IO 失败：{e}")
+        nxt = "检查路径/权限/磁盘后重试"
         code = EXIT_ERR
     except Exception as e:  # noqa: BLE001 - 顶层兜底
         LOG.exception("未预期异常")
         print(f"错误: 未预期异常：{e}（详见日志 {log}）")
         nxt = "查看日志定位；这是 bug 请回报"
         code = EXIT_ERR
-    if nxt:
-        print(f"next_step: {nxt}")
+    print(f"next_step: {nxt}")
     return code
 
 
