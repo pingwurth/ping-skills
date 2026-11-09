@@ -1,0 +1,629 @@
+{
+  "review": {
+    "date": "2026-11-09",
+    "mode": "code-review max --max-findings all（pwiki 单 skill 全量，后台 fork）",
+    "scope": "pwiki/（dev @ 26c8c8b，工作树干净；此前的四轮 63+67+73+77 已随 4595990 修复，全仓轮 pwiki 4 条已随 7ad03a7 修复，本轮为第五轮专项）",
+    "pipeline": "14 个查找角度 → 92 个原始候选 → 75 个去重 → 每候选一个验证器投票（71 confirmed / 2 plausible / 2 refuted）→ gap sweep 补扫 +4（主审对照决定性代码行自查确认）",
+    "result": "77 个发现：35 条带实证/端到端/仿真复现输出，10 条对照源码确认，4 条潜在，2 条 PLAUSIBLE，11 条结构/单源违反，7 条性能，5 条卫生/死代码，3 条文档漂移",
+    "baseline": "318 个测试通过，工作树干净",
+    "effort": "50 次工具调用，约 101 分钟"
+  },
+  "findings": [
+    {
+      "id": "P01",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 194,
+      "tier": "reproduced",
+      "summary": "D19 missing-levels 守卫在每个全新 workspace 的首次 finish 都会触发：记录在案的生命周期里没有任何一步会创建 <root>/<locale>，因此 `pwiki finish` 永远需要未写入文档的 --yes 标志，否则以退出码 3 退出、运行卡死在 LINING。",
+      "failure_scenario": "在全新仓库上实证验证：init→scan→modules→plan→digest→begin→提交所有任务→`pwiki finish`（SKILL.md 文档流程不含 --yes）→ 'error: 新发布根将创建 2 级缺失目录(.../wiki/zh/content) —— 像路径 typo(D19); 确认无误加 --yes'，退出码 3，0 个页面发布，运行卡在 LINING。守卫注释假设的 '合法新根的父目录已存在' 对文档默认路径不成立；每个 e2e 测试都传了 --yes，掩盖了该问题。"
+    },
+    {
+      "id": "P02",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 838,
+      "tier": "reproduced",
+      "summary": "export db_to_file 用单一 plan/run 级样式渲染所有页面，无视 publish_run 遵循的每行样式戳（327 行）以及 file_to_db 的逐行剔除决策（880 行）所遵循的同一戳 —— 两个渲染器产生分叉的字节，且注入层被永久吸收进 page.content。",
+      "failure_scenario": "实证验证：发布页面带样式戳 'deep'，计划随后改为 `style: concise`，`export --direction db_to_file` 用 concise 的 <cite>+TOC 注入重新渲染所有 deep 页面（'file has TOC after db_to_file? True'）；随后 `export --direction file_to_db` 什么都不剔除（行戳=deep → export_injects 为 False），注入层被写入 page.content —— 违反引擎自身防线 '注入物只存在于导出文件, 永不写回 page.content'（publish.py:9, bug10）。"
+    },
+    {
+      "id": "P03",
+      "file": "pwiki/scripts/pwiki_lib/reconcile.py",
+      "line": 111,
+      "tier": "reproduced",
+      "summary": "_apply_title_rename 用 plan 级样式（`(plan or {}).get('style') or ctx.style`）组合重命名后的导出文件，且从不刷新行样式戳，与 cmd_write（publish.py:735-754）不同 —— 产生来回翻转的文件内容，并导致与 c18 相同的永久 file_to_db 污染。",
+      "failure_scenario": "实证验证：deep 发布的 workspace，计划切到 concise，经 `reconcile --all` 做 D22 重命名 → 重命名文件带 TOC 注入写出而行戳保持 'deep'（'row style: deep | file TOC? True | DB content TOC? False'）；该窗口内的 file_to_db 吸收注入物（'after file_to_db: DB content TOC? True'）；下一次 finish 以无注入方式重渲染该行 —— 文件字节取决于最后哪个路径写了它。"
+    },
+    {
+      "id": "P04",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 578,
+      "tier": "confirmed",
+      "summary": "门禁拒绝分支是 cmd_submit 中唯一退出时不做 orphan-save 的路径，因此被门禁拒绝的 stdin 提交（`--file -`）在 stdin 被消费后内容即丢失。",
+      "failure_scenario": "用含引用路径/范围硬错误的内容执行 `pwiki submit <id> --file - < page.md` → 任务回到 pending，run_log 记录 'submit_rejected'，die(EXIT_GATE) —— 手稿未保存到任何地方（不在 work/orphan-submits/，也不在任务行），且 stdin 无法重读。engine.py:450-453 的头注释声称 stdin 草稿绝不能丢失；其余所有拒绝分支都调用 _orphan_save。"
+    },
+    {
+      "id": "P05",
+      "file": "pwiki/scripts/pwiki_lib/db.py",
+      "line": 674,
+      "tier": "reproduced",
+      "summary": "complete_job_guarded 的忙碌状态元组（\"LINING\",\"COMPLETED\",\"PARTLY_COMPLETED\"）漏掉 CANCELLED，因此与 begin --force / cancel --force / regenerate --force 竞争的无令牌提交会返回 'ok' 并把任务标记为已在死去的 run 中完成。",
+      "failure_scenario": "用真实 WikiDB 仿真验证：writer 认领任务（attempts=1），不带 --claim 提交（attempts==1 时允许）；协调者并发运行 begin --force → run 状态=CANCELLED，任务释放回 pending/token=''；守卫通过（state != processing 且 run 状态不在忙碌元组）且 UPDATE 生效 —— 结论 'ok'，cmd_submit 打印 'submitted' 并以退出码 0 结束，而内容滞留在终局 run 上（同样竞争带 --claim 时会正确走 orphan-save）。"
+    },
+    {
+      "id": "P06",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 620,
+      "tier": "reproduced",
+      "summary": "strip_injected_layers 用朴素正则（非围栏感知）剔除 <cite> 块和 TOC 段 —— 与所有在剔除围栏后文本上运行的其他门禁不同 —— 因此带围栏标出的示例的页面在 export file_to_db 时被永久损坏（publish.py:157 的注入端使用同样非围栏感知的 TOC 正则）。",
+      "failure_scenario": "实证验证：带围栏 markdown 示例（含 '&lt;cite&gt;…&lt;/cite&gt;' 和 '## 目录'）的 concise 页面通过提交与 LINING（告警/检查都在剔除围栏的文本上计算）；strip_injected_layers 随后删除围栏内的 <cite>，且 TOC_SECTION_RE 从围栏内的 '## 目录' 一路吞到代码块的收尾反引号 —— 输出含未闭合代码块；file_to_db 检测到 content_hash 变化并把损坏文本存入 page.content（永久）；validate --content --fix 会写回同样损坏。"
+    },
+    {
+      "id": "P07",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 1006,
+      "tier": "reproduced",
+      "summary": "finish 的发布/快照安全网只捕获 Exception，而 die() 抛 SystemExit，因此页面表事务提交之后发生的发布期 die（publish.py:314-315 同路径冲突）会逃逸，运行卡在 LINING 且 DB 已提交。",
+      "failure_scenario": "端到端复现：两个已完成任务指向同一路径 → finish 提交含该路径的 2 个页面行（publish.py:299 commit），随后以 EXIT_GATE die（冲突 die），run 状态仍为 LINING（不是 DOCUMENT_FAILED），0 个文件写出，generation-state 过期，并发提交被 c037 LINING 守卫 orphan 化 —— 正是 c043 '绝不卡在 LINING' 承诺要防的 DB-显示已发布/树缺失的分裂态。（D19 拒绝路径按设计保持 LINING，engine.py:934-95 已记录。）"
+    },
+    {
+      "id": "P08",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 829,
+      "tier": "reproduced",
+      "summary": "cmd_cancel（以及 engine.py:734 的 regenerate --force）缺 begin --force 在 c037 中获得的 LINING 状态守卫，且 publish_run/snapshot_run 从不重查 run 状态，因此 finish 中途的取消会在已取消的 run 下完整发布 wiki。",
+      "failure_scenario": "端到端复现：在 finish 的多秒发布窗口期间触发取消 —— 其唯一守卫（已租约任务）通过，因为所有任务都已终局；publish 完成（'publish: 4 files'），snapshot id 和 baseline_run_id 记录在已取消的 run 下，随后 finish 自身的终局 UPDATE 失败（rowcount 0，'不复活已取消的 run'，退出码 3）—— wiki 完整发布，但基线指向一个记录为 CANCELLED 的 run。"
+    },
+    {
+      "id": "P09",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 622,
+      "tier": "reproduced",
+      "summary": "cmd_submit 在 complete_job_guarded 已提交之后，用裸自动提交 UPDATE 写 summary/key_topics —— 在将提交与 finish 的 LINING 快照串行化的受守护事务之外，因此竞争的 finish 可能发布并基线化空摘要，且该行永不自愈。",
+      "failure_scenario": "用真实数据库代码仿真：最后一个 pending 任务完成（受守护事务提交）→ 并发 finish 置 LINING 并读 jobs()，summary='' → publish_page 把空摘要复制进页面行，快照把它基线化；迟到的 UPDATE 只碰 page_job；后续 finish 的 kept-merge 只携带目录字段，且 _republish_changed 比较对 '' 摘要 —— 页面行在 _index.yaml 元数据和未来 writer 提示中永远保持 summary=''/key_topics='[]'。"
+    },
+    {
+      "id": "P10",
+      "file": "pwiki/scripts/pwiki_lib/snapshot.py",
+      "line": 306,
+      "tier": "reproduced",
+      "summary": "check_item 给卡片用 `source_files or scope`（回退），而 snapshot_hashes 把卡片的 scope 与 source_files 的并集基线化，因此卡片同时声明两者时，scope 文件的变更永远不会把该卡片标为 stale。",
+      "failure_scenario": "现场复现：卡片构建系统带 scope [services/user/] + source_files [Makefile]；基线覆盖 services/user/ 下所有文件；修改 services/user/m1.py 进入更新器的 changed 集合（'1 changed'），但 update 只排队 ['services','services-overview'] —— 'CARD STALE? False'。卡片声明的 scope 变了但从不重新排队。现实里这甚至是计划默认态（种子卡片带 `scope: ['**']` + source_files；把 '**' 收窄到真实目录的用户会踩中）。"
+    },
+    {
+      "id": "P11",
+      "file": "pwiki/scripts/pwiki_lib/snapshot.py",
+      "line": 250,
+      "tier": "reproduced",
+      "summary": "cmd_update 复活用户跳过的页面：check_item 把任何从未发布的计划项作为 'new_item' 排队，从不查 db.skipped_page_ids()，而只有 begin --missing 遵循它。",
+      "failure_scenario": "现场复现：跳过页面 'overview'（`pwiki skip`），finish → PARTLY_COMPLETED；触碰 Makefile，运行 update → '- overview (new_item)'，队列含 'overview' —— 'REVIVED SKIP: True'。db.py:459-460 记录了被违反的契约：'跳过是用户决定, 任何后续 run 都不该翻案'；该页面获得完整 LLM 重写，并在后续每次 update 再次排队。"
+    },
+    {
+      "id": "P12",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 767,
+      "tier": "reproduced",
+      "summary": "cmd_delete 没有活跃 run 守卫，不同于其兄弟 cmd_write（717 行，c039）和 export file_to_db（846 行，c028），因此 writer 仍在工作时的删除被静默撤销。",
+      "failure_scenario": "实证验证：活跃 DOCUMENT_GENERATING run，先前发布页面有 pending 任务 → `delete services` 以退出码 0 完成（删行、解除文件链接、重写索引），而 write/export 以退出码 3 拒绝；writer 提交，finish 重新插入该行并重写文件 —— 'AFTER finish: row back? True | file back? True'。run 期间的 `delete --all` 也以 0 退出并中途删除所有已发布行（7→0），留下 DB/计划/树不一致。"
+    },
+    {
+      "id": "P13",
+      "file": "pwiki/scripts/pwiki_lib/reconcile.py",
+      "line": 176,
+      "tier": "reproduced",
+      "summary": "D22 标题重命名把 re.sub(r\"^# .*$\", …, count=1, flags=re.M) 应用在原始内容上 —— 不感知围栏 —— 因此重命名的是真正 H1 之前围栏代码块里的前导 '#' 注释，而非真 H1。",
+      "failure_scenario": "复现：页面 '```bash\\n# 注释\\nmake install\\n```\\n\\n# 旧标题\\n…' 是门禁合法的（gate_item 在剔除围栏的文本上计算 H1）→ 重命名把围栏注释改写为 '# 新标题'，真 H1 保持 '旧标题'；行标题现与内容 H1 不一致，且重命名后没有重新门禁（re.sub → UPDATE → save → moves → save_plan，从不调用 gate_item），因此 validate --content 永远报 schema/h1 不匹配，也没有 stale 原因去修它。"
+    },
+    {
+      "id": "P14",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 604,
+      "tier": "reproduced",
+      "summary": "fix_off_by_one 用 a2 = min(a_i, n) 截断但没有 n>=1 守卫，因此对空（0 行）文件的引用被改写为非法范围 '#L0-L0' —— 发布层自身会发出的、无法自动修复的硬错误。",
+      "failure_scenario": "测试验证：作者引用空文件为 '[src/empty.py:1-1](file://src/empty.py#L1-L1)' → 归类 citation/off-by-one（可自动修复，LINING 时过滤），fix_off_by_one 产出 '[src/empty.py:0-0](file://src/empty.py#L0-L0)'；重验证产生硬错误 'citation/range: 非法行范围'（a<1），且 fix_off_by_one 无法修复（b=0 != n+1）—— compose_export_content 在发布时把损坏引用运进每个页面（publish.py:139）。"
+    },
+    {
+      "id": "P15",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 705,
+      "tier": "reproduced",
+      "summary": "cmd_fail（以及 720 行的 cmd_skip）在没有任何 run 状态守卫下修改任务状态 —— 它们只过 _active()，而 LINING ∈ ACTIVE_RUN_STATES —— 因此 finish 的发布窗口期间允许 fail/skip，而 finish 的结论用的是 LINING 前的计数快照。",
+      "failure_scenario": "端到端复现：run 已 LINING 时对所有已完成任务 `pwiki fail <page> --force` 返回 EXIT_OK；finish 按 engine.py:917 拍的快照将其计为 COMPLETED，而任务行显示 failed —— 重处理静默消失于 run 的报告结果（本应 PARTLY_COMPLETED）。cmd_submit 针对同样串行化是拒绝的（engine.py:465-473）。"
+    },
+    {
+      "id": "P16",
+      "file": "pwiki/scripts/pwiki_lib/scan.py",
+      "line": 236,
+      "tier": "reproduced",
+      "summary": "parse_pyproject 把每个 '[project]' 标量键记为依赖名，从不解析 PEP 621 'dependencies = [...]' 数组，因此 manifests.dependencies 变成 ['name','version','description','requires-python','dependencies']，真实依赖被丢弃。",
+      "failure_scenario": "执行验证：标准 pyproject 带 dependencies=['requests>=2.28','pydantic>=2'] 跑 parse_pyproject 得到的正是垃圾键列表。下游：themes.py:691-693 摄取垃圾（counts[k] += 1），而真实 DEP_SCORES 依赖（fastapi 等）从不被计数或成卡；垃圾 'version' 卡会在含 version.py 的仓库通过包装门禁（planner.py:738 静默跳过该清单，所以种子路由只看到零 pyproject 依赖卡）。"
+    },
+    {
+      "id": "P17",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 222,
+      "tier": "reproduced",
+      "summary": "merge_manual 只在 str(old.get(f) or '').strip() 为真时保留手工字段，因此手工编辑的序号 0（合法且最常见 —— 第一个孩子）从不保留，每次重新生成时静默撤销手工重排。",
+      "failure_scenario": "用真实函数验证：merge_manual 在页面上手工序号 0 + 引擎序号 5 → 保留 5（`0 or ''` 为假）。MANUAL_FIELDS 含序号；引擎自身从 0 开始给孩子编号（themes.py:1706-1721），把页面放第一位是典型场景；两个重新生成路由（plan --themes、plan --layers commit 经 layers.py:406）都回退手工排序 —— 违反 c027 手工保留契约。唯一测试用的是序号 3。"
+    },
+    {
+      "id": "P18",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 1755,
+      "tier": "confirmed",
+      "summary": "_plan_cards.add_card 追加 'card-' + slugify(dep) 时没有 id/标题唯一性守卫，不同于显式去重的 planner.seed_cards（'@foo/bar' 与 'foo-bar' 有相同 slug）—— 因此 slug/标题冲突产生重复卡片 id 或冲突的知识路径，阻塞 begin 或使 plan --themes 本身崩溃。",
+      "failure_scenario": "验证：slugify('@azure/storage') == slugify('azure-storage') == 'azure-storage'；都通过门禁的仓库 → 两张卡片 id 'card-azure-storage' → validate_plan '重复 page/card id' 阻塞 begin。更现实：DEP_DISPLAY 把 'tauri' 和 '@tauri-apps/api' 都映射到标题 'Tauri'（'tauri' 在 ARCH_SHAPING_DEPS 中，绕过包装门禁）→ 相同知识路径 → '卡片标题冲突' / _die_on_path_collision 使 plan --themes 中止；run_themes 的内部检查从不查卡片 id。"
+    },
+    {
+      "id": "P19",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 320,
+      "tier": "reproduced",
+      "summary": "parse_cite_block（定义于 112 行）在原始内容里搜第一个 <cite>…</cite>，不剔除代码围栏，因此围栏示例引用块在 deep 门禁中与真实引用集合比较，在 LINING 产生硬错误。",
+      "failure_scenario": "复现：deep 页面的围栏 markdown 示例 '&lt;cite&gt;- [src/f.py](file://src/f.py)…&lt;/cite&gt;' 出现在 writer 真实 <cite> 块之前（与正文引用完全匹配）→ gate_item(phase='lining', style='deep') 返回硬错误 'schema/cite: <cite> 块集合与正文引用集合不一致'，而 extract_citations 在剔除围栏的文本上运行 —— 顺序依赖已验证（真实块在前 → 无错误），因此合法页面被整体拒绝且无机械修复手段。"
+    },
+    {
+      "id": "P20",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 381,
+      "tier": "reproduced",
+      "summary": "引用文件数的下界（n_files < flo）只在 strict 分支追加，而 elif 只在提交时对上界告警 —— 因此低于 6 文件下限的 deep 页面在提交时零反馈，却在 LINING 遭硬拒绝，浪费整轮重写。",
+      "failure_scenario": "运行 gate_item 验证：deep 页面引用 5 个不同真实文件、65 条带内引用 → 提交产生 0 错误 0 告警（size/cited-files 条目哪里都没有）；LINING 返回 ['size/cited-files: 引用 5 个文件 (目标 ≥6)']。其余所有 size 维度（page/words/citations/mermaid）在提交时双向告警；这是唯一不对称的维度。"
+    },
+    {
+      "id": "P21",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 2087,
+      "tier": "reproduced",
+      "summary": "`lines += (\"这些页面覆盖占位目录…\")` 往列表加了一个字符串 —— list.__iadd__ 按字符扩展 —— 因此存在 D8 骨架页面时，人审门禁文档 work/plan.md 以单字符行发出。",
+      "failure_scenario": "复现：括号内字符串拼接使 `lines += (s1 s2)` 变成 list.__iadd__(str)，每行追加一个 CJK 字符（43 字符句子 → 43 个元素）；最终 '\"\\n\".join(lines)' 在分节标题和页面列表之间发出约 43 个单字符行。在仓库含骨架/占位目录时每个 plan --themes / plan --review 都触发（skeleton_scope_pages 在 themes.py:1476-1481, 1683 填充）。"
+    },
+    {
+      "id": "P22",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 2030,
+      "tier": "reproduced",
+      "summary": "render_plan_md 按 (x.get(\"ordinal\", 0), x.get(\"id\", \"\")) 排序页面 —— wiki_plan.yaml 中显式空 `ordinal:` 解析为 None，.get 默认值从不生效，排序抛 TypeError，裸 traceback 退出违反退出码契约。",
+      "failure_scenario": "复现：手编 wiki_plan.yaml 给页面空值 `ordinal:`（yaml_load → {'ordinal': None}），然后 `pwiki plan --review`（planner.py 直接对手编计划调用 render_plan_md，无预校验）或 plan --themes（merge_manual 原样保留手工页面；render 在 ~1990 行运行）→ sorted() 抛 TypeError: '<' not supported between 'NoneType' and 'int'。util.as_int 就是为这一崩溃族存在的，该点被遗漏。"
+    },
+    {
+      "id": "P23",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 332,
+      "tier": "reproduced",
+      "summary": "cmd_next 对尚未建任务队列的活跃 run 报告 'status: complete'（JSON {\"status\":\"complete\"}，退出码 0）—— 它只数 page_job 行，从不检查 begin/update 的已提交 create_run_guarded (DIRECTORY_GENERATING) 与 queue_jobs 事务之间的 DIRECTORY_GENERATING 窗口。",
+      "failure_scenario": "端到端复现：构造精确的已提交中间态 → `next --json` 返回 {\"status\":\"complete\", summary total 0}，退出码 0；轮询驱动的协调者读作完成信号，其后续 finish 在 update_run_guarded 状态检查以退出码 3 结束（预期状态不含 DIRECTORY_GENERATING）—— '完成然后费解的前置条件失败' 模式，正是 cmd_next 针对自身 pending/processing 情形修过的（engine.py:322-331）。"
+    },
+    {
+      "id": "P24",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 666,
+      "tier": "reproduced",
+      "summary": "cmd_submit 在 s['pending']==0 时打印 '全部 job 已终态 — pwiki finish'，无视 s['processing']>0 —— 与已修的 cmd_next 陷阱相同（engine.py:322-331 记录轮询驱动者被 in-flight 检查弹回而提前收工）。",
+      "failure_scenario": "复现：next --batch 领走全部剩余任务（pending=0, processing=9）；writer A 提交一个 → 完成提示在最新摘要 {pending: 0, processing: 8} 时触发；协调者调用 finish，在 engine.py:918-921 以退出码 3 结束（'仍有 N in-flight job'）。"
+    },
+    {
+      "id": "P25",
+      "file": "pwiki/scripts/pwiki_lib/db.py",
+      "line": 844,
+      "tier": "reproduced",
+      "summary": "upsert_file_hashes 在任何事务之外跑多行 executemany（isolation_level=None 逐句自动提交），因此刷新中途崩溃留下半更新的 file_hash 基线。",
+      "failure_scenario": "实时双连接测试：upsert_file_hashes 写 60,000 行期间，并发读者观察到 444 个不同部分状态 —— 每条 INSERT 单独自动提交。cmd_write 的 refresh_baseline_for 或 finish 的 snapshot_run 中途被杀/崩溃 → 部分路径基线行已刷新、其余保持编辑前哈希 → 下一次 update 对同一次逻辑编辑混合报 stale/clean（虚假重排队或漏变更）。"
+    },
+    {
+      "id": "P26",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 777,
+      "tier": "reproduced",
+      "summary": "`pwiki delete --all` 只 rmtree content_dir 和 knowledge_dir，不碰 <locale>/meta/ —— 因此 repowiki-metadata.json 和 generation-state.json 保持全量填充，正是单条目删除路径被修复以避免的幽灵条目状态。",
+      "failure_scenario": "实证验证：delete --all 删除 9 项 wiki 后，zh/content 与 knowledge/zh 消失、DB 空，但 zh/meta/repowiki-metadata.json 仍列出 9 项 / 4 个 wiki_catalogs / 9 个 page_ids，generation-state.json 仍映射所有页面 —— Qoder-IDE 导入接口读取的正是这些索引（单条目路径会重写它们；注释在 794-797 行）。"
+    },
+    {
+      "id": "P27",
+      "file": "pwiki/scripts/pwiki_lib/planner.py",
+      "line": 964,
+      "tier": "confirmed",
+      "summary": "cmd_plan 中 `--review` 无条件重置 `changed = False`，静默丢弃同一次调用早先应用的 --sheets/--deps/--aliases 变更（只存在于内存，从不 save_plan），而 render_plan_md 把本应有的计划渲染进 work/plan.md。",
+      "failure_scenario": "`pwiki plan --sheets standard --review`（这些开关在 plan 子解析器上可组合 —— 只有 --seed/--themes 互斥）：控制台打印 'sheets: +N' 且 work/plan.md 列出新 sheet 页面，但 wiki_plan.yaml 从不保存（965 行 `if changed:` 永不为真）；下一个 begin 不排队任何 sheets —— 评审用的计划描述了一个从未持久化的状态。"
+    },
+    {
+      "id": "P28",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 604,
+      "tier": "confirmed",
+      "summary": "token_lost orphan 路径保存了手稿，但不像 cmd_submit 其余九个 orphan 分支那样写 run_log 'orphan_submit' 审计行，因此该孤儿从 run_log 审计通道消失。",
+      "failure_scenario": "complete_job_guarded 返回 'token_lost'（match_claim 与其 UPDATE 之间租约被回收）：文件落 work/orphan-submits/，die() 以退出码 3 退出，但 run_log 无条目 —— 从 run_log 协调丢失工作（记录在案的审计通道，所有其他 orphan 分支都写，engine.py:461-599）的运维永远看不到它，手稿也无法找回。"
+    },
+    {
+      "id": "P29",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 206,
+      "tier": "reproduced",
+      "summary": "load_overrides 只校验每个 title_maps 值是 dict，而 platform_rules 在 make_leaves（~383，'for sub, rule_title in rules'）被用作 (sub, title) 对的列表，因此其他所有 title_maps 键的自然 dict 形态通过过滤并使 planner 崩溃，列表形态反被静默丢弃。",
+      "failure_scenario": "端到端验证：pwiki.yaml `title_maps: {platform_rules: {ipc: IPC 层}}`（dict —— store/feature/window 用的形态）通过 isinstance(v, dict) 过滤，随后 for a,b in {'ipc':'x'} 抛 ValueError: too many values to unpack —— plan --themes 中途裸 traceback；2 字符键作为垃圾解包（sub='d', title='b'）；列表形态被静默丢弃（覆盖成死状态，无告警）。两条路径都违反模块自身 docstring 记录的覆盖错误 '大声告警 + 忽略' 契约（166-168 行）。"
+    },
+    {
+      "id": "P30",
+      "file": "pwiki/scripts/pwiki_lib/qoderplan.py",
+      "line": 266,
+      "tier": "reproduced",
+      "summary": "qoder-plan --lint 在 repowiki:/knowledgecard: 非映射或 documents:/notes: 非列表时以裸 AttributeError 崩溃 —— 嵌套形态未防护，破坏周围代码承诺的契约退出码。",
+      "failure_scenario": "经 CLI 验证：`repowiki:\\n  - a` → 266 行 AttributeError traceback（'list' 对象无属性 'get'），退出码 1（裸 traceback，非契约退出码 2）；`documents: \"notalist\"` 和 `notes: \"notalist\"` 在 _check_caps 内同样崩溃。文件缺失（EXIT_PRECOND）、YAML 语法（EXIT_GATE）、顶层非 dict（EXIT_GATE）守卫都在 —— 嵌套层正是这些守卫要防的崩溃类别。"
+    },
+    {
+      "id": "P31",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 513,
+      "tier": "latent",
+      "summary": "有效样式优先级链在 15+ 处手工拼写且顺序不同 —— submit 算 job>run>ctx（513 行，漏 plan 层），finish 算 job>run>plan>ctx（931 行，自己的注释声称与 submit 同序）—— 因此未盖章行可能得到互相矛盾的 submit/finish 门禁结论。",
+      "failure_scenario": "分歧已确认：config.json=concise、计划切 deep、任务/run 行未盖章（引擎别处防御的手编/旧库情形，如 publish.py:651、db.py:371 默认 style=''）—— submit 把任务门禁为 concise（513 行落入 ctx.style），finish 把同一任务门禁为 deep（931 行落入 plan）—— 正是双重门禁互斥场景，publish_run 在 327 行的逐行修复就是为它存在的。当前所有排队路径都盖章，所以需要未盖章行触发 —— 有记录在案的兜底预期的潜在问题。"
+    },
+    {
+      "id": "P32",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 952,
+      "tier": "confirmed",
+      "summary": "finish 的 LINING 门禁调用（以及 validate --content、cmd_write 和 snapshot 的样式复查）漏传 mod_titles —— 只有 submit（strict=False）传了 —— 因此 gates.py:444-447 的模块提及检查永远到不了其 `errors if strict` 分支：升级层是死代码，该规则永远只是告警。",
+      "failure_scenario": "deep 样式页面分配了模块 '订单服务' 却全文未提及：submit 发非阻塞告警，随后 finish 不带 mod_titles 调 gate_item → `for name in (mod_titles or [])` 不执行 → LINING 通过，页面在模块分配规则静默未强制执行下发布 —— 而这恰是本应强制执行的阶段（engine.py:514-533 是唯一的 mod_titles 调用者）。"
+    },
+    {
+      "id": "P33",
+      "file": "pwiki/scripts/pwiki_lib/layers.py",
+      "line": 213,
+      "tier": "reproduced",
+      "summary": "apply_layer_result 假设每个 articles 条目是 dict（213 行 a.get）；非 dict 条目抛 AttributeError，且 cmd_plan_layers 只捕获 ValueError，因此崩溃以裸 traceback 逃逸，退出码为非契约的 1。",
+      "failure_scenario": "执行验证：apply_layer_result(…, '&lt;result&gt;{\"articles\": [\"overview\"]}&lt;/result&gt;', …) → AttributeError: 'str' 对象无属性 'get'；`pwiki plan --layers apply --file out.md` 以未捕获 traceback 和退出码 1 死亡，而非记录在案的 2 + 可修复消息（与 qoderplan --lint 崩溃同族，位置不同）。writer/模型产出字符串列表或截断 JSON 即可触发。"
+    },
+    {
+      "id": "P34",
+      "file": "pwiki/scripts/pwiki_lib/i18n.py",
+      "line": 223,
+      "tier": "latent",
+      "summary": "deep 架构 writer 提示在 zh 与 en 都硬编码 mermaid 带 '5-8 张'，不从 STYLE_PRESETS['deep']['mermaid'] 派生 —— 正是 layers.py F30 修复在那里消灭的手写数字位点，这里被遗漏，且无测试锁定。",
+      "failure_scenario": "STYLE_PRESETS['deep']['mermaid'] 收紧（如 (7,10)）作为声明唯一事实源：gates.py:343-346 在 LINING 强制新带，但每个主题路由架构页的提示（i18n.page_prompt，约 10 个调用点）仍指示 writer 画 5-8 图 —— 整批按旧数字写作，而 finish LINING 拒绝它 —— 正是 layers.py:276-278 自己注释里描述的失败模式。"
+    },
+    {
+      "id": "P35",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 43,
+      "tier": "confirmed",
+      "summary": "cmd_init 用全新构造的默认值无条件重写 config.json —— 在已有 workspace 上重跑 `pwiki init` 静默丢弃所有手工 config.json 编辑（lease_minutes、locale、export_style…），无告警、无备份、无合并。",
+      "failure_scenario": "用户编辑 .pwiki/config.json 调大 lease_minutes（无 CLI 开关 —— 唯一调节途径），之后按 SKILL.md 的样式切换说明重跑 `pwiki init --style concise` → 文件被 lease_minutes=30 与默认值覆盖；每个长跑 writer 的租约现 30 分钟过期，其提交流落 orphan-submits，且没有任何东西告诉用户编辑被毁了 —— 与计划文件遵守的 '绝不静默覆盖手工编辑' 契约相反。"
+    },
+    {
+      "id": "P36",
+      "file": "pwiki/scripts/pwiki_lib/qoderplan.py",
+      "line": 110,
+      "tier": "reproduced",
+      "summary": "_emit 对 title/note/hints 做字节截断，但不截断写入的 goal —— 超过 CAP_GOAL_BYTES (10,000) 的 goal 发出时仅告警且退出码 0，因此符合 Qoder 的加载器在 CJK 字符中间硬字节截断，这正是 _trunc_bytes 要防的乱码。",
+      "failure_scenario": "实证验证：计划页面带 14,400 字节 goal → 发出的文件带完整 14,400 字节 goal，stdout 'warn: goal 14400 字节 > 10000'，EXIT=0（emit 无条件返回 EXIT_OK）；--lint 确实标记它，但 emit 发送了不合规文件，留给 Qoder 的加载器在 3 字节序列中间切割。"
+    },
+    {
+      "id": "P37",
+      "file": "pwiki/scripts/pwiki_lib/reconcile.py",
+      "line": 178,
+      "tier": "confirmed",
+      "summary": "标题重命名作为一连串独立自动提交语句应用 —— 裸 UPDATE 页面 title/path（178-181）、save_page_content（182）、后代 UPDATE path（206-208）、然后文件移动 —— 完全没有事务包裹。",
+      "failure_scenario": "UPDATE 与保存之间被中断（kill/ENOSPC/KeyboardInterrupt）使页面行持久保持 title=new/path=new，而 DB 内容仍带旧 H1、文件仍在旧路径；read/pages/export 服务于该不一致态，下一次 update 标记 catalog_changed。（finish 的 kept-loop 从仍旧的计划重算 title/path 并回滚该行 —— 自愈了那个尾巴 —— 但崩溃窗口内的 DB/磁盘分歧是真实的。）"
+    },
+    {
+      "id": "P38",
+      "file": "pwiki/scripts/pwiki_lib/config.py",
+      "line": 208,
+      "tier": "reproduced",
+      "summary": "显式相对 --root 相对进程 CWD 解析（os.path.abspath），而默认 root 锚定仓库 —— 同一标志值 '.pwiki' 按是默认还是键入指向不同 workspace，无守卫无告警。",
+      "failure_scenario": "实证验证：从 /tmp，`pwiki pages --repo /tmp/proj --root .pwiki` 创建了 /tmp/.pwiki/wiki.db（CWD 锚定），而真实的 /tmp/proj/.pwiki 未被触碰 —— 状态静默分裂到两棵树；下次从另一目录调用又静默初始化一个不同的空 workspace（'no run'，或一次完整 scan/plan 把全新树写进错误目录）。"
+    },
+    {
+      "id": "P39",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 820,
+      "tier": "confirmed",
+      "summary": "`pwiki export --force` 被解析但 db_to_file 分支从不读取（只有 851 行的 file_to_db 参考 args.force）—— 对一半导出方向是解析即丢弃的开关。",
+      "failure_scenario": "`pwiki export --direction db_to_file --force` 解析行为与不带开关相同 —— 无诊断、无错误、无效果；db_to_file 唯一门禁是 'DB 无已发布条目' die，因此该开关够不到任何行为，却看起来像记录在案的强制语义。"
+    },
+    {
+      "id": "P40",
+      "file": "pwiki/scripts/pwiki_lib/yamlite.py",
+      "line": 226,
+      "tier": "reproduced",
+      "summary": "_KV_RE 把普通键绑定到第一个 ': ' 之前的最短前缀，因此含无空格冒号的键被静默重塑：'a:b: v' 解析为 {'a': 'b: v'} —— 与模块记录的人编接口 '拿不准就报错, 绝不静默吞字段' 契约相反。",
+      "failure_scenario": "验证：yaml_load('go:generate: true') → {'go': 'generate: true'}；yaml_load('a:b: v') → {'a': 'b: v'}；无报错（带引号键解析正常且 emit 会加引号 —— 只有手写未加引号冒号键被重塑）。手编 wiki_plan.yaml 带 URL-方案样式键得到错误键 + 折叠值，validate 报出指向错误行的误导性缺字段错误。"
+    },
+    {
+      "id": "P41",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 378,
+      "tier": "reproduced",
+      "summary": "feature-leaf 过滤器手搓测试文件词干检查（'.test' in low / '.spec' in low / startswith test|spec），而不是像同模块 495/1554/1572 行那样用 match_any(path, P_TEST) —— 且两谓词今天确实分歧。",
+      "failure_scenario": "对两谓词执行：'src/api/foo_test.go'、'core/foo_test.rs'、'src/tests/handler.ts'、'src/pages/__tests__/Home.tsx' 全部通过 :378 词干检查、同时被 P_TEST 排除 —— 测试代码（语料收集的排除没有测试模式）被带进 file-pattern 叶子，而 :378 的词干检查是唯一守卫（两个 spec 连 'pattern' 都没有），且 pick_files 的 exclude_tests 是 -20 软惩罚而非硬过滤 —— 关键词丰富的测试助手最终进入 feature 页的 source_files。"
+    },
+    {
+      "id": "P42",
+      "file": "pwiki/scripts/pwiki_lib/scan.py",
+      "line": 23,
+      "tier": "reproduced",
+      "summary": "IGNORE_DIRS 重打了 config.DEFAULT_IGNORES 的 ~27 项而非扩展它，且两个 walk 过滤器应用了不同组合 —— 只在 DEFAULT_IGNORES 里的项（'Pods'、'DerivedData'）被扫描进 inventory，却被 update/stale 跟踪排除。",
+      "failure_scenario": "集合差验证：只有 Pods/DerivedData 不同；scan_repo 的 walk 只检查 _dir_ignored (IGNORE_DIRS)，而 expand_scope 检查 DEFAULT_IGNORES AND _dir_ignored —— pod install 后，iOS 仓库的 Pods/（即便 git 已忽略）进入 inventory.json 并可能成模块（modules.py:26 无 Pods），而快照跟踪集（来自 expand_scope）排除它：Pods 变更永不把页面标 stale，但其文件仍令计划与 digest 膨胀。"
+    },
+    {
+      "id": "P43",
+      "file": "pwiki/scripts/pwiki_lib/planner.py",
+      "line": 601,
+      "tier": "reproduced",
+      "summary": "_setup_signals 对 readme 路径测试 'getting'/'quick'/'start'（总是固定的 README_CANDIDATES 名，从不含这些词）而非 scan.py 提供的摘录 —— 第三个析取是死代码，提供的摘录从未被测试。",
+      "failure_scenario": "执行：src-layout 库场景（manifests=[pyproject.toml]、entry_points=[]、README 摘录含 'Getting Started'）跑 _setup_signals → False（pyproject.toml 不在 manifest 名集合、src 布局无 ENTRY_BASENAMES 文件）→ 条件在 planner.py:653 失败，快速开始页被省略 —— 探测存在正是为该场景。"
+    },
+    {
+      "id": "P44",
+      "file": "pwiki/scripts/pwiki_lib/search.py",
+      "line": 56,
+      "tier": "reproduced",
+      "summary": "search 等只读命令调用 Ctx(args).load() → WikiDB.__init__（makedirs + connect + executescript）和 ctx.partition()（create=True INSERT）—— 因此在从未初始化的仓库跑 search/pages/read 会顺手物化 <repo>/.pwiki/wiki.db 和 partition 行。",
+      "failure_scenario": "实证验证：`pwiki search \"hello\" --repo <fresh git repo>` 在打印 '没有已发布条目' 并以退出码 3 退出前，物化了 <repo>/.pwiki/wiki.db 和分区 (1,'-','zh')；试探 pwiki 的用户在其分析目标里得到一个未被忽略的 .pwiki/ 产物（init 是记录在案的第一步；cmd_pages 与 cmd_read 共享同一未防护模式）。"
+    },
+    {
+      "id": "P45",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 611,
+      "tier": "confirmed",
+      "summary": "instantiate_pack 静默丢弃证据低于 scaled_min(child, 2, profile) 的主题子项，用裸 continue —— 无 theme_declined 条目记录，不同于几行之下的关键字门禁与 requires_strong 拒绝（649-650 行是同族第二个裸丢弃）。",
+      "failure_scenario": "标准 profile（scaled_min=2）：恰有 1 个强文件的主题子项无影无踪地从计划消失 —— work/plan.md 的 'theme_declined (D12 evidence gate)' 评审段与 CLI 总结都从不提及，人审门禁无法区分 'repo 无该子主题' 与 '被静默大小底线切掉' —— 正是 D12 要关掉的盲点。"
+    },
+    {
+      "id": "P46",
+      "file": "pwiki/scripts/pwiki_lib/yamlite.py",
+      "line": 36,
+      "tier": "reproduced",
+      "summary": "_yaml_scalar 把 float inf/-inf/nan 发出为裸 'inf'/'-inf'/'nan'，而解析器有意保留这些 token 为字符串 —— 非有限浮点往返翻转为字符串（潜在契约缺口；当前无 dump 位点产生非有限值）。",
+      "failure_scenario": "验证：yaml_dump({'x': inf}) → 'x: inf' → yaml_load 得字符串 'inf'（-inf/nan 同），破坏 '本引擎自己写的文件可以精确往返' 的既定目标；所有 yaml_dump 调用点（qoderplan、publish×3、planner）今天只产生 int/str，附近唯一除法（planner.py:210 progress_pct）有零守卫 —— 触发条件是未来任何把非有限浮点带进计划/索引结构的改动。"
+    },
+    {
+      "id": "P47",
+      "file": "pwiki/scripts/pwiki_lib/search.py",
+      "line": 104,
+      "tier": "confirmed",
+      "summary": "`top = results[: max(1, args.top)]` 强制至少一个结果，因此 --top 0（或负值，argparse 无最小值）仍打印一个排名命中 —— 与调用者明确的空集请求相矛盾。",
+      "failure_scenario": "请求 `pwiki search \"term\" --json -n 0` 的编排脚本得到含一个结果、填充了 results[0] 的载荷而非空数组 —— 索引 results[0] 的消费者对调用者要求抑制的页面执行动作；负值输入同样被掩盖，无诊断。"
+    },
+    {
+      "id": "P48",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 791,
+      "tier": "latent",
+      "summary": "cmd_regenerate 在裸 `if kind == \"card\":` 上分支，而非 config.is_card_kind() —— scripts/ 中仅存的裸卡片相等检查，违反强制单入口（config.py:109 明令禁止）。",
+      "failure_scenario": "当前潜伏：判别值是只赋 'page'/'card'（engine.py:744/747）的本地哨兵，今天无错误路由 —— 但被禁止的模式正是过去卡片错误路由的原因（计划行携带如 business_term 的 kind，== \"card\" 为 False）；未来任何给计划行 kind 的编辑会把卡片静默路由进带内容树路径的页面分支。"
+    },
+    {
+      "id": "P49",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 562,
+      "tier": "latent",
+      "summary": "_mkey（path or module_id）与 module_path_of（path or dir or module_id）是近乎相同的模块键派生，为同一个知识 _index.yaml 填充 key 与 module_path 字段 —— 对显式空 path 且有 dir 的行两者不一致。",
+      "failure_scenario": "module 表 dir 与 path 都默认 ''，而 publish_modules 存 m.get('path', m.get('dir','')) —— wiki_plan.yaml（唯一人编接口）中显式空 `path: \"\"` 加非空 dir 会存 path='' + dir，因此 _mkey 产出 module_id 而 module_path_of 产出 dir：同一节点的 key 与 module_path 字段互不一致的索引 —— 正是 556 行注释警告的注册表漂移（引擎自己的生成器总设非空 path，所以需要手编计划触发）。"
+    },
+    {
+      "id": "P50",
+      "file": "pwiki/scripts/pwiki_lib/snapshot.py",
+      "line": 319,
+      "tier": "plausible",
+      "summary": "kind 分类法通过散落的字面量切换（snapshot.py:319 元组、publish.py:684 直接字典索引、db.py KIND_RANK）绕过注册表 —— 带原始卡片 kind 的已发布行静默退出样式漂移循环（style_drift 永不收敛），且未知 kind 使 pages --tree 崩溃（PLAUSIBLE：需手编/旧库；当前写路径规范化 kind）。",
+      "failure_scenario": "机制验证：页面行（kind='external_dependency'，style≠plan）的样式漂移循环 `continue` —— 从不重盖章/重排队，style_drift 永久为真，每次 update 重跑完整门禁扫描；publish.py:684-685 对任何未知 kind 抛 KeyError。但 queue_jobs/publish_page/finish 全部规范化为 'card'，所以今天需要手编 wiki.db —— 用原始 kind 行插入可确认两个症状。"
+    },
+    {
+      "id": "P51",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 243,
+      "tier": "plausible",
+      "summary": "slugify 的空 slug 回退调用 hashlib.md5() 未加 usedforsecurity=False，在强制 FIPS 的 OpenSSL 构建上抛 ValueError（PLAUSIBLE：环境依赖触发）。",
+      "failure_scenario": "代码库唯一 md5（其余哈希是 sha256，FIPS 安全）；RHEL 系 FIPS 模式下 hashlib.md5() 在 hexdigest 前抛 'unsupported digital envelope routine' —— 任何耗尽 slugify 的 CJK-only 键的仓库上 `plan --themes` 崩溃（themes.py:515 叶标题来自 humanize/title_map 值；1370 来自 pwiki.yaml families 键）。确认需要 FIPS 主机；路由可达性已确认（modules 不触发 —— 只有 --themes 触发）。"
+    },
+    {
+      "id": "P52",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 1256,
+      "tier": "hygiene",
+      "summary": "run_themes docstring 承诺返回 dict 含 'sheets' 键，而实际返回（1687 行）是 {'pages','cards','report','check_failed'} —— 无现存消费者的陈旧返回形状契约（themes 路由从不产出 sheets）。",
+      "failure_scenario": "按记录形状编写的调用者/未来测试访问 result['sheets'] → KeyError；唯一调用者（themes.py:1922）只读 pages/cards/report，且 docstring 漏掉它确实返回的 'check_failed'。"
+    },
+    {
+      "id": "P53",
+      "file": "pwiki/SKILL.md",
+      "line": 124,
+      "tier": "docs",
+      "summary": "文档漂移：SKILL.md:124 与 cli.py:235 帮助仍记录 qoder-plan 默认输出为 `.qoder/repowiki/wiki_plan.yaml`，但 c060 修复把默认值移到了 <root>/qoder/repowiki/wiki_plan.yaml（由 test_c060_qoder_emit_default_inside_root 锁定）。",
+      "failure_scenario": "按 SKILL.md/--help 行事的编排器到 <repo>/.qoder/repowiki/wiki_plan.yaml 找文件、找不到（它在 .pwiki/ 内），断定 emit 失败或重跑；文档还暗示 pwiki 默认写分析仓库的工作树，而代码现已明确禁止 —— 违反仓库 CLAUDE.md 的 'SKILL.md…与脚本行为保持同步（标志, 退出码, 协议字段）' 规定。"
+    },
+    {
+      "id": "P54",
+      "file": "pwiki/references/validation.md",
+      "line": 28,
+      "tier": "docs",
+      "summary": "文档漂移：D15 宽引用包枚举显示 '(architecture/ai/api)'，而 config.WIDE_CITE_PACK_KEYS 是 {architecture, ai, api, microservices} —— 文档同步测试只查数字带，枚举漂移无守卫。",
+      "failure_scenario": "维护者读 validation.md 认为microservices 落标准 60-90 带，据此修剪引用或记录错误带；门禁实际强制 80-120（styles.cite_band_for），writer 收到意外的 size/citations 结论 —— '与 styles.py 同源, 测试锁定' 的声明在枚举维度不成立（只有 test_review_fixes4 查代码集合，不查文档）。"
+    },
+    {
+      "id": "P55",
+      "file": "pwiki/DEVELOPERS.md",
+      "line": 91,
+      "tier": "docs",
+      "summary": "文档漂移：DEVELOPERS.md:91 称完整套件是 '全套(~95)'，而套件今天收集并验证到 318 个测试函数。",
+      "failure_scenario": "把该计数当回归基线的维护者（仓库 CLAUDE.md 把引擎维护者路由到 DEVELOPERS.md）检测不到大规模测试流失 —— 即便丢 200 个测试，计数看上去仍 '高于 ~95'；数字写于六轮测试评审修复使其翻三倍之前。"
+    },
+    {
+      "id": "P56",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 54,
+      "tier": "structural",
+      "summary": "七个写位点绕过共享 util.atomic_write（其 docstring 要求 'planner.save_plan 之外的落盘点统一走这里'）：engine.py:54（config.json）、engine.py:439（_orphan_save 手稿）、qoderplan.py:132、gates.py:750（validation-report.json）、scan.py:740、themes.py:1968、themes.py:2095（work/plan.md）。",
+      "failure_scenario": "最坏情形已在中断的 `pwiki init --style concise`（truncate 与 flush 之间 kill/ENOSPC）上验证：config.json 保持部分/空，Ctx.load 捕获解析错误、只告警一次，后续每次 begin/submit/finish 以 style=deep DEFAULTS 运行 —— 整个 run 用错误样式盖章与门禁；同类截断同样等待着丢失工作通道（engine.py:439）与 Qoder 导入计划。"
+    },
+    {
+      "id": "P57",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 459,
+      "tier": "structural",
+      "summary": "cmd_submit 在九个块中重复 orphan-save 三连（_orphan_save + run_log 'orphan_submit' + die）而只差消息文本（604 行的第十处已忘掉 log 调用 —— 见 P28），没有统一拒绝咽喉点。",
+      "failure_scenario": "'稿件不丢' 策略的存在仅因为九个守卫块各自记得调用全部三步；新增或复制一个忘记 log 调用或 safe-id 保存的守卫会静默破坏审计/恢复契约，并且必须 diff 九个近乎相同的块才能确认无偏差 —— 一个 _orphan_die() 辅助可折叠约 50 行。"
+    },
+    {
+      "id": "P58",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 1019,
+      "tier": "structural",
+      "summary": "cmd_finish 手搓裸受守护 UPDATE（'UPDATE run SET state=?…WHERE id=? AND state=\\'LINING\\''）—— 完全是 db.update_run_guarded 已做的事，同一函数早先的 LINING 转换（936 行）就在用它。",
+      "failure_scenario": "同一条件状态转换的两个实现：update_run_guarded 未来任何收紧（c022 引入它正因为裸 run 状态 SQL 漂移并复活已取消 run）都不会应用到 finish 的最终写 —— 两副本独立漂移、状态机强制不一致。"
+    },
+    {
+      "id": "P59",
+      "file": "pwiki/scripts/pwiki_lib/engine.py",
+      "line": 696,
+      "tier": "structural",
+      "summary": "claim-token 采用策略（'仅 attempts==1 时省略 --claim 可采用行 token；重新认领后，省略即拒绝'）在三个地方手工复制：submit 前置门（495-503）、submit 后置门重读（558-567）、_fail_skip_guard（695-702）。",
+      "failure_scenario": "这是防一个 writer 覆盖另一个 writer 租约的规则 —— 系统存在的全部意义；对三个同步副本之一打补丁（如还拒绝即将过期的租约）的策略改动会重新打开跨 writer 覆盖，且副本间已在消息文本与所查行快照（job vs job_now）上分歧。一个 resolve_claim(db, row, supplied) 辅助应拥有它。"
+    },
+    {
+      "id": "P60",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 733,
+      "tier": "structural",
+      "summary": "'加载计划（若有），否则 None' 习语（try: load_plan except SystemExit: plan=None）被逐字复制七次（publish.py×4、engine.py×2、planner.py has_plan）而非一个 planner.load_plan_optional —— 且每个副本吞掉损坏计划的 die 而无告警。",
+      "failure_scenario": "损坏的 wiki_plan.yaml 使 cmd_write/cmd_delete/cmd_export 静默回退 row/ctx 样式而零告警（config.load() 对损坏 config.json 会告警 —— 计划路径无等价物）；若 load_plan 增加第二种失败模式，七个副本必须同步找到并修复。一个吞掉损坏计划时发 info() 的 load_plan_optional 同时修掉两个问题。"
+    },
+    {
+      "id": "P61",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 729,
+      "tier": "structural",
+      "summary": "代码围栏正则（```.*?```）在四个转换位点手工复制 —— gates.py:132（rebuild_cite_block）、609（fix_off_by_one）、729（validate_content）、publish.py:100（normalize_links）—— 而非用规范 strip_code_fences（gates.py:170）；三个围栏相关正确性 bug（c11/c12/c23）正源于或加剧于这些副本。",
+      "failure_scenario": "任何围栏规则改动（~~~ 围栏、缩进围栏、未闭合围栏处理）必须补四处，否则引用校验、偏移截断、引用块注入与链接重写对什么算代码产生分歧 —— 今天的分歧就是 strip_injected_layers/parse_cite_block/reconcile 在原始内容上操作，而门禁在剔除后文本上操作（P06/P13/P19）。"
+    },
+    {
+      "id": "P62",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 451,
+      "tier": "hygiene",
+      "summary": "_gate_card 接收一个其主体从不读的 n_cites 参数（其引用检查从头重算：486 行 extract_citations(strip_code_fences(content))），即便 gate_item 已算好两者 —— 死参数加上每个 card/sheet 任务一次冗余全内容正则扫描。",
+      "failure_scenario": "调整卡片引用行为者改 gate_item 在 284 行传的值而无任何效果（真正计数在内部重算）；每个 card/sheet 任务在提交、LINING、validate --content 各支付一次完整围栏剔除 + CITE_RE 扫描 —— 传入已算好的 prose/cites 同时修正确性与浪费的工作。"
+    },
+    {
+      "id": "P63",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 679,
+      "tier": "hygiene",
+      "summary": "`item2 = dict(item) if isinstance(item, dict) else dict(item)` 两个分支相同 —— 残留三元，它修补的 dict-vs-sqlite3.Row 差异已不存在（Row 支持 dict()）。",
+      "failure_scenario": "假设形状处理的读者会'恢复'其中一支的分歧，重新引入此行当初修补的缺键差异；真正归一化在 gate_item 自身的元处理里 —— 朴素的 `item2 = dict(item)` 行为等价。"
+    },
+    {
+      "id": "P64",
+      "file": "pwiki/scripts/pwiki_lib/db.py",
+      "line": 350,
+      "tier": "hygiene",
+      "summary": "commit 与 config_ 参数穿过 _insert_run/create_run/create_run_guarded 和四个生产调用者但从不持久化（docstring 自认），且 create_run 无生产调用者（仅测试）。",
+      "failure_scenario": "每个调用者计算并传递 ctx.commit 与一个进入死列的配置 dict（审计 run 的读者要跨三个函数追踪才能发现值被丢弃，docstring 是唯一线索）；由测试保活的第二创建路径（'无守卫直建'）可能与生产实际使用的守卫孪生漂移。"
+    },
+    {
+      "id": "P65",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 752,
+      "tier": "structural",
+      "summary": "cmd_write 手写 'UPDATE page SET style=?…' 走 ctx.db.conn.execute —— 与现存 db.set_page_style 字节等价（db.py:745，snapshot.py:337 在用）—— 且两个写（save_page_content、style UPDATE）是分离的自动提交语句。",
+      "failure_scenario": "set_page_style 语义改动只落 db.py 而 cmd_write 静默漂移（db.py:776 的 docstring 指出正是这类复制粘贴在 content_hash 上产生永久漂移）；今天两语句之间崩溃把新内容持久化在旧样式戳下，因此下一次 finish 用陈旧样式组合该页面。"
+    },
+    {
+      "id": "P66",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 93,
+      "tier": "structural",
+      "summary": "normalize_links 把空格→%20 href 编码重实现为内联 rel.replace(\" \", \"%20\")，而非调用 gates._md_href（50-53 行，每个发出的 file:// 引用链接用的规范编码器），外加自己的 %2520 双重解码修复（74-75）。",
+      "failure_scenario": "若 _md_href 的转义扩宽（如圆括号，它会终止 [^)]+ 链接正则），内链与引用链漂移，且内链校验器（共享解码契约）开始把 pwiki 自己发布的树判为死链；两个编码器 + 一个一次性双重解码 = 三个必须同步的漂移点。"
+    },
+    {
+      "id": "P67",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 279,
+      "tier": "structural",
+      "summary": "Builder.add 两处内联 '追加 -2, -3… 直到空闲' 唯一性循环（page_id 279-281、slug 285-287），重实现 planner._unique_id（612 行）—— 后者额外守卫空候选（'while candidate in used or not candidate'）—— Builder 副本丢掉了该守卫。",
+      "failure_scenario": "空 page_id 在 `while \"\" in self.by_id` 恒假并保持为空（themes 路由静默发出它，而 planner 路由拒绝）；id 唯一性方案的任何改动必须现在应用到两个计划路由，否则同一模块路径因路由不同得到不同 id —— 两边都 import 一个 _unique_id 即关闭。"
+    },
+    {
+      "id": "P68",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 550,
+      "tier": "hygiene",
+      "summary": "instantiate_pack 的第二守卫 'if not evidence and not pack.get(\"always\"): return None' 是死代码：scaled_min 恒返回 >=1，因此第一守卫（544 行）已对每个空证据非 always 包返回 None。",
+      "failure_scenario": "不可达分支让读者以为空证据 + always=False 能到这里并被不同处理，把任何调试包实例化的人送去一条从不执行的路径 —— scaled_min 重构前的残留，没人敢删因为看着像承重墙。"
+    },
+    {
+      "id": "P69",
+      "file": "pwiki/scripts/pwiki_lib/scan.py",
+      "line": 343,
+      "tier": "structural",
+      "summary": "detect_commands 含测试/lint/构建/开发/安装分类梯的两个副本 —— package.json 脚本键（346-355）与 Makefile 目标（367-376）—— 副本已在关键字集上漂移。",
+      "failure_scenario": "漂移已验证：脚本侧 dev 匹配 serve/watch 不匹配 run；make 侧匹配 run/fmt/setup 不匹配 serve/watch/typecheck —— 新增类别或重排优先级必须在两个梯子里复制，下次只加一边的改动会静默错分另一面的命令，且无测试区分意图与遗漏。"
+    },
+    {
+      "id": "P70",
+      "file": "pwiki/scripts/pwiki_lib/gates.py",
+      "line": 399,
+      "tier": "structural",
+      "summary": "styles.py 并非它声称的唯一门禁参数源：引用额外 '>10'（399）、证据/代码 '<2'（407）、部分来源 n//3 容差（429）与 concise sheet 长度 40（508）都内联在 gates.py，既不在 presets 也不在文档 —— 且文档同步测试只查数字尺寸表行。",
+      "failure_scenario": "把 gates.py:399 的 10 改 15（或编辑校验文档的行）会静默漂移 —— 正是 STYLE_PRESETS + test_validation_doc_matches_presets 要防的 repowiki '记录的检查与代码不一致' 失败，但守卫只盖尺寸表行；第三个样式意味着 gates.py、i18n、文档三处手工同步（相关：i18n.py:223 硬编码 mermaid 带，见 P34）。"
+    },
+    {
+      "id": "P71",
+      "file": "pwiki/scripts/pwiki_lib/publish.py",
+      "line": 328,
+      "tier": "perf",
+      "summary": "publish_run 在每次 finish 对每个已发布页面跑 compose_export_content，即便无变化 —— 333-338 行的 '比较后写' 只跳过磁盘写而非组合工作（normalize_links + fix_off_by_one + rebuild_cite_block，每条引用带 realpath/isfile）。",
+      "failure_scenario": "约 135 个已发布页面上做 3 页 INCREMENT finish 会完整重组 132 个未触碰页 —— 每条引用一次 os.path.isfile/realpath → 每次 finish 约 2000 次系统调用加全内容正则扫描，只为得出文件已相等（cite_lines 有 mtime 缓存；组合前对未变行无短路）。"
+    },
+    {
+      "id": "P72",
+      "file": "pwiki/scripts/pwiki_lib/corpus.py",
+      "line": 301,
+      "tier": "perf",
+      "summary": "Corpus.grep() 每次扫描对每个文件重新小写完整记忆文本（self.read(path).lower()），而非在原文旁缓存小写文本 —— themes 路由为每个依赖候选、卡片来源回退与包探测扫描整个语料。",
+      "failure_scenario": "themes 调用模式已验证（themes.py:1776 每 dep、1818 回退、corpus.py:348 每包探测，全部走 all_text = 每个 TEXT_LANGS 文件）：~10k 文件仓库上每个稀缺 needle 重删小写数百 MB 记忆文本 —— 几十个稀缺 needle 花数秒并在重复 .lower() 上产生数 GB 瞬时字符串扰动；一个 _text_lower 缓存（加有界内容缓存）消除它。"
+    },
+    {
+      "id": "P73",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 1548,
+      "tier": "perf",
+      "summary": "backfill_from_scope 为每个来源不足的页面重扫整个仓库文件列表（对完整 inv[\"files\"] 列表的 tier-0/1/2 推导，每遍每文件约 45 次模式检查），而非为 scope 目录前缀建一次索引。",
+      "failure_scenario": "验证：每个薄页运行 per-file scope ==/startswith + is_generated（21 模式）+ match_any(P_TEST)（12）+ is_never_cite（13）；几十个薄页 × 10k 文件 × 每文件约 45 检查 = 每次 plan --themes 数千万次字符串操作 —— 一个 dir-prefix→files 索引加 Corpus 预计算的排除标志可砍到每页一遍。"
+    },
+    {
+      "id": "P74",
+      "file": "pwiki/scripts/pwiki_lib/modules.py",
+      "line": 718,
+      "tier": "perf",
+      "summary": "seed_depends_on 为每个模块读每个源文件至多 200KB（read_text(full, 200_000)）且无记忆 —— 重叠模块 scope 下的文件被每个覆盖模块重读一次。",
+      "failure_scenario": "验证：mod_files 每模块至多持 600 个 scope 文件，read_text 是裸 open().read(limit)（只有 Corpus.read 缓存，此路径未用）—— ~40 个嵌套模块的 10k 文件仓库上 `plan --deps` 至多流式读取约 24k 个完整文件；每路径记忆文本（或仅导入语句的前 8-16KB，pom.xml 保留全读）把读字节砍约一个数量级。"
+    },
+    {
+      "id": "P75",
+      "file": "pwiki/scripts/pwiki_lib/scan.py",
+      "line": 169,
+      "tier": "perf",
+      "summary": "count_lines 用 Python 级 'for _ in fh: n += 1' 循环数行，而同模块 cite_lines 已实现分块字节计数 —— 750KB/125k 行文件实测 7.8 倍差距。",
+      "failure_scenario": "scan_repo 对每个文本文件调用一次 count_lines；总 ~2M 行时每次 `pwiki scan`（加 inventory.json 缺失时 cmd_modules/cmd_plan/cmd_digest 的 _autoscan 回退）做 ~2M 次缓冲迭代器步进 —— scan 在该规模的主导 CPU 成本。换 cite_lines 的 1 MiB 块计数（语义相同）每次扫描省数秒。"
+    },
+    {
+      "id": "P76",
+      "file": "pwiki/scripts/pwiki_lib/themes.py",
+      "line": 1440,
+      "tier": "perf",
+      "summary": "page-trim while 循环对每个被删页重算叶集（O(n²) 嵌套扫描 'leaves = [p for p in builder.pages if not any(c[\"parent\"]==p[\"id\"] …)]'），外加每次删除重建完整 related_pages。",
+      "failure_scenario": "builder 超出 profile 预算（200 页 vs max_pages=135）时，约 65 次删除的每一次重扫 200×200 对并重建完整 related_pages 列表 —— 一次 plan --themes 约 2.6M 次比较 + 65 次列表重建，随计划增长二次方；每迭代一个父 id 集（或增量子计数）使其线性。"
+    },
+    {
+      "id": "P77",
+      "file": "pwiki/scripts/pwiki_lib/modules.py",
+      "line": 204,
+      "tier": "perf",
+      "summary": "decompose 的 container-subdivide 循环为每个合格叶子目录扫描整个文件列表（'for f in files' 的 startswith(d+\"/\") 推导），而 dir_files 祖先映射已枚举每棵子树。",
+      "failure_scenario": "验证：10k 文件 monorepo 中 30-50 个合格叶子（>=30 文件 / >=1200 行），每个遍历全部 ~10k 条目（startswith + split + count('/')）—— 每次 modules/plan --themes 约 300-500k 次路径操作；dir_files 映射（127-133 行把每个文件登记到祖先）只触子树即产出相同的直接子目录。"
+    }
+  ]
+}

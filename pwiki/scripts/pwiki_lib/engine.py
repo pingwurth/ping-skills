@@ -102,7 +102,13 @@ def cmd_begin(args) -> int:
             # 的 run 头上 —— 等 finish 出结果再 --force
             die(f"run {active['id']} 正在 finish(LINING) — 等 finish 完成/"
                 "失败后再 begin --force", config.EXIT_PRECOND)
-        ctx.db.update_run(active["id"], state="CANCELLED", finished_at=now_iso())
+        # 取消写带状态前置(P8): LINING 预检与 UPDATE 之间被 finish 抢先置
+        # LINING 时如实报错 —— publish 不在 CANCELLED run 下跑
+        if not ctx.db.update_run_guarded(
+                active["id"], config.CANCELABLE_RUN_STATES,
+                state="CANCELLED", finished_at=now_iso()):
+            die(f"run {active['id']} 状态已被并发操作改变(如进入 finish) — "
+                "重试 `pwiki begin --force`", config.EXIT_PRECOND)
         ctx.db.log(active["id"], "force_cancelled", "superseded by --force begin")
         ctx.db.release_all_claims(active["id"])
         info(f"已取消旧 run {active['id']}")
@@ -309,6 +315,17 @@ def cmd_next(args) -> int:
         return config.EXIT_PRECOND
     if run["state"] == "PAUSED":
         _say(f"status: PAUSED (run {run['id']}) — `pwiki resume` 继续")
+        return config.EXIT_PRECOND
+    if run["state"] in ("WAITING", "INITIALIZING", "DIRECTORY_GENERATING"):
+        # P23: create_run_guarded 与 queue_jobs 事务之间 job 表还是空的 ——
+        # 只数 job 行会把该窗口当 "complete"(退出码 0), 轮询协调者提前
+        # finish 又被 run 状态前置弹回("完成然后费解的前置失败"); 如实报
+        # 排队中(与 PAUSED/无活动 run 同归 EXIT_PRECOND)
+        _say(f"status: {run['state']} (run {run['id']}) — run 正在建立/"
+             "排队, 稍后重试 next")
+        if args.json:
+            print(json.dumps({"status": "queueing", "run": run["id"],
+                              "state": run["state"]}, ensure_ascii=False))
         return config.EXIT_PRECOND
     batch = max(1, getattr(args, "batch", 1) or 1)
     # 手编 config.json 的 null/非数值曾裸 TypeError 打死每个 next —— 全部
@@ -589,22 +606,9 @@ def cmd_submit(args) -> int:
         die(f"submit 被拒({args.page_id}) — 修稿重交(--force 强过, "
             "--lenient 放宽)", config.EXIT_GATE)
 
-    # 终写走守卫事务: finish 的 LINING 置位与其 jobs() 快照之间曾是无守卫
-    # 窗口 —— 此处迟到一步的 completed 写入会落在快照之后, run 报完成而
-    # 该页从未发布(单事务内核 run 状态, 与 finish 的 UPDATE run 串行化)
-    verdict = ctx.db.complete_job_guarded(run["id"], args.page_id, content,
-                                          claim_token=token)
-    if verdict == "busy":
-        saved = _orphan_save(ctx, args.page_id, content)
-        ctx.db.log(run["id"], "orphan_submit",
-                   f"{args.page_id}: finish 进行中(LINING/已终态), 稿件存 {saved}")
-        die(f"run 正在 finish(LINING/发布)或已终态 — 提交与快照竞态, "
-            f"稿件已保存 {saved}; 等 finish 出结果后重交", config.EXIT_PRECOND)
-    if verdict == "token_lost":
-        saved = _orphan_save(ctx, args.page_id, content)
-        die(f"提交时租约刚好被回收 — 稿件已保存 {saved}", config.EXIT_PRECOND)
-
-    # summary/key_topics: 父页聚合子页; key_topics 进活术语表
+    # summary/key_topics 先算好, 随终写进同一守卫事务(P9): 曾在终写之后的
+    # 一句裸自动提交 —— 竞争 finish 在两步之间置 LINING 并快照 jobs(),
+    # 空摘要被发布并基线化, 且行永不自愈(kept-merge 只带目录字段)
     summary = (getattr(args, "summary", "") or "").strip()
     if not summary and job["kind"] == "page":
         # 栅栏整体先剥(gates.strip_code_fences)再取首段 —— 手搓的
@@ -619,10 +623,25 @@ def cmd_submit(args) -> int:
                 break
     topics = [t.strip() for t in (getattr(args, "key_topics", "") or "").split(",")
               if t.strip()]
-    ctx.db.conn.execute(
-        "UPDATE page_job SET summary=?, key_topics=? WHERE run_id=? AND page_id=?",
-        (summary, json.dumps(topics, ensure_ascii=False),
-         run["id"], args.page_id))
+
+    # 终写走守卫事务: finish 的 LINING 置位与其 jobs() 快照之间曾是无守卫
+    # 窗口 —— 此处迟到一步的 completed 写入会落在快照之后, run 报完成而
+    # 该页从未发布(单事务内核 run 状态, 与 finish 的 UPDATE run 串行化)
+    verdict = ctx.db.complete_job_guarded(
+        run["id"], args.page_id, content, claim_token=token,
+        summary=summary,
+        key_topics=json.dumps(topics, ensure_ascii=False))
+    if verdict == "busy":
+        saved = _orphan_save(ctx, args.page_id, content)
+        ctx.db.log(run["id"], "orphan_submit",
+                   f"{args.page_id}: finish 进行中(LINING/已终态), 稿件存 {saved}")
+        die(f"run 正在 finish(LINING/发布)或已终态 — 提交与快照竞态, "
+            f"稿件已保存 {saved}; 等 finish 出结果后重交", config.EXIT_PRECOND)
+    if verdict == "token_lost":
+        saved = _orphan_save(ctx, args.page_id, content)
+        die(f"提交时租约刚好被回收 — 稿件已保存 {saved}", config.EXIT_PRECOND)
+
+    # key_topics 进活术语表(摘要/话题本体已随终写同事务落行, 见上)
     if topics:
         ctx.db.glossary_add_terms(ctx.partition()["id"], topics,
                                   source_page_id=args.page_id)
@@ -663,7 +682,14 @@ def cmd_submit(args) -> int:
           f"{n_cited} files cited, style={style})")
     print(f"progress: {s['completed']}/{s['total']} completed, "
           f"{s['pending']} pending")
-    if s["pending"] == 0:
+    if s["pending"] == 0 and s["processing"]:
+        # P24: 与 cmd_next 的 in_flight 修法同源 —— 只看 pending 会把
+        # "剩 N 个在写"报成全终态, 协调者提前 finish 又被 in-flight 前置
+        # 弹回(退出码 3)
+        print(f"pending 已清, 仍有 {s['processing']} 个 in-flight job"
+              "(租约未回收) — 等 writer submit/fail/skip 后再 "
+              "`pwiki finish`")
+    elif s["pending"] == 0:
         print("全部 job 已终态 — `pwiki finish` 做 LINING + 发布")
     return config.EXIT_OK
 
@@ -680,10 +706,28 @@ def _active(ctx) -> tuple:
     return part, run
 
 
+def _lining_guard(run, action: str) -> None:
+    """c037 家族守卫(P8): finish 的 LINING/发布窗口内禁止一切改 run 状态
+    的操作 —— cancel/regenerate --force/pause 曾各自漏挡, publish/snapshot
+    在被取消的 run 下完整跑完, 基线错记到 CANCELLED run 头上, finish 自己
+    的终态写入再被"不复活已取消 run"弹回。恢复路径永远是重跑
+    `pwiki finish`(接受 LINING 前置)。"""
+    if run["state"] == "LINING":
+        die(f"run {run['id']} 正在 finish(LINING) — 等 finish 完成/失败后再"
+            f"{action}(卡死的 LINING 重跑 `pwiki finish` 恢复)",
+            config.EXIT_PRECOND)
+
+
 def _fail_skip_guard(ctx: Ctx, run, job, args) -> str:
-    """fail/skip 共用守卫: 幽灵 id / completed 撤销 / 重认领后令牌收紧。
+    """fail/skip 共用守卫: LINING 窗口 / 幽灵 id / completed 撤销 /
+    重认领后令牌收紧。
 
     返回应使用的 claim token(c034 便利模式仅在首次认领时采纳行内令牌)。"""
+    if run["state"] == "LINING":
+        # P15: finish 的结论取自 LINING 置位前的计数快照 —— 此间 fail/skip
+        # 把已计入的 job 改成终局失败态, 重处理从 run 结果里静默消失(本应
+        # PARTLY_COMPLETED); submit 对同一串行化是拒收的(c037)
+        _lining_guard(run, "fail/skip")
     if job is None:
         # c022: 幽灵 id 曾"成功"退出(no-token UPDATE 0 行也返回 True)
         die(f"未知 job: {args.page_id} (run {run['id']})", config.EXIT_PRECOND)
@@ -736,6 +780,7 @@ def cmd_regenerate(args) -> int:
                           plan_modules, plan_pages, plan_cards)
     ctx = Ctx(args).load()
     part, run = _active(ctx)
+    _lining_guard(run, f" regenerate {args.page_id}")
     plan = load_plan(ctx)
     pages = plan_pages(plan)
     cards = plan_cards(plan)
@@ -767,7 +812,13 @@ def cmd_regenerate(args) -> int:
             "会取消整个 run 把它们搁置(重排=全部 LLM 重写)。先 `pwiki "
             "finish` 发布, 再 begin + regenerate 重做单项; 确认搁置加 "
             "--force", config.EXIT_PRECOND)
-    ctx.db.update_run(run["id"], state="CANCELLED", finished_at=now_iso())
+    # 取消写带状态前置(P8): 同 cmd_cancel —— 守卫与 UPDATE 之间被 finish
+    # 抢先置 LINING 时如实报错
+    if not ctx.db.update_run_guarded(
+            run["id"], config.CANCELABLE_RUN_STATES,
+            state="CANCELLED", finished_at=now_iso()):
+        die(f"run {run['id']} 状态已被并发操作改变(如进入 finish) — "
+            f"重试 `pwiki regenerate {args.page_id}`", config.EXIT_PRECOND)
     ctx.db.release_all_claims(run["id"])
     ctx.db.log(run["id"], "run_cancelled_by_regenerate",
                f"superseded by regenerate {args.page_id}: "
@@ -803,6 +854,7 @@ def cmd_regenerate(args) -> int:
 def cmd_pause(args) -> int:
     ctx = Ctx(args).load()
     part, run = _active(ctx)
+    _lining_guard(run, "pause")
     leased = ctx.db.leased_jobs(run["id"])
     if leased:
         ids = ", ".join(j["page_id"] for j in leased)
@@ -829,6 +881,7 @@ def cmd_resume(args) -> int:
 def cmd_cancel(args) -> int:
     ctx = Ctx(args).load()
     part, run = _active(ctx)
+    _lining_guard(run, "cancel")
     # c040: 在制 writer 的租约先挡一道 —— 释放后其 submit 全走孤儿稿;
     # 确要强撤加 --force(稿件不丢, 落 work/orphan-submits/)
     leased = ctx.db.leased_jobs(run["id"])
@@ -839,7 +892,13 @@ def cmd_cancel(args) -> int:
     # 先置 CANCELLED 再释放认领(与 cmd_regenerate/begin --force 同序):
     # 曾先 release —— 释放与置态之间的并发 next 仍看到活动 run, 又认领
     # 新 job, cancel 完成后该 job 被困在已取消的 run 里(stranded processing)
-    ctx.db.update_run(run["id"], state="CANCELLED", finished_at=now_iso())
+    # 取消写带状态前置(P8, c022 同族): LINING 守卫与 UPDATE 之间被并发
+    # finish 抢先置 LINING 时如实报错, 不把发布中的 run 拖去 CANCELLED
+    if not ctx.db.update_run_guarded(
+            run["id"], config.CANCELABLE_RUN_STATES,
+            state="CANCELLED", finished_at=now_iso()):
+        die(f"run {run['id']} 状态已被并发操作改变(如进入 finish) — "
+            "重读后重试", config.EXIT_PRECOND)
     released = ctx.db.release_all_claims(run["id"])
     ctx.db.log(run["id"], "run_cancelled", f"released {released} claims")
     print(f"cancelled run {run['id']} (释放 {released} 个认领)")
@@ -968,9 +1027,12 @@ def cmd_finish(args) -> int:
     except SystemExit:
         raise
     except Exception as e:   # noqa: BLE001
-        ctx.db.update_run(run["id"], state="DOCUMENT_FAILED",
-                          error=f"lining 失败: {type(e).__name__}: {e}",
-                          finished_at=now_iso())
+        # 守卫式落态(P7 同族): 无守卫 UPDATE 会把并发 cancel 的 CANCELLED
+        # 复活成 DOCUMENT_FAILED(∈ 活动态)
+        ctx.db.update_run_guarded(
+            run["id"], ("LINING",), state="DOCUMENT_FAILED",
+            error=f"lining 失败: {type(e).__name__}: {e}",
+            finished_at=now_iso())
         ctx.db.log(run["id"], "lining_failed",
                    f"{type(e).__name__}: {e}")
         die(f"LINING 执行失败({type(e).__name__}: {e}) — run 已标 "
@@ -995,6 +1057,17 @@ def cmd_finish(args) -> int:
     # (可恢复: 修环境后重跑 finish, kept 规则原样重发布)并给可诊断的错。
     # 曾只捕 OSError: sqlite3.OperationalError(锁竞争)与门禁/合成层的
     # 其他异常照样裸奔, run 永卡 LINING(c037 会孤儿化所有并发 submit)
+    def _mark_publish_failed(detail: str) -> None:
+        """P7 配套: 落 DOCUMENT_FAILED 用守卫式写 —— 无守卫 UPDATE 会把
+        并发 cancel 的 CANCELLED 复活成 DOCUMENT_FAILED(∈ 活动态) →
+        僵尸活动 run(c022 同族)。"""
+        if not ctx.db.update_run_guarded(
+                run["id"], ("LINING",), state="DOCUMENT_FAILED",
+                error=f"publish/snapshot 失败: {detail}",
+                finished_at=now_iso()):
+            die(f"run {run['id']} 已不处于 LINING(被并发 cancel?) — "
+                "发布中断且状态已被并发操作改走", config.EXIT_PRECOND)
+
     try:
         needs_review, pages = publish.publish_run(
             ctx, run, plan, fallback_style,
@@ -1003,11 +1076,20 @@ def cmd_finish(args) -> int:
         reason = ("incremental_update"
                   if run["generation_type"] == "INCREMENT" else "full_generation")
         snapshot_id = snapshot.snapshot_run(ctx, run, plan, pages=pages)
+    except SystemExit as e:
+        # P7: publish/snapshot 里的 die()(如同路径冲突)抛的是 SystemExit
+        # —— 只捕 Exception 时它带着"页面表已提交"的残局逃逸: run 卡
+        # LINING、0 文件落盘、并发 submit 被 c037 孤儿化。EXIT_PRECOND 的
+        # die 是前置确认类(D19 要 --yes), 按既定契约留在 LINING 等重跑;
+        # 其余与 Exception 同罚(可恢复: 修好重跑 finish)
+        if e.code == config.EXIT_PRECOND:
+            raise
+        _mark_publish_failed(f"die({e.code})")
+        ctx.db.log(run["id"], "publish_failed", f"SystemExit({e.code})")
+        die(f"发布/快照失败(exit {e.code}) — run 已标 DOCUMENT_FAILED; "
+            "修好后重跑 `pwiki finish`", config.EXIT_ENV)
     except Exception as e:   # noqa: BLE001 — LINING 后的一切失败都要落状态
-        ctx.db.update_run(run["id"], state="DOCUMENT_FAILED",
-                          error=f"publish/snapshot 失败: "
-                                f"{type(e).__name__}: {e}",
-                          finished_at=now_iso())
+        _mark_publish_failed(f"{type(e).__name__}: {e}")
         ctx.db.log(run["id"], "publish_failed",
                    f"{type(e).__name__}: {e}")
         die(f"发布/快照失败({type(e).__name__}: {e}) — run 已标 "

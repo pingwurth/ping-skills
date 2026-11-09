@@ -53,6 +53,11 @@ ACTIVE_RUN_STATES = ("WAITING", "INITIALIZING", "DIRECTORY_GENERATING",
 TERMINAL_STATES = {"COMPLETED", "PARTLY_COMPLETED", "INITIALIZING_FAILED",
                    "DIRECTORY_FAILED", "DOCUMENT_FAILED", "NOT_SOURCE_CONTROL_FAILED",
                    "NO_COMMIT_HISTORY_FAILED", "CANCELLED"}
+# 可取消态 = 活动态减 LINING(P8): finish 的 LINING/发布窗口内, 一切取消类
+# 操作(begin/cancel/regenerate --force, pause)先被 c037 家族守卫挡住; 取消
+# 写本身也带该集合前置 —— 守卫检查与 UPDATE 之间被 finish 抢先置 LINING
+# 时, 守卫式 UPDATE 落空并如实报错, 不把发布中的 run 拖去 CANCELLED
+CANCELABLE_RUN_STATES = tuple(s for s in ACTIVE_RUN_STATES if s != "LINING")
 # catalog item status (evidence: Jmo() normalizer — pending/waiting/processing/completed/failed)
 PAGE_STATES = ["pending", "processing", "completed", "failed", "skipped"]
 

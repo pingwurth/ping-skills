@@ -170,43 +170,52 @@ def _apply_title_rename(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
         # 搬走的旧路径, 自家 validate --content 随即报 links/internal
         moves = []   # (改名前的发布行快照, 落盘内容, 新路径)
         pub = ctx.db.published_page(pid, page_id)
-        if pub is not None:
-            # 发布层: 改 H1 + 更新 DB(content 引用不动) + 移文件。
-            # 替换串用 lambda —— 用户标题里的反斜杠曾是 regex 替换转义
-            content = re.sub(r"^# .*$", lambda _: f"# {proposed}",
-                             pub["content"], count=1, flags=re.M)
-            ctx.db.conn.execute(
-                "UPDATE page SET title=?, path=? "
-                "WHERE partition_id=? AND page_id=?",
-                (proposed, new_path, pid, page_id))
-            ctx.db.save_page_content(pid, page_id, content)
-            moves.append((pub, content, new_path))
-        # 子页/后代: 派生路径变了(父标题目录段) —— 以各发布行的真实
-        # path 为旧位置, 同步 DB 行与文件
-        # c050: 后代行一次取齐 —— 曾每后代一条 SELECT(顶层页改名 = 数百
-        # 次顺序查询, 每次都拖整页稿体 blob); UPDATE 因各行新路径不同保留
-        # 逐条(值参差, executemany 无益)
-        changed_desc = []
-        for p in pages:
-            cpid = str(p.get("id"))
-            if cpid == page_id:
-                continue
-            newp = str(p.get("path") or "")
-            if not newp or old_paths.get(cpid) == newp:
-                continue
-            changed_desc.append((cpid, newp))
-        if changed_desc:
-            pubs = {str(r2["page_id"]): r2
-                    for r2 in ctx.db.published_pages_in(
-                        pid, [c for c, _ in changed_desc])}
-            for cpid, newp in changed_desc:
-                cpub = pubs.get(cpid)
-                if cpub is None:
-                    continue
+        # P37: 行/内容/后代路径同事务 —— 曾是一串裸自动提交(UPDATE 行 →
+        # save_page_content → 后代 UPDATE), 中断留下行已改/内容仍旧 H1/
+        # 文件旧路径的三方分歧, read/pages/export 全程服务该不一致态
+        ctx.db.begin()
+        try:
+            if pub is not None:
+                # 发布层: 改 H1 + 更新 DB(content 引用不动) + 移文件。
+                # 替换串用 lambda —— 用户标题里的反斜杠曾是 regex 替换转义
+                content = re.sub(r"^# .*$", lambda _: f"# {proposed}",
+                                 pub["content"], count=1, flags=re.M)
                 ctx.db.conn.execute(
-                    "UPDATE page SET path=? WHERE partition_id=? AND page_id=?",
-                    (newp, pid, cpid))
-                moves.append((cpub, cpub["content"], newp))
+                    "UPDATE page SET title=?, path=? "
+                    "WHERE partition_id=? AND page_id=?",
+                    (proposed, new_path, pid, page_id))
+                ctx.db.save_page_content(pid, page_id, content)
+                moves.append((pub, content, new_path))
+            # 子页/后代: 派生路径变了(父标题目录段) —— 以各发布行的真实
+            # path 为旧位置, 同步 DB 行与文件
+            # c050: 后代行一次取齐 —— 曾每后代一条 SELECT(顶层页改名 = 数百
+            # 次顺序查询, 每次都拖整页稿体 blob); UPDATE 因各行新路径不同保留
+            # 逐条(值参差, executemany 无益)
+            changed_desc = []
+            for p in pages:
+                cpid = str(p.get("id"))
+                if cpid == page_id:
+                    continue
+                newp = str(p.get("path") or "")
+                if not newp or old_paths.get(cpid) == newp:
+                    continue
+                changed_desc.append((cpid, newp))
+            if changed_desc:
+                pubs = {str(r2["page_id"]): r2
+                        for r2 in ctx.db.published_pages_in(
+                            pid, [c for c, _ in changed_desc])}
+                for cpid, newp in changed_desc:
+                    cpub = pubs.get(cpid)
+                    if cpub is None:
+                        continue
+                    ctx.db.conn.execute(
+                        "UPDATE page SET path=? WHERE partition_id=? AND page_id=?",
+                        (newp, pid, cpid))
+                    moves.append((cpub, cpub["content"], newp))
+            ctx.db.commit()
+        except Exception:
+            ctx.db.rollback()
+            raise
         # 路径集取一次共用(阶段 A 后的 DB 已全部指向新路径)
         paths_base = set(ctx.db.published_paths(pid))
         for row, content, target in moves:

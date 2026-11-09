@@ -767,6 +767,12 @@ def cmd_write(args) -> int:
 def cmd_delete(args) -> int:
     ctx = Ctx(args).load()
     pid = ctx.partition()["id"]
+    # P12: 与 write(c039)/export file_to_db(c028)同门 —— 活跃 run 的 finish
+    # 会用旧 job 行把删掉的页整页复活(重插行+重写文件); run 期间的
+    # delete --all 更是当场清光已发布行, 留下 DB/计划/树三方不一致
+    if ctx.db.active_run(pid):
+        die("存在活动 run — 先 finish/cancel 再 delete(避免发布回滚删除)",
+            config.EXIT_PRECOND)
     if args.all:
         # 先清文件树再清 DB: 曾先提交 unpublish 再裸 os.unlink —— 一个
         # EBUSY/EACCES 文件让 DB 宣称"已全删"而树上挂着半堆 + 裸 traceback

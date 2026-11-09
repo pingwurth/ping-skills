@@ -658,7 +658,8 @@ class WikiDB:
             (json.dumps(report, ensure_ascii=False), run_id, page_id))
 
     def complete_job_guarded(self, run_id: str, page_id: str, content: str,
-                             claim_token: str = "") -> str:
+                             claim_token: str = "", summary: str = "",
+                             key_topics: str = "[]") -> str:
         """submit 终写: 单 BEGIN IMMEDIATE 内核 run 状态再写 completed。
 
         finish 的 LINING 置位与 jobs() 快照之间曾是无守卫窗口 —— 迟到的
@@ -666,13 +667,22 @@ class WikiDB:
         完成, 该页从未落盘(稿在 DB, published_page 返回 None)。事务使
         "检查+终写"与 finish 的 UPDATE run 串行化: 要么先于 LINING 提交
         (快照看得到), 要么在此看到 LINING/终态而拒收(调用方走孤儿稿)。
-        返回 ok | busy | token_lost。"""
+        返回 ok | busy | token_lost。
+
+        summary/key_topics 随终写同事务落行(P9): 曾是其后一句裸自动提交
+        —— 竞争 finish 在两步之间置 LINING 并快照到空摘要, 空值被发布/
+        基线化且行永不自愈(kept-merge 只带目录字段, 重发布对 '' 视为未变)。"""
         self.begin()
         try:
             row = self.conn.execute(
                 "SELECT state FROM run WHERE id=?", (run_id,)).fetchone()
-            if row is not None and str(row["state"]) in (
-                    "LINING", "COMPLETED", "PARTLY_COMPLETED"):
+            # busy = LINING + 全部终态(唯 DOCUMENT_FAILED 除外 —— 它按活动
+            # 语义允许修好后重交再 finish)。曾漏 CANCELLED: 与 begin/cancel/
+            # regenerate --force 竞争的无令牌提交在死 run 上照样落 completed
+            # 还报 ok(带 --claim 时因令牌已被 release 清空才侥幸走孤儿稿)
+            busy = ("LINING",) + tuple(
+                s for s in config.TERMINAL_STATES if s != "DOCUMENT_FAILED")
+            if row is not None and str(row["state"]) in busy:
                 self.rollback()
                 return "busy"
             if not claim_token:
@@ -690,6 +700,12 @@ class WikiDB:
                     return "token_lost"
             ok = self.set_job_state(run_id, page_id, "completed",
                                     content=content, claim_token=claim_token)
+            if ok:
+                # P9: 摘要/关键话题与 completed 终写同一事务(见 docstring)
+                self.conn.execute(
+                    "UPDATE page_job SET summary=?, key_topics=? "
+                    "WHERE run_id=? AND page_id=?",
+                    (summary, key_topics, run_id, page_id))
             self.commit()
             return "ok" if ok else "token_lost"
         except Exception:
@@ -838,14 +854,24 @@ class WikiDB:
     # -- file hashes ----------------------------------------------------------
     def upsert_file_hashes(self, pid: int, entries: dict) -> None:
         """只写给出的行(手工 write 刷基线用)—— 全表删写曾让单页修正
-        产生 10k 行 churn, 快照基线本身不动。"""
+        产生 10k 行 churn, 快照基线本身不动。
+
+        P25: 整批单事务 —— 连接是 isolation_level=None, 裸 executemany 逐句
+        自动提交, 刷新中途崩溃会留半更新基线(下次 update 对同一次逻辑编辑
+        混报 stale/clean)。"""
         if not entries:
             return
-        self.conn.executemany(
-            "INSERT OR REPLACE INTO file_hash(partition_id,path,sha256,size,mtime) "
-            "VALUES(?,?,?,?,?)",
-            [(pid, p, e["sha256"], e["size"], e["mtime"])
-             for p, e in entries.items()])
+        self.begin()
+        try:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO file_hash(partition_id,path,sha256,size,mtime) "
+                "VALUES(?,?,?,?,?)",
+                [(pid, p, e["sha256"], e["size"], e["mtime"])
+                 for p, e in entries.items()])
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
 
     def delete_file_hashes(self, pid: int, paths) -> None:
         paths = list(paths)

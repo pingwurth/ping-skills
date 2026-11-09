@@ -81,6 +81,15 @@ cite_lines 记忆化、active_run 集合从 config.ACTIVE_RUN_STATES 派生。
 - regenerate 取消旧 run 前先挡: 有"已完成未发布"的其他 job 时要求 --force
   (搁置量如实播报+入 run_log)。fail/skip 对 completed 同样要 --force。
 - pause/cancel/regenerate 在有租约时拒绝(--force 强撤, 在制稿件走孤儿稿)。
+- **LINING 窗口全封闭**(r5 P8/P15): finish 的 LINING/发布窗口内, cancel
+  (含 --force)/pause/regenerate --force/fail/skip 一律拒绝 —— publish/
+  snapshot 从不复查 run 状态, 曾在被取消的 run 下完整发布并把基线记到
+  CANCELLED run 头上。取消类写入本身带 CANCELABLE_RUN_STATES 前置(守卫
+  与 UPDATE 之间被 finish 抢先置 LINING 时如实报错)。卡死的 LINING 恢复
+  路径永远是重跑 `pwiki finish`(接受 LINING 前置)。
+- submit 终写 = complete_job_guarded 单事务: busy 集 = LINING + 全部终态
+  (唯 DOCUMENT_FAILED 可修复重交); summary/key_topics 随终写同事务落行
+  (其后裸自动提交曾被竞争 finish 快照成永久空摘要)。
 - 建 run 走 create_run_guarded: 检查+插入同一 BEGIN IMMEDIATE —— 并发
   begin 的输家被吸收, 不再叠出双活动 run。
 - 回收只发生在下一次 claim 里, 永不定时触发。
@@ -88,7 +97,7 @@ cite_lines 记忆化、active_run 集合从 config.ACTIVE_RUN_STATES 派生。
 ## 测试
 
 ```bash
-cd pwiki && python3 -m pytest tests/ -q     # 全套(~95)
+cd pwiki && python3 -m pytest tests/ -q     # 全套(330; 各轮回修只增不减)
 python3 -m pytest tests/test_db.py::test_claim_atomic_no_duplicate_under_threads -q
 ```
 
