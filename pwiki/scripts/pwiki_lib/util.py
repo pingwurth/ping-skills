@@ -172,8 +172,12 @@ def read_published_utf8(full: str, what: str = "发布文件") -> str:
             return fh.read()
     except UnicodeDecodeError as e:
         die(f"{what}不是合法 UTF-8({full}: {e})", config.EXIT_GATE)
-    except OSError:
-        return ""   # 缺失由调用方的前置检查负责
+    except OSError as e:
+        # r8 #3: 曾吞 OSError 返回 "" —— 调用方 isfile 预检之后, EACCES/
+        # EIO/TOCTOU 删失让 file_to_db 把页行内容当空串覆写(下次 finish 从
+        # 被清空的行重渲染, 手工编辑永久丢失), validate 误诊"空内容"。
+        # 缺失才是调用方前置检查负责的形态; 读不开 = 响亮的门禁错
+        die(f"{what}读取失败({full}: {e})", config.EXIT_GATE)
 
 
 def atomic_write(path: str, text: str) -> None:

@@ -343,17 +343,19 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                 # r7 #6 收尾: 声明源也随 plan 同步(编码与 queue_jobs 同规)
                 # —— 被跳过/失败的项走 kept 时行曾保持旧声明, 而对账
                 # (sources_redeclared)已按新计划触发, 不同步则每轮 update
-                # 重报 stale 且跟踪集永不换新
-                row["source_files"] = json.dumps(
-                    merged.get("source_files")
-                    or (json.loads(p["source_files"] or "[]")
-                        if p["source_files"] else []),
-                    ensure_ascii=False)
-                row["scope"] = json.dumps(
-                    merged.get("scope")
-                    or (json.loads(p["scope"] or "[]")
-                        if p["scope"] else []),
-                    ensure_ascii=False)
+                # 重报 stale 且跟踪集永不换新。
+                # r8 #6/#38: 键存在语义(显式 [] 是清空声明, `or` 回退旧行值
+                # 会重开 sources_redeclared 循环); 旧行列解码走 json_list
+                # —— 裸 json.loads 对 'null'/非 JSON 旧值正是 :768 记录过
+                # 的 footgun(None 写回 "null", 非 JSON 值打死整个 finish)
+                _sf = merged.get("source_files")
+                if _sf is None:
+                    _sf = json_list(p["source_files"])
+                row["source_files"] = json.dumps(_sf, ensure_ascii=False)
+                _sc = merged.get("scope")
+                if _sc is None:
+                    _sc = json_list(p["scope"])
+                row["scope"] = json.dumps(_sc, ensure_ascii=False)
             new_row = _row_like(row)
             if _republish_changed(p, new_row, p["content"]):
                 ctx.db.publish_page(pid, new_row, p["content"], run["id"])
@@ -746,6 +748,10 @@ def _write_indexes(ctx: Ctx, part, pages: list, modules: list,
 
 
 def _write_generation_state(ctx: Ctx, part, run, pages: list) -> None:
+    # r8 #16: 基线整表只读一次 —— 曾放在逐页字典推导里, finish/delete/
+    # rename 每个发布页都全表 SELECT+物化一次 file_hash(132 页 × 10k 文件
+    # ≈ 130 万行白读), 量级恰是 r7 #50 要消除的重哈希
+    _baseline = ctx.db.file_hashes(part["id"])
     state = {
         "schema_version": 2,
         "repo": ctx.repo,
@@ -755,8 +761,7 @@ def _write_generation_state(ctx: Ctx, part, run, pages: list) -> None:
         "run_id": run["id"],
         "pages": {p["page_id"]: {"path": p["path"],
                                  "source_hashes": _source_hashes(
-                                     ctx, p,
-                                     baseline=ctx.db.file_hashes(part["id"]))}
+                                     ctx, p, baseline=_baseline)}
                   for p in pages},
     }
     atomic_write(os.path.join(ctx.meta_dir(), "generation-state.json"),

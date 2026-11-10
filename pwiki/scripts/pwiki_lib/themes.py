@@ -278,6 +278,11 @@ def merge_manual(new_items: list, old_items: list, manual_fields,
         if old is not None:
             prev = (prev_by_id.get(str(np.get("id")), {})
                     if engine_prev is not None else None)
+            # r8 #2: 先拷贝再写字段 —— 曾就地改写引擎输出 dict, 调用方
+            # (themes :2123 / layers :453)合并后仍从 result 取基线快照,
+            # 手工值被当引擎输出记进 manual-baseline; 二次生成 old==prev,
+            # 三路合并判"未手改", 手工编辑静默回退
+            np = dict(np)
             for f in manual_fields:
                 if prev is not None:
                     if old.get(f, _MISS) != prev.get(f, _MISS):

@@ -335,9 +335,14 @@ def parse_cargo(path: str) -> dict:
 def parse_gradle_settings(path: str) -> dict:
     text = read_text(path)
     # r7 #35: 按语句迭代再收全部引号项 —— findall 的字面 'include' 前缀
-    # 从上一匹配末尾续扫, 同一语句的其余子项目全部丢弃
+    # 从上一匹配末尾续扫, 同一语句的其余子项目全部丢弃。
+    # r8 #15: 'include' 后必须紧跟 ( 或引号 —— r7 重写丢了旧正则的这个
+    # 要求, includeBuild("../lib")(Gradle composite build)的引号参数被
+    # 当子项目收进, decompose 为非子项目的 build 长出幽灵模块页。
+    # 注意捕获组必须从引号**开始**: 内层 findall 的配对依赖开头引号在组内
+    # (吃掉它会让 ':app', ':lib' 的配对错位, 全部解析成 ', ' 分隔符)
     includes = []
-    for m in re.finditer(r"include\s*\(?([^)\n]*)", text):
+    for m in re.finditer(r"include\s*(?:\(|(?=[\"']))([^)\n]*)", text):
         includes += re.findall(r'["\']([^"\']+)["\']', m.group(1))
     return {"includes": [i.lstrip(":") for i in includes]}
 

@@ -326,5 +326,14 @@ def _apply_card_conflict(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
     # 规范化(kind='card'/card_kind/ordinal 950)在 db.queue_jobs
     ctx.db.queue_jobs(run_id, [card_job(card, ctx.locale)],
                       style=str(plan.get("style") or ""))
+    # r8 #12: 排队窗口守卫式复查(cmd_regenerate 的 r7 #30 同款, 当年只
+    # 修了那一处)—— 并发 cancel 落在 create 与 queue 之间时 job 已插进
+    # 死 run(claim 永不派发), 而"applied"把 pending 冲突记录消费掉,
+    # 卡片永不重写; 如实报 retry 让冲突记录留待再和解
+    if not ctx.db.update_run_guarded(run_id, ("DOCUMENT_GENERATING",),
+                                     state="DOCUMENT_GENERATING",
+                                     stage="document"):
+        return ("retry", f"run {run_id} 排队期间被并发取消 — 本项保留待处理, "
+                "稍后重试和解")
     ctx.db.log(run_id, "reconcile_card", card_name)
     return "applied", f"卡片“{card_name}”排进 run {run_id} 重写 — `pwiki next`"

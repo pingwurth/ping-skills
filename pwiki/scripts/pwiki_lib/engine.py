@@ -180,10 +180,11 @@ def cmd_begin(args) -> int:
     except BaseException:
         # r7 #31: 排队段(Ctrl-C/kill)中断曾留死 DIRECTORY_GENERATING run
         # —— next 永报"正在建立/排队", begin 非强制报"续用"指回它,
-        # 恢复出口只有输出里从未提示的 --force。中断即取消(守卫式)
-        ctx.db.update_run_guarded(
-            run_id, config.CANCELABLE_RUN_STATES,
-            state="CANCELLED", finished_at=now_iso())
+        # 恢复出口只有输出里从未提示的 --force。中断即取消(守卫式)。
+        # r8 #17: 走取消三连单一属主 cancel_run(r7 #57)—— 曾手抄守卫式
+        # 置 CANCELLED, 跳过 release_all_claims 与 run_cancelled 审计行
+        # (其余每个取消路径都记, 中断的 begin 独缺审计痕迹)
+        ctx.db.cancel_run(run_id, "begin queue interrupted")
         raise
     # 排队窗口(数百行插入, 数秒)的裸 UPDATE 是全引擎最后一批无守卫 run 写
     # 之一 —— 期间并发 cancel/begin --force 合法置 CANCELLED 后, 裸写把已
@@ -194,6 +195,11 @@ def cmd_begin(args) -> int:
             state="DOCUMENT_GENERATING", stage="document"):
         die(f"run {run_id} 在排队期间被并发操作取消(cancel/begin --force) — "
             "队列作废, 重新 `pwiki begin`", config.EXIT_PRECOND)
+    # r8 #14: 模块注册表随 run 刷新 —— submit 的 mod_titles 走 DB 模块表
+    # (r7 #52, 只在 finish/plan --themes 重发布), 运行中途改过模块名的
+    # 整个 run 里 submit 曾按旧表要旧标题/新模块告警静默缺席, finish 又按
+    # 新 plan 硬拒, submit 早警告契约失效; 排队时同步一次即整 run 新鲜
+    ctx.db.publish_modules(part["id"], modules)
     ctx.db.log(run_id, "plan_applied",
                f"{len(items)} items queued (style={style})")
     print(f"run {run_id} started (generate/"
@@ -358,6 +364,18 @@ def cmd_next(args) -> int:
             print(json.dumps({"status": "paused", "run": run["id"]},
                              ensure_ascii=False))
         return config.EXIT_PRECOND
+    if run["state"] == "LINING":
+        # r8 #10: finish 进行中(LINING)绝不派发 —— LINING 循环把被拒 job
+        # 置回 pending, 此处认领的 submit 必撞 c037 LINING 守卫孤儿化;
+        # 发布阶段(pending=0)曾落进"全部终态"分支报 complete+exit 0,
+        # 编排方照提示起第二个并发 finish(穿过 :1107 LINING 含入守卫,
+        # 双跑 LINING+publish 后死于假诊断)。如实报 lining 由 status 观察
+        _say(f"status: LINING (run {run['id']}) — finish 校验/发布中, "
+             "不派发; 等 finish 结束或看 `pwiki status`")
+        if args.json:
+            print(json.dumps({"status": "lining", "run": run["id"]},
+                             ensure_ascii=False))
+        return config.EXIT_PRECOND
     if run["state"] in ("WAITING", "INITIALIZING", "DIRECTORY_GENERATING"):
         # P23: create_run_guarded 与 queue_jobs 事务之间 job 表还是空的 ——
         # 只数 job 行会把该窗口当 "complete"(退出码 0), 轮询协调者提前
@@ -394,6 +412,16 @@ def cmd_next(args) -> int:
                 print(json.dumps({"status": "run_closed",
                                   "run": run["id"],
                                   "state": _now["state"]},
+                                 ensure_ascii=False))
+            return config.EXIT_PRECOND
+        if _now is not None and _now["state"] == "PAUSED":
+            # r8 #13: 入场读到 DOCUMENT_GENERATING 后并发 pause 落地 ——
+            # claim 的派发态复查(r8)拒领, 此处如实报 paused 而不是落进
+            # "全部终态"分支(pending>0、processing=0 的 PAUSED run 曾会
+            # 被报成 complete+exit 0)
+            _say(f"status: PAUSED (run {run['id']}) — `pwiki resume` 继续")
+            if args.json:
+                print(json.dumps({"status": "paused", "run": run["id"]},
                                  ensure_ascii=False))
             return config.EXIT_PRECOND
         # pending=0 但仍有租约在写 —— 不是"已终态"(轮询驱动曾据此提前
@@ -935,7 +963,15 @@ def cmd_regenerate(args) -> int:
     # 分派统一走 planner.queue_item) —— 曾以 path='' 入队, finish 打开
     # <root> 直接 IsADirectoryError 且复崩
     job_item = queue_item(item, pages, ctx.locale, modules_by_id)
-    ctx.db.queue_jobs(run_id, [job_item], style=style)
+    try:
+        ctx.db.queue_jobs(run_id, [job_item], style=style)
+    except BaseException:
+        # r8 #11: begin 同款(r7 #31)—— create 与 queue 之间中断曾留
+        # 0-job DOCUMENT_GENERATING run: 该态不在 next 的"queueing"元组、
+        # 又是活动态(r7#11 复查放行), next 报 complete+exit 0, finish
+        # 静默空完成 —— 重做请求无声丢失。中断即取消(取消三连属主)
+        ctx.db.cancel_run(run_id, "regenerate queue interrupted")
+        raise
     # r7 #30: 排队窗口守卫式复查(cmd_begin 同款)—— create 与 queue 之间
     # 并发 cancel 置 CANCELLED 后, 曾照样把 job 插进死 run 还报"单项重做"
     if not ctx.db.update_run_guarded(
@@ -943,6 +979,9 @@ def cmd_regenerate(args) -> int:
             state="DOCUMENT_GENERATING", stage="document"):
         die(f"run {run_id} 在排队期间被并发操作取消 — 重新 `pwiki "
             f"regenerate {args.page_id}`", config.EXIT_PRECOND)
+    # r8 #14: 模块注册表随 run 刷新(submit 的 mod_titles 走 DB 表,
+    # 与 begin/update 同一新鲜度口径)
+    ctx.db.publish_modules(part["id"], plan_modules(plan))
     print(f"run {run_id} (regenerate) — 单项重做 {args.page_id}")
     print("next: pwiki next")
     return config.EXIT_OK

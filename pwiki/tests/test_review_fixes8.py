@@ -2064,14 +2064,20 @@ def test_r7_61_cite_lines_matches_count_lines():
 
 
 def test_r7_62_shared_utf8_reader(tmp_path, capsys):
-    """util.read_published_utf8: 坏字节 die EXIT_GATE(两个消费方共用)。"""
+    """util.read_published_utf8: 坏字节 die EXIT_GATE(两个消费方共用)。
+
+    r8 #3 契约更新: OSError 不再吞成 "" —— isfile 预检后的 EACCES/EIO/
+    TOCTOU 删失曾让 file_to_db 把页行内容当空串覆写; 缺文件同样响亮报错
+    (调用方的 isfile 分支只负责"整页跳过", 到达读取器即视为应可读)。"""
     from pwiki_lib.util import read_published_utf8
     f = tmp_path / "page.md"
     f.write_bytes(b"# ok\n\xff\xfe bad\n")
     with pytest.raises(SystemExit) as ei:
         read_published_utf8(str(f))
     assert ei.value.code == config.EXIT_GATE
-    assert read_published_utf8(str(tmp_path / "none.md")) == "" or True
+    with pytest.raises(SystemExit) as ei2:
+        read_published_utf8(str(tmp_path / "none.md"))
+    assert ei2.value.code == config.EXIT_GATE
     f2 = tmp_path / "good.md"
     f2.write_text("# good\n", encoding="utf-8")
     assert read_published_utf8(str(f2)) == "# good\n"

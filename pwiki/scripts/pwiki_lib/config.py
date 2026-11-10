@@ -58,6 +58,14 @@ TERMINAL_STATES = {"COMPLETED", "PARTLY_COMPLETED", "INITIALIZING_FAILED",
 # 写本身也带该集合前置 —— 守卫检查与 UPDATE 之间被 finish 抢先置 LINING
 # 时, 守卫式 UPDATE 落空并如实报错, 不把发布中的 run 拖去 CANCELLED
 CANCELABLE_RUN_STATES = tuple(s for s in ACTIVE_RUN_STATES if s != "LINING")
+# 可派发态(r8 #13): 活动态中允许 claim_jobs 认领的子集 —— PAUSED(暂停
+# 即停派发, 读后行动窗口)与 LINING(finish 在把被拒 job 置回 pending,
+# 派发出去的 submit 必撞 c037 LINING 守卫孤儿化)刻意排除。排队三态留给
+# cmd_next 的前门(:361 元组)挡, db 层门是竞态后盾(同 run 不可能并发
+# 退回排队态); DOCUMENT_FAILED 留在派发集: lining 失败修好后允许 next
+# 重领被拒项再 finish。
+DISPATCHABLE_RUN_STATES = tuple(s for s in ACTIVE_RUN_STATES
+                                if s not in ("PAUSED", "LINING"))
 # catalog item status (evidence: Jmo() normalizer — pending/waiting/processing/completed/failed)
 PAGE_STATES = ["pending", "processing", "completed", "failed", "skipped"]
 

@@ -540,7 +540,9 @@ class WikiDB:
              # 消费方全部 `json.loads(x or '[]')` 守卫, next/submit 裸
              # join/迭代即崩 —— 入库前归一 []
              json.dumps(item.get("source_files") or [], ensure_ascii=False),
-             item.get("type", ""), item.get("slug", ""),
+             # r8 #7: type 认双拼写(与 kept-merge/check_item 同口径)
+             (item.get("type") or item.get("article_type") or ""),
+             item.get("slug", ""),
              item.get("objective", ""),
              json.dumps(item.get("modules") or [], ensure_ascii=False),
              style or item.get("style", ""),
@@ -584,14 +586,19 @@ class WikiDB:
         claimed = []
         self.begin()
         try:
-            # 事务内复查 run 仍处活动态(同胞 create_run_guarded /
+            # 事务内复查 run 仍处**可派发**态(同胞 create_run_guarded /
             # complete_job_guarded 都在事务内复查, 本方法曾漏): cmd_next
             # 读到活动 run 后、本事务拿到写锁前, 并发 cancel 可已置
             # CANCELLED 并释放全部认领 —— 无状态谓词时照样向死 run 认领,
-            # 留下永久 processing 行(无任何清理路径再触达它)
+            # 留下永久 processing 行(无任何清理路径再触达它)。
+            # r8 #10/#13: 谓词从整 ACTIVE_RUN_STATES 收紧到 DISPATCHABLE
+            # —— LINING(finish 拒稿置回 pending 的窗口, 派发必孤儿化)与
+            # PAUSED(读后并发 pause, 派发照旧继续)曾是"活动=可派发"的
+            # 两个反例
             _run = self.conn.execute("SELECT state FROM run WHERE id=?",
                                      (run_id,)).fetchone()
-            if _run is None or _run["state"] not in config.ACTIVE_RUN_STATES:
+            if _run is None or _run["state"] not in \
+                    config.DISPATCHABLE_RUN_STATES:
                 self.rollback()
                 return []
             self.conn.execute(

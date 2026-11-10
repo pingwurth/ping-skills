@@ -1,0 +1,296 @@
+[
+  {
+    "file": "pwiki/scripts/pwiki_lib/yamlite.py",
+    "line": 264,
+    "summary": "yaml_load turns a quoted list-item string containing ':' into a one-pair dict (the _KV_RE plain-key fallback backtracks into the quoted string), so yaml_dump→yaml_load — the module's own round-trip — silently corrupts the plan",
+    "failure_scenario": "Verified by execution: yaml_dump({'aliases':[{'patterns':['/api/:id','v1'],'module':'gateway'}]}) emits `- \"/api/:id\"` and load returns patterns[0] == {'\"/api/': 'id\"'}; same for required_sections ['Overview: why'] → {'\"Overview': 'why\"'}. The next load_plan restructures the value into a garbage dict, match_any never matches the alias (module assignment silently lost), and the next save_plan persists the flipped dict — plan data permanently corrupted, no error anywhere, violating the module's '本引擎自己写的文件可以精确往返' contract"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/themes.py",
+    "line": 2123,
+    "summary": "save_manual_baseline snapshots result[\"pages\"] AFTER merge_manual has mutated those dicts in place (themes.py:284-289 `np[f] = old.get(f)`), so the three-way baseline records manual values as engine output and manual edits silently revert on the second regeneration — layers.py:453 (`save_manual_baseline(ctx, new_tree)`) has the identical defect",
+    "failure_scenario": "Verified by execution by the finder: engine emits title E, user edits plan title to M, runs `pwiki plan --themes` (merged keeps M, baseline wrongly stores M); user re-runs `plan --themes` with unchanged repo: old(M) == prev(M) so the field is not copied and the plan silently reverts to E — violating the PLAN_HEADER '引擎绝不静默覆盖手工编辑' contract (planner.py:31) for every MANUAL_FIELDS edit on both regen routes"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/util.py",
+    "line": 175,
+    "summary": "read_published_utf8 (new in r7 #62) swallows OSError and returns \"\" instead of failing, so export file_to_db silently replaces the DB page content with a near-empty string where pre-r7 code crashed loudly",
+    "failure_scenario": "Published file exists (isfile passes) but open() fails — EACCES (mode 000), EIO/ESTALE on network fs, or TOCTOU delete — → content=\"\" → _strip_injected gives \"\\n\" → sha256 differs from stored content_hash → save_page_content(pid, page_id, \"\\n\") wipes the page row (publish.py:1024); the next finish re-renders the file from the emptied row, permanently destroying the hand-edited content; gates.py:772 has the same swallow (empty-content misdiagnosis instead of 'unreadable')"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/i18n.py",
+    "line": 105,
+    "summary": "TOC_SECTION_RE requires a bare '\\n' after the '## 目录' heading while the injector only ever writes LF, so a published .md re-saved with CRLF defeats the strip and file_to_db writes the injected TOC block into page.content",
+    "failure_scenario": "Verified by execution: strip_injected_layers on the CRLF version of '<cite>x</cite>\\n\\n## 目录\\n\\n1. [a](#a)\\n2. [b](#b)\\n\\n正文\\n' strips the cite block but keeps the whole '## 目录\\r\\n1. …' block; file_to_db (no gates on that path) absorbs it, crossing the '注入物永不落库' line; every later finish recomposes a file with TWO 目录 sections (old-TOC pre-strip also misses CRLF), non-healing without hand-fixing the DB"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/i18n.py",
+    "line": 107,
+    "summary": "The TOC strip's numbered-line block `(?:\\d+\\.\\s[^\\n]*\\n)+` cannot span a blank line, so a hand-edited 目录 with blank lines between entries strips only a prefix, leaving orphan numbered lines that get published and then absorbed into the DB",
+    "failure_scenario": "Verified by execution: TOC_SECTION_RE.sub on '导语\\n\\n## 目录\\n\\n1. a\\n\\n2. b\\n\\n3. c\\n\\n正文' yields '导语\\n\\n2. b\\n\\n3. c\\n\\n正文' — the concise schema/toc gate is warning-only (sev_hard stays warnings), compose publishes the orphan '2./3.' lines between prose and the engine's fresh TOC, and file_to_db/validate --fix absorb the残行 into page.content"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 347,
+    "summary": "kept-merge's r7 #6 source_files/scope sync uses `merged.get(...) or <old row value>`, so a CLEARED declaration (deleted source_files lines or explicit []) falls back to the old row value and never converges — re-opening the exact sources_redeclared loop r7 #6 closed",
+    "failure_scenario": "Page published with source_files [a.py]; user deletes the source_files lines so the writer self-selects; update flags sources_redeclared and re-queues; the job gets skipped/failed (why it goes through kept); finish's kept-merge writes row.source_files back to old [a.py] (empty plan value loses to the `or` fallback); next update: new_declared=∅ vs old_declared={a.py} → sources_redeclared again — the item is re-queued on every update forever (converges only if the re-run completes)"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 329,
+    "summary": "kept-merge's article_type accepts two plan spellings (`item.get(\"type\") or item.get(\"article_type\")`) while check_item's after-tuple (snapshot.py:334) and _insert_job (db.py:543) read only `type` — a plan switched to the article_type spelling never converges",
+    "failure_scenario": "Hand edit renames `type: feature` to `article_type: feature` (the name repowiki-metadata.json/_index.yaml display, so plausible to copy): update compares after='' vs row 'feature' → catalog_changed → 0-job INCREMENT run → finish kept-merge rewrites the identical 'feature' → next update re-reports — perpetual catalog_changed 0-job loop, the same class r7 #7 fixed for parent"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/snapshot.py",
+    "line": 304,
+    "summary": "check_item's prompt compare uses `str(item.get(\"prompt\", \"\"))` which turns an explicit bare `prompt:` (yamlite keeps the key with None — verified) into the string 'None', while rows normalize to '' — prompt_changed fires every update",
+    "failure_scenario": "Plan entry with a bare `prompt:` key: 'None' != row '' → prompt_changed → real rewrite job queued → publish writes row prompt back to '' (jobs normalize None→'') → next update compares 'None' vs '' again — the page is fully LLM-rewritten on every `pwiki update` until the plan line is deleted; same str(None) family as the type/slug fix at :310-312, prompt alone missed the `or ''` normalization"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/yamlite.py",
+    "line": 373,
+    "summary": "r7 #28's clip ('|') semantics now append one trailing '\\n' where the old loader rstripped it, so every pre-upgrade page row whose plan uses 'prompt: |' blocks no longer equals the re-parsed plan value",
+    "failure_scenario": "Verified: HEAD parses 'prompt: |\\n      写一篇' to '写一篇\\n' (pre-r7 gave '写一篇'); a wiki published before the upgrade runs `pwiki update` → snapshot.py:304 '…\\n' != stored '…' → prompt_changed for every block-scalar item → full INCREMENT run LLM-rewrites pages whose plan never changed (one-time mass churn that also overwrites any manual page edits made since the last run; skipped/failed items keep looping through the same mismatch)"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/engine.py",
+    "line": 361,
+    "summary": "cmd_next has no early-return for LINING runs (the tuple covers only WAITING/INITIALIZING/DIRECTORY_GENERATING, and claim_jobs' in-txn gate admits LINING because LINING ∈ ACTIVE_RUN_STATES), so next dispatches jobs during finish and reports 'complete' while finish is publishing",
+    "failure_scenario": "finish's LINING loop (engine.py:1140-1141) sets rejected jobs back to pending while the run is LINING; a concurrent `pwiki next` passes :361, claim_jobs (db.py:594 admits LINING) claims the just-rejected job and dispatches it — the writer's submit is then refused by the c037 LINING guard and the draft is orphaned. During finish's publish phase (pending=0, run=LINING) the empty-claim branch passes the r7#11 recheck (LINING is 'active') and prints status=complete + exit 0, so an orchestrator following the '`pwiki finish`' hint starts a SECOND concurrent finish, which passes the LINING-inclusive guard at :1107, double-runs LINING+publish+snapshot, then dies at the final guarded write with a false '被并发 cancel/force?' diagnosis"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/engine.py",
+    "line": 938,
+    "summary": "cmd_regenerate's create_run_guarded→queue_jobs window lacks the BaseException cancel guard r7 #31 gave cmd_begin, so an interrupt leaves a 0-job DOCUMENT_GENERATING run that next misreports as complete and finish silently completes empty — the regenerate request is lost",
+    "failure_scenario": "Ctrl-C/kill during `pwiki regenerate X` between create_run_guarded (:926, state DOCUMENT_GENERATING) and queue_jobs' commit (:938, its own txn rolls back): run left DOCUMENT_GENERATING with 0 jobs; DOCUMENT_GENERATING is not in cmd_next's :361 'queueing' tuple, the r7#11 recheck passes (state is active), so next prints '全部 0 个 job 已终态 — pwiki finish' with JSON status=complete + exit 0; finish then republishes kept items and marks the run COMPLETED — the page is never redone, no error anywhere"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/reconcile.py",
+    "line": 327,
+    "summary": "_apply_card_conflict has no guarded post-queue recheck (the r7 #30 fix was applied only to cmd_regenerate), so a concurrent cancel in the create_run_guarded→queue_jobs window strands the card job in a dead run while the pending conflict record is already marked applied",
+    "failure_scenario": "`pwiki reconcile --apply N`: concurrent `pwiki cancel` (or begin --force's cancel_run) lands between create_run_guarded (:316) and queue_jobs (:327); queue_jobs has no run-state check and inserts the job into the CANCELLED run (claim_jobs will never dispatch it), _apply_card_conflict returns 'applied' and cmd_reconcile records reconcile_resolve(id,'applied') — the writer-reported card conflict is silently consumed and the card never rewritten, while the command printed '排进 run X 重写'"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/engine.py",
+    "line": 382,
+    "summary": "claim_jobs' transaction-internal state gate uses ACTIVE_RUN_STATES which includes PAUSED, so a next that read the run before a concurrent `pwiki pause` still claims and dispatches a job from the paused run",
+    "failure_scenario": "next reads active_run at :337 (DOCUMENT_GENERATING); `pwiki pause` in another process guarded-writes PAUSED; next reaches claim_jobs whose in-txn recheck (db.py:594) accepts PAUSED and claims a pending job with a fresh lease — the run is now PAUSED with a processing job, submit has no PAUSED guard and accepts it, so dispatch continued after pause: the same read-then-act window class r6#20/r7#11 rechecks were added for, with a state set treating a non-dispatchable state as dispatchable"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/engine.py",
+    "line": 625,
+    "summary": "r7 #52 made cmd_submit resolve mod_titles from the DB module table (refreshed only at finish/plan --themes) while finish LINING, publish, and validate --content all use the live plan — submit's module_mention advisory now runs against a stale registry",
+    "failure_scenario": "User renames/adds modules in wiki_plan.yaml then runs begin/update: during the whole run, submit's gate_item gets mod_titles from pre-rename DB rows — for a renamed module it demands the OLD title (writer wastes a rewrite on stale feedback), for a newly added module mod_titles is empty and the '指派模块未在正文出现' warning is silently absent; finish LINING then gates with the fresh plan titles and hard-rejects the page, defeating the submit-warns-early contract the old plan-based lookup provided"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/scan.py",
+    "line": 340,
+    "summary": "r7 #35's rewritten include regex dropped the old requirement that a quote/paren directly follow 'include', so includeBuild(\"…\") — Gradle composite builds — now captures its quoted argument as a subproject include",
+    "failure_scenario": "Verified by execution: parse_gradle_settings('include(\":core\")\\nincludeBuild(\"../platform-lib\")') returns includes ['core', '../platform-lib']; decompose's workspace handling (modules.py:153-167) then registers 'platform-lib' as a module dir of the main build, growing a phantom module sheet/page for a build that is not a subproject (out-of-repo targets are only saved by the c049 join_confined guard); pre-fix this line was correctly ignored"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 757,
+    "summary": "r7 #50 put `baseline=ctx.db.file_hashes(part[\"id\"])` inside the per-page dict comprehension of _write_generation_state, so every finish/delete/rename re-reads and materializes the whole file_hash table once per published page",
+    "failure_scenario": "132-page library with 10k tracked files: one finish runs 132 full-table SELECTs (~1.3M rows materialized into dicts and discarded) — the same order of magnitude as the re-hashing the fix was eliminating; cmd_delete (:948, single page) and reconcile rename (:290) hit the same amplification; hoist one read above the comprehension"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/engine.py",
+    "line": 184,
+    "summary": "begin's new queue-interrupt handler (r7 #31) hand-rolls the guarded cancel that the same diff just made db.cancel_run the single owner of (r7 #57), skipping release_all_claims and the run_cancelled audit log",
+    "failure_scenario": "Ctrl-C during begin's queue window: engine.py:184-186 inlines update_run_guarded(CANCELABLE_RUN_STATES, CANCELLED) — literally the first statement of db.cancel_run — without the log line and claim release, so an interrupted begin leaves no 'run_cancelled' audit trace where every other cancel path (force begin/cancel/regenerate) records one; call ctx.db.cancel_run(run_id, \"queue interrupted\") instead"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/planner.py",
+    "line": 994,
+    "summary": "cmd_plan's themes dispatch returns at :994 before the r7 #19 entry_shape_errors gate at :1050, so `pwiki plan --themes` crashes with AttributeError on scalar pages/cards entries instead of the contract's exit-2 shape diagnostic",
+    "failure_scenario": "wiki_plan.yaml hand-edited with `- 快速开始` under pages (the exact r7 #17/#19 input): `pwiki plan --themes` runs the full corpus planning then dies at themes.py:2097 (`p.get(\"kind\")` on str; merge_manual's :273 `p.get(\"id\")` same) with 'str' object has no attribute 'get', exit 1 — the expensive planning work wasted and the gate error unreachable"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/planner.py",
+    "line": 400,
+    "summary": "validate_plan itself TypeError-crashes on a scalar depends_on/related_to: `(m.get(\"depends_on\") or []) + (m.get(\"related_to\") or [])` concatenates str+list — the gate that should report exit 2 dies with exit 1",
+    "failure_scenario": "Hand-edited `depends_on: user-service` (bare string) → `pwiki validate` and every begin-path validator crash 'TypeError: can only concatenate str (not \"list\") to str' (verified by the finder's execution) — r7 #17/#18 added shape guards for module scope and module entries but not these two fields, which sit right below the fixed scope guard at :391-395"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/planner.py",
+    "line": 746,
+    "summary": "The plan --reset/--seed route bypasses entry_shape_errors (the gate sits after its return): module dicts missing id crash at bare m[\"id\"] (:746, also :799/:821/:836) and scalar module entries crash at m.get(\"parent\") (:745) — r7 #20 fixed only the m[\"title\"] variant",
+    "failure_scenario": "wiki_plan.yaml modules entry `- parent: root\\n  title: X` with no id (or emptied `id:`): `pwiki plan --reset`/`--seed` dies with KeyError 'id'; `- user-service` scalar dies with AttributeError — exit 1 traceback before scaffold_pages produces anything, instead of the shared shape gate's exit 2"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/planner.py",
+    "line": 517,
+    "summary": "Page scope has no shape guard (r7 #17 gave module scope one): a bare-string scope iterates characters through _check_repo_path emitting per-char garbage errors, and the same unguarded iteration of p.get(\"modules\") at :621 feeds single characters into the coverage check",
+    "failure_scenario": "Hand-edited `scope: src/` (string, not list) → validate reports 'page p1: scope 路径不存在: s / r / c' (verified by execution) — three nonsense diagnostics that don't tell the user the actual fix; a scalar modules value similarly makes the module-coverage hard rule compare module keys against single characters"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/modules.py",
+    "line": 786,
+    "summary": "cmd_modules reads plan['modules'] without the shared entry_shape_errors gate, so a scalar/hand-edited module entry crashes the merge with AttributeError instead of a gate error (third unguarded entry point after validate_plan and cmd_plan)",
+    "failure_scenario": "Hand-edit wiki_plan.yaml to `- oops-scalar` under modules, run `pwiki modules` (the documented re-derivation workflow): :786 `{str(m.get(\"id\")): m ...}` raises 'str' object has no attribute 'get' — exit 1 traceback after the expensive decompose run, verified by execution"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/modules.py",
+    "line": 797,
+    "summary": "Third unfixed copy of the bare int() on schema_version that r7 #21 replaced with as_int in planner.py and layers.py — `pwiki modules` still crashes with ValueError on a non-numeric schema_version",
+    "failure_scenario": "Plan with `schema_version: three` (yamlite parses it as a string, load_plan does no validation): `pwiki modules` → ValueError: invalid literal for int() traceback exit 1, after decompose ran but before save_plan (verified by execution); extract one bump helper and call it from all three sites"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/qoderplan.py",
+    "line": 245,
+    "summary": "_check_caps's notes loop (`n.get(\"text\")` per entry) still lacks the isinstance guard — r7 #26's fix covered the documents loops and _notes_from_plan but not this loop, which the original r7 finding explicitly named ('n.get 的循环')",
+    "failure_scenario": "Hand-written wiki_plan.yaml with a scalar note under notes: → `pwiki qoder-plan --lint` — the command whose sole job is prechecking hand-written files — dies with AttributeError traceback exit 1 instead of a warn/exit 2 (verified by execution)"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/layers.py",
+    "line": 266,
+    "summary": "apply_layer_result appends to state['articles'] assuming the key exists — _load_layers returns any parsed JSON and its error message invites hand-salvaging work/plan-layers.json, but a salvaged state without an 'articles' key KeyErrors on apply and on status",
+    "failure_scenario": "work/plan-layers.json salvaged to {\"profile\":\"standard\",\"project\":\"T\"}: `pwiki plan --layers status` or a valid `--layers apply --file` with accepted articles → KeyError: 'articles' traceback exit 1 instead of a contract gate error (verified by execution)"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/layers.py",
+    "line": 342,
+    "summary": "layer_status_text and materialize_layers iterate state['articles'] with a.get/a['depth'] unguarded — r7 #25's cleanup of non-dict entries runs only inside apply_layer_result, so direct status (AttributeError :342) and commit (TypeError a['depth'] :311) still crash on the hand-salvage surface, contradicting the fix's own claim that '后续 status/commit 不再照崩'",
+    "failure_scenario": "Hand-salvage plan-layers.json adding a scalar string to articles, then `pwiki plan --layers status` (without apply) → AttributeError: 'str' object has no attribute 'get'; commit path same via a[\"depth\"] TypeError (verified by execution)"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/digest.py",
+    "line": 60,
+    "summary": "build_digest iterates plan modules/pages/cards with bare m.get()/p.get() and cmd_digest never runs validate_plan, so a hand-edited plan with a scalar entry kills `pwiki digest` — the documented pre-validate step — with a traceback",
+    "failure_scenario": "Verified by execution: build_digest(ctx, {'modules': ['auth-core'], 'pages': [], 'cards': []}, inv) → AttributeError: 'str' object has no attribute 'get' at :60 (pages loop :73-80 and cards :86-87 same); every writer's shared summary is unbuildable until the plan is fixed, while `pwiki validate` — which would name the bad entry — is a separate later step"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/layers.py",
+    "line": 420,
+    "summary": "cmd_plan_layers commit reads plan pages without a shape guard: `kept_sheets = [p for p in old_pages if p.get(\"kind\")]` crashes on a scalar hand-edited pages entry — uncovered sibling of the themes/scaffold/layer-state guards",
+    "failure_scenario": "work/plan-layers.json has applied articles; user hand-edits wiki_plan.yaml leaving a bare scalar under pages: → `pwiki plan --layers commit` → load_plan parses fine (yamlite accepts scalar items) → :420 AttributeError 'str' object has no attribute 'get', exit 1, before the commit's own validate_plan gate can report the bad entry cleanly"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/gates.py",
+    "line": 177,
+    "summary": "_FENCE_RE's lazy ```-to-``` pairing mis-splits a 4-backtick outer fence containing a 3-backtick example, so the example body leaks into prose and is gated as real content",
+    "failure_scenario": "Verified by execution: a page with a ````markdown fence wrapping a ```python example containing '# setup comment' splits so the example body becomes a prose segment — strip_code_fences keeps it, the H1 findall sees 2 H1s → hard error 'schema/h1: 应恰有一个 H1, 实得 2' at submit, section_spans yields the phantom section (deep: error-level sources/section), and file:// links inside the example are validated as real citations — a valid page documenting fenced markdown cannot pass submit regardless of writer skill; unclosed fences mis-split the same way"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/styles.py",
+    "line": 90,
+    "summary": "cite_band_for's kind=='module_sheet' branch (D15 'module' 60-110 band) is unreachable from its only caller: gate_item routes module_sheet rows into _gate_sheet and returns at gates.py:323-325, before the band lookup at gates.py:410",
+    "failure_scenario": "A deep-style module_sheet job never reaches the citation band check — a sheet with 5 or 150 total file:// citations passes LINING with no total-cite band at all, contradicting the documented contract table (references/validation.md:28 'module_sheet → 60–110') the module docstring claims to keep in sync; test_styles.py only locks the reachable branches"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/gates.py",
+    "line": 571,
+    "summary": "The sheet/links check tests `\"file://\" in content` on raw text while the adjacent sheet/shape check (:573) strips fences — and gate_item's `\"<cite>\" in content` at :345 is the same fence-blind form — contradicting the fence-awareness invariant r7 #4/#5 just established for this exact area",
+    "failure_scenario": "A concise module_sheet citing '不要这样写: ```\\n[x](file://a.py#L1)\\n```' as a counter-example gets 'sheet/links: concise 速查表不写 file:// 链接' at LINING; a concise page whose fenced example contains a literal <cite> gets the schema/cite warning — writers must remove legitimate examples to clear gates that shouldn't fire"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/gates.py",
+    "line": 474,
+    "summary": "The 章节来源 exemption uses substring matching over OVERVIEW_SECTIONS ('概述','介绍','简介','引言','目录','结论',…), so common deep-analysis section titles containing those words — 架构概述, 目录结构, 接口介绍 — are silently exempted from the deep error-level requirement",
+    "failure_scenario": "Verified: section heads '架构概述' and '目录结构' both match any(k in head) and are skipped from the missing-ss count — a deep page whose longest analysis sections are named this way passes LINING with zero **章节来源** blocks while an identically-sourced section titled '实现分析' hard-fails; fix_section_sources (:617) shares the collision so --fix won't add blocks either — the exemption is total, not just diagnostic"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 54,
+    "summary": "LINK_SKIP_PREFIXES contains the bare prefix 'http', so any relative .md target starting with 'http' (a page named http-client.md / http2-guide.md) is skipped by validate --content's dead-link check and by publish's normalize_links with the same set",
+    "failure_scenario": "A repo has a module page emitted as http-client.md (title 'HTTP 客户端' → slug); a sibling page writes '[HTTP 客户端](wrong/dir/http-client.md)': target.startswith(\"http\") → the lookahead rejects the match, errors_total never gains links/internal, and normalize_links leaves the broken relative path in the published tree — the '断链导航不得随已验证契约发布' invariant silently misses a whole filename family"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/gates.py",
+    "line": 530,
+    "summary": "The card frontmatter evidence-existence check only runs `if isinstance(data.get(\"source_files\"), list)` — the natural scalar form `source_files: src/a.py` a human writes in a hand-edited published card silently skips the 'declared evidence must exist' validation entirely",
+    "failure_scenario": "Hand-edit a published card's frontmatter to `source_files: deleted/path.py` (scalar, no brackets) and run file_to_db/validate --content: the existence/containment check never executes, so a card declaring a deleted or out-of-repo file as evidence republishes cleanly — exactly what the c049 '声明已删文件的证据不再能随卡发布' rule exists to block; the bracket-list form of the same path hard-errors"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/gates.py",
+    "line": 403,
+    "summary": "words = len(content.split()) undercounts CJK prose by ~two orders of magnitude (Chinese text has no spaces) and the concise preset sets page_lines=None, so for the engine's default zh locale the only concise length bound (3300 words) can never fire",
+    "failure_scenario": "A concise zh page of 8000 Chinese characters yields ~30-80 split() tokens → size/words never triggers; combined with page_lines=None (styles.py:19) there is no effective length gate at all for zh concise pages — a runaway writer page passes submit and LINING with zero size feedback while an equivalent English page is flagged"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/layers.py",
+    "line": 237,
+    "summary": "apply_layer_result iterates a bare-string `modules` value from the model's <result> JSON character-by-character, and the top-level path (parent_slug=\"\") skips the domain-membership check entirely, so the malformed article is accepted with zero problems and commit emits per-character garbage scope dirs",
+    "failure_scenario": "LLM top-level reply with \"modules\": \"services\" → :237 yields ['s','e','r','v','i','c','e','s']; `if not modules` passes, parent_node is None so the allowed-set check (:254) never runs → apply prints 'added 1 article(s)' with problems=[]; commit → materialize_layers falls back to per-char scope dirs like 'c/' 'e/' (verified by repro), and validate_plan then fails with the misleading 'module services/user 未被任何文章的 modules 覆盖', sending the operator to fix coverage instead of the malformed value"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 326,
+    "summary": "kept-merge's title sync `str(item.get(\"title\", p[\"title\"]))` writes the literal string 'None' for an explicit empty `title:` (yamlite keeps the None key), while the path side derives safe_filename(None)='untitled' — a self-contradictory row ships",
+    "failure_scenario": "Run in progress while someone hand-edits the plan to a bare `title:` (validate only runs at begin/update entry, finish re-reads the plan without it): finish's kept branch moves the file to <parent>/untitled.md and writes row title 'None' (verified: safe_filename(None)='untitled', str(None)='None') — the index shows title='None' with file untitled.md until the user fixes the plan and a catalog_changed round repairs it"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 349,
+    "summary": "kept-merge's source_files/scope fallback hand-rolls `json.loads(p[...])` where the module's own single decoder json_list exists precisely because this column can hold 'null'/non-JSON legacy values — re-introducing the exact footgun publish.py:768-770 documents",
+    "failure_scenario": "An old/hand-edited row with source_files='null' (truthy string) → json.loads returns None → `merged.get(...) or None` → json.dumps(None) writes \"null\" back instead of normalizing to [] (json_list returns []); a non-JSON legacy value like 'src/a.py' → JSONDecodeError kills the whole finish mid-LINING with a bare traceback while every other read path of the same column tolerates it as []"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/scan.py",
+    "line": 284,
+    "summary": "The [tool.uv.workspace] members branch only matches YAML-style '- item' lines, which are invalid TOML — the canonical `members = [\"packages/*\"]` array form is never parsed, so the branch is dead on every real uv workspace",
+    "failure_scenario": "A uv-workspace pyproject.toml with canonical `[tool.uv.workspace]\\nmembers = [\"packages/*\", \"libs/a\"]` → parse_pyproject returns workspace_members=[] (verified); those dirs never reach decompose's workspace_dirs via the uv channel — members lacking their own manifest go undetected and the inventory's workspace data is silently wrong"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/scan.py",
+    "line": 330,
+    "summary": "parse_cargo collects workspace members only from the single-line `members = [...]` form and assigns (not appends), so a multi-line members array — canonical rust workspace formatting — yields zero members",
+    "failure_scenario": "Cargo.toml with `[workspace]\\nmembers = [\\n    \"crates/a\",\\n    \"crates/b\",\\n]` → the first line's findall returns [] and overwrites, continuation lines don't start with 'members' → workspace_members=[] (verified); manifest-less members go undetected and the recorded workspace data is silently wrong"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/engine.py",
+    "line": 628,
+    "summary": "cmd_submit's new DB-module-row adapter is the third hand-rolled row→plan-module mapping and diverges from the two existing ones by mapping path from the dir column, dropping the path column publish_modules stores (db.py:915) — module-mention titles are lost when path≠dir",
+    "failure_scenario": "A module whose plan path differs from dir (e.g. path='services/auth', dir='src/auth'): the adapter feeds mod_titles_for only id/dir keys, its wanted-set (job modules carry plan paths) never matches via the path key, and the module_mention warning silently loses that module's title; share one row-to-plan-module helper with publish.py:585-591/:653-657 instead of a third variant"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/db.py",
+    "line": 254,
+    "summary": "The F47 schema-version gate mutates the database before rejecting it: PRAGMA journal_mode=WAL (:246, rewrites the db header, drops -wal/-shm files) and executescript(SCHEMA) (:254, re-creates any dropped/renamed v3 tables) both run before _check_schema_version (:261) raises",
+    "failure_scenario": "Open a schema_version='v4' wiki.db with this pwiki version (the gate's only scenario): the rollback-journal database is first converted to WAL and v3 objects CREATE IF NOT EXISTS'd into it, and only then SchemaVersionError fires — the '不碰别代 schema' guard itself writes to the foreign DB, and a later newer-version tool sees phantom empty tables"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/util.py",
+    "line": 195,
+    "summary": "atomic_write fsyncs the temp file but never fsyncs the directory after os.replace, so a crash can lose the rename while wiki.db's WAL-committed content_hash has already durable-persisted the new value",
+    "failure_scenario": "Power loss/panic right after finish's publish loop replaces page.md and the process exits: the file content is fsynced but the directory entry isn't — on reboot the published .md is the old text while page.content/content_hash in the DB are the new values, a silent DB/tree divergence that only the next export db_to_file or update drift check heals"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/config.py",
+    "line": 337,
+    "summary": "Ctx.partition() always calls db.partition(create=True) (default), so P44-designated read-only commands (pages/read/search/validate --content/status) still INSERT partition rows once the (branch, locale) key is missing — the write-lock avoidance P44 describes is only half-implemented",
+    "failure_scenario": "Initialized zh workspace → `pwiki pages --locale en` (verified by repro: adds a ('-','en') partition row and exits 0, silently mutating state from a documented read-only command); the INSERT also takes the write lock, so racing finish's long BEGIN IMMEDIATE publish transaction it can burn the 10s busy_timeout and die 'database is locked' — the exact failure family db.py:335-339 says these commands were fixed to avoid"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/gates.py",
+    "line": 841,
+    "summary": "r7 #44 edited both publish.LINK_RE (:48) and the validator's _link_re (:841) to add the identical nested-paren technique, kept in sync only by a '同口径' comment — two detectors that already single-sourced LINK_SKIP_PREFIXES after a prior drift made publisher and validator disagree",
+    "failure_scenario": "The next tweak to the target pattern (e.g. two-level parens, angle-bracket targets) lands in one regex and not the other, re-creating the class where normalize_links rewrites what validate flags (or vice versa); export one shared target-pattern builder (e.g. publish.paren_tolerant(cls)) or derive the validator regex from LINK_RE"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/layers.py",
+    "line": 27,
+    "summary": "_FENCE_BODY_RE is a deliberate hand-copy of gates' fence-body regex ('不能直接 import 编译私有名, 保持同款字面') — the third fence-pattern copy alongside gates._FENCE_RE and the gates/publish link pair",
+    "failure_scenario": "A fence-rule evolution (indented fences, ~~~ fences, 4-backtick fix for gates.py:177) must now be applied in two places by comment discipline; expose a public shared fence/fence-body pattern from gates and import it — the r7 #66 fix itself notes the sync duty"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/publish.py",
+    "line": 779,
+    "summary": "_source_hashes re-types snapshot.snapshot_hashes' (size, mtime, sha256) baseline-hit short-circuit inline ('snapshot 侧同款短路'), duplicating the ms-mtime convention and the hit predicate in two modules",
+    "failure_scenario": "The copies already differ subtly (OSError: continue vs pass, full entry dict vs bare sha); the next change to the hit predicate or the mtime granularity lands in one and not the other, silently desynchronizing generation-state hashes from snapshot baselines; extract one sha-with-baseline helper used by both"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/planner.py",
+    "line": 374,
+    "summary": "validate_plan's inline modules shape guard appends the same error the shared entry_shape_errors helper (invoked at :415 from the same plan.get(\"modules\")) reports again — one scalar module entry produces two near-identical error lines with different formats",
+    "failure_scenario": "A scalar module entry yields 'modules 条目必须是映射(got ...)' twice in one validate run (repr-only vs type+repr wording), and future wording changes drift between the two; keep the local filter (:376) but let entry_shape_errors own the reporting"
+  },
+  {
+    "file": "pwiki/scripts/pwiki_lib/corpus.py",
+    "line": 309,
+    "summary": "The r7 #51 text-cache over-budget guard + store + accounting triplet is typed twice, once per cache dict (read at :287-291, read_lower at :309-313), differing only in which dict guards the fallback",
+    "failure_scenario": "Any future policy change (evict-instead-of-refuse, joint accounting fix) must be applied twice or the two caches diverge — the guard conditions already differ textually (self._text vs self._text_lower); extract a _maybe_cache(cache, key, value) helper"
+  }
+]

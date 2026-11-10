@@ -102,9 +102,13 @@ def toc_titles() -> set:
 # H2 之间时, file_to_db/validate 的剥除把正文段落整段吞掉并写回
 # page.content(静默内容丢失)。手写的非编号目录节从此不再被整节删
 # (更保守: 剥自己的注入物, 永不多吃正文)。
+# r8 #4/#5: (a) 行尾容忍 \r —— 注入器只写 LF, 但已发布 .md 被 CRLF 重存
+# 后旧形态剥除失效, 注入目录整块落库 page.content(违反"注入物永不落库"),
+# 之后每次 finish 合成双目录文件; (b) 编号行之间容许空行/空白行 —— 手编
+# 目录条目间加空行时旧块只剥前缀, 孤儿编号行随发布再被 file_to_db 吸收。
 TOC_SECTION_RE = re.compile(
-    r"(?m)^## (?:目录|Table of Contents|Contents)[ \t]*\n"
-    r"\n?(?:\d+\.\s[^\n]*\n)+\n?")
+    r"(?m)^## (?:目录|Table of Contents|Contents)[ \t]*\r?\n"
+    r"(?:[ \t]*\r?\n)*(?:\d+\.\s[^\n]*\r?\n(?:[ \t]*\r?\n)*)+")
 
 # 门禁侧的目录标题行(单行形态, "不要写目录节"警告用)—— 与 TOC_SECTION_RE
 # 同源。曾两份漂移漏掉 'Contents': en writer 的合法 Contents 节过得了

@@ -228,6 +228,31 @@ class _YLine:
 _KV_RE = re.compile(
     r'^("(?P<qk>[^"]*)"|\'(?P<sk>[^\']*)\'|'
     r'(?P<pk>[^:#][^:]*?(?::[^:\s]+)*))\s*:\s*(?P<val>.*)$')
+
+
+def _match_kv(text: str):
+    """_KV_RE.match 的引号键门(r8 #1): 行以引号开头时只认**完整引号键**
+    (qk/sk)—— pk 回退会回溯进引号串, `"/api/:id"` 被拆成 {'"/api':
+    'id"'}, 自家 yaml_dump→yaml_load 往返静默损毁计划(aliases 的 patterns
+    永不匹配, 下轮 save 还把翻转值持久化)。引号开头而引号键不成立 = 不是
+    映射(标量或错误), 绝不倒退成裸键。"""
+    m = _KV_RE.match(text)
+    if m is not None and text[:1] in ('"', "'") \
+            and m.group("qk") is None and m.group("sk") is None:
+        return None
+    return m
+
+
+def _quoted_scalar(tok: str) -> bool:
+    """完整引号标量: 同一对引号开头结尾; 内部同款引号只以转义形态出现
+    ('' 成对 / \\\")—— 与 _parse_scalar 认的转义同款。"""
+    q = tok[:1]
+    if q not in ('"', "'") or len(tok) < 2 or not tok.endswith(q):
+        return False
+    inner = tok[1:-1]
+    if q == "'":
+        return "'" not in inner.replace("''", "")
+    return '"' not in inner.replace('\\"', "")
 # P40: 裸键允许"后跟非空白的冒号"段(a:b / go:generate) —— YAML 里它们是
 # 键的一部分; 曾绑到第一个 ':' 之前的最短前缀, 'a:b: v' 被静默重塑成
 # {'a': 'b: v'}(违"拿不准就报错, 绝不静默吞字段"); 发射侧对含 ':' 键加
@@ -261,7 +286,7 @@ def _parse_block(lines: list, i: int, min_indent: int):
             if rest == "":
                 val, i = _parse_block(lines, i + 1, base + 2)
                 seq.append(val)
-            elif _KV_RE.match(rest):
+            elif _match_kv(rest) is not None:
                 # map item: re-parse as virtual lines with the "- " stripped。
                 # 续行吸收连同**注释行**一起收(text=="" 由 _parse_block 跳过):
                 # 曾在 text != "" 处停 —— 条目中段一条 '#' 注释让余下字段
@@ -290,6 +315,11 @@ def _parse_block(lines: list, i: int, min_indent: int):
                     raise ValueError(
                         f"yaml: 行内列表未在一行内闭合(不支持跨行): "
                         f"{lines[i].raw!r}")
+                # r8 #1: 引号开头却既不是映射也不是完整引号标量 —— 报错
+                # 而不是当裸标量吞(半截引号串是手写错误, 静默吞下比崩更糟)
+                if rest[:1] in ('"', "'") and not _quoted_scalar(rest):
+                    raise ValueError(
+                        f"yaml: cannot parse line: {lines[i].raw!r}")
                 seq.append(_parse_scalar(rest))
                 i += 1
         return seq, i
@@ -306,7 +336,7 @@ def _parse_block(lines: list, i: int, min_indent: int):
             # 缩进更深, 由块收集器原样收进体 —— 曾在 yaml_load 全局按
             # text 过滤, 手写块标量里的 '---' 正文行被静默丢弃
             break
-        m = _KV_RE.match(lines[i].text)
+        m = _match_kv(lines[i].text)
         if not m:
             raise ValueError(f"yaml: cannot parse line: {lines[i].raw!r}")
         if m.group("qk") is not None:

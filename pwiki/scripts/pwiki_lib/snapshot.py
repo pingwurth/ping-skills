@@ -301,7 +301,15 @@ def cmd_update(args) -> int:
             stale.append((item, "sources_removed"))
         elif new_declared != old_declared:
             stale.append((item, "sources_redeclared"))
-        elif str(item.get("prompt", "")) != (pub["prompt"] or ""):
+        elif str(item.get("prompt") or "").rstrip("\n") != \
+                str(pub["prompt"] or "").rstrip("\n"):
+            # r8 #8/#9: (a) `or ""` 归一显式空 prompt:(yamlite 保留 None
+            # 键)—— str(None)='None' 对行侧 '' 曾每轮 update 触发全量重写
+            # (同 :310-312 type/slug 已修的 str(None) 家族); (b) 两侧
+            # rstrip("\n"): r7 #28 起 clip('|') 按 YAML 语义保留恰一个尾
+            # 换行, 而升级前的旧行存的是 rstrip 过的值 —— 不归一则一次
+            # update 把全部块标量 prompt 页误判 prompt_changed 大 churn
+            # (顺带覆盖期间的手工页编辑)
             stale.append((item, "prompt_changed"))
         else:
             # 目录形状漂移: 重挂/改名/改型 —— 即使源干净也要重建路径与树位。
@@ -324,6 +332,9 @@ def cmd_update(args) -> int:
             # 文件永远留在旧目录, validate --content 永久报"计划页未落盘");
             # kind 不进元组: 行上是归一形态('card')与计划侧卡种类永不等,
             # 且改型必改 path 已被路径对账覆盖
+            # r8 #7: type 认双拼写(与 kept-merge/_insert_job 同口径)——
+            # 手滑把 type: 改写成 article_type:(repowiki 索引显示名)时,
+            # 对账曾读 '' 对行 'feature' → catalog_changed 0-job 死循环
             before = (pub["title"], pub["parent_id"], pub["ordinal"],
                       pub["article_type"] or "", pub["slug"] or "",
                       _jjoin(pub["modules"]), str(pub["objective"] or ""),
@@ -331,7 +342,8 @@ def cmd_update(args) -> int:
                       str(pub["pack_key"] or ""),
                       pub["module"] or "", pub["sheet"] or "")
             after = (str(item.get("title") or ""), str(item.get("parent") or ""),
-                     item_ordinal, str(item.get("type") or ""),
+                     item_ordinal, str(item.get("type")
+                                       or item.get("article_type") or ""),
                      str(item.get("slug") or ""),
                      _jjoin(item.get("modules") or []),
                      str(item.get("objective") or ""),
@@ -434,6 +446,10 @@ def cmd_update(args) -> int:
             state="DOCUMENT_GENERATING", stage="document"):
         die(f"run {run_id} 在排队期间被并发操作取消 — 重新 `pwiki update`",
             config.EXIT_PRECOND)
+    # r8 #14: 模块注册表随 run 刷新 —— submit 的 mod_titles 走 DB 模块表
+    # (r7 #52), update 曾不刷表, 运行中途改模块名的整个 run 里 submit 按
+    # 旧表要旧标题, finish 按新 plan 硬拒(与 begin/regenerate 同口径)
+    ctx.db.publish_modules(part["id"], modules)
     ctx.db.log(run_id, "increment_planned",
                f"{len(stale)} stale, {len(removed_items)} removed")
     print(f"run {run_id}: INCREMENT over {len(stale)} items — `pwiki next`")
