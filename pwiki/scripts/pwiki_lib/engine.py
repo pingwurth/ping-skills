@@ -127,13 +127,12 @@ def cmd_begin(args) -> int:
                 "失败后再 begin --force", config.EXIT_PRECOND)
         # 取消写带状态前置(P8): LINING 预检与 UPDATE 之间被 finish 抢先置
         # LINING 时如实报错 —— publish 不在 CANCELLED run 下跑
-        if not ctx.db.update_run_guarded(
-                active["id"], config.CANCELABLE_RUN_STATES,
-                state="CANCELLED", finished_at=now_iso()):
+        # 取消三连单一属主 db.cancel_run(r7 #57)
+        ok, _ = ctx.db.cancel_run(active["id"],
+                                  "superseded by --force begin")
+        if not ok:
             die(f"run {active['id']} 状态已被并发操作改变(如进入 finish) — "
                 "重试 `pwiki begin --force`", config.EXIT_PRECOND)
-        ctx.db.log(active["id"], "force_cancelled", "superseded by --force begin")
-        ctx.db.release_all_claims(active["id"])
         info(f"已取消旧 run {active['id']}")
 
     commit = ctx.commit
@@ -417,13 +416,14 @@ def cmd_next(args) -> int:
     # 三个重物在批内只算一次(每认领一单曾各来一遍: 全量 job 扫描含 content
     # blob + GROUP BY 计数 + 整个 plan YAML 重解析)。plan 解析只在人类行走
     # —— payload(--json)从不读它, 编排方高频轮询模式曾每单白付 ~24ms
-    all_jobs = ctx.db.jobs_meta(run["id"])
     if args.json:
         payloads = [_job_payload(j, ctx, run, summary)
                     for j in claimed]
         print(json.dumps(payloads if batch > 1 else payloads[0],
                          ensure_ascii=False, indent=2))
     else:
+        # r7 #53: 整队元数据只被人类格式化消费 —— --json 轮询不再白取
+        all_jobs = ctx.db.jobs_meta(run["id"])
         try:
             from .planner import load_plan, plan_pages
             plan_pages_ = plan_pages(load_plan(ctx))
@@ -619,10 +619,20 @@ def cmd_submit(args) -> int:
     # 计划 YAML 只为解模块标题而解析 —— 卡片(12-60 张/run)从不带
     # module, 白付 ~24-80ms/张; 无模块的 job 整段跳过
     if _json_list(job["modules"]) or job["module"]:
-        try:
-            mod_titles = mod_titles_for(job, plan_modules(load_plan(ctx)))
-        except SystemExit:
-            pass
+        # r7 #52: 注册表读 DB module 表(finish 每轮重发布的同一份)——
+        # 曾为每个带模块 job 整个重解析 wiki_plan.yaml(24-80ms × 全队);
+        # 空(首跑未发布)再兜底 plan
+        _mods = ctx.db.modules(part["id"])
+        if _mods:
+            mod_titles = mod_titles_for(
+                job, [{"id": m["module_id"], "title": m["title"],
+                       "path": m.get("dir", ""), "dir": m.get("dir", "")}
+                      for m in _mods])
+        else:
+            try:
+                mod_titles = mod_titles_for(job, plan_modules(load_plan(ctx)))
+            except SystemExit:
+                pass
 
     errs, warns = gates.gate_item(content, job, ctx.repo, style,
                                   phase="submit", mod_titles=mod_titles)
@@ -900,16 +910,14 @@ def cmd_regenerate(args) -> int:
             "--force", config.EXIT_PRECOND)
     # 取消写带状态前置(P8): 同 cmd_cancel —— 守卫与 UPDATE 之间被 finish
     # 抢先置 LINING 时如实报错
-    if not ctx.db.update_run_guarded(
-            run["id"], config.CANCELABLE_RUN_STATES,
-            state="CANCELLED", finished_at=now_iso()):
+    ok, _rel = ctx.db.cancel_run(
+        run["id"],
+        f"superseded by regenerate {args.page_id}: "
+        f"pending={counts['pending']} processing={counts['processing']} "
+        f"completed_stranded={done_others}")
+    if not ok:
         die(f"run {run['id']} 状态已被并发操作改变(如进入 finish) — "
             f"重试 `pwiki regenerate {args.page_id}`", config.EXIT_PRECOND)
-    ctx.db.release_all_claims(run["id"])
-    ctx.db.log(run["id"], "run_cancelled_by_regenerate",
-               f"superseded by regenerate {args.page_id}: "
-               f"pending={counts['pending']} processing={counts['processing']} "
-               f"completed_stranded={done_others}")
     info(f"已取消 run {run['id']}(pending {counts['pending']}, "
          f"processing {counts['processing']}, 已完成未发布搁置 "
          f"{done_others}) — 单项重走 {args.page_id}")
@@ -998,13 +1006,10 @@ def cmd_cancel(args) -> int:
     # 新 job, cancel 完成后该 job 被困在已取消的 run 里(stranded processing)
     # 取消写带状态前置(P8, c022 同族): LINING 守卫与 UPDATE 之间被并发
     # finish 抢先置 LINING 时如实报错, 不把发布中的 run 拖去 CANCELLED
-    if not ctx.db.update_run_guarded(
-            run["id"], config.CANCELABLE_RUN_STATES,
-            state="CANCELLED", finished_at=now_iso()):
+    ok, released = ctx.db.cancel_run(run["id"])
+    if not ok:
         die(f"run {run['id']} 状态已被并发操作改变(如进入 finish) — "
             "重读后重试", config.EXIT_PRECOND)
-    released = ctx.db.release_all_claims(run["id"])
-    ctx.db.log(run["id"], "run_cancelled", f"released {released} claims")
     print(f"cancelled run {run['id']} (释放 {released} 个认领)")
     return config.EXIT_OK
 

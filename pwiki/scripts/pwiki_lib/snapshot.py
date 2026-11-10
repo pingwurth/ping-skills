@@ -174,8 +174,7 @@ def cmd_update(args) -> int:
     ctx.ensure_publish_tree()   # P1: 与 init/begin 同源落发布骨架
     if not part["published_snapshot_id"]:
         die("还没有已发布 wiki — 先跑全量(`pwiki begin`)", config.EXIT_PRECOND)
-    if ctx.db.active_run(part["id"]):
-        die("存在活动 run — 先 finish 或 cancel", config.EXIT_PRECOND)
+    ctx.db.die_if_active_run(part["id"], "finish 或 cancel")
     plan = load_plan(ctx)
     errors, _ = validate_plan(ctx, plan,
                               profile=ctx.config.get("profile", "standard"),
@@ -188,17 +187,11 @@ def cmd_update(args) -> int:
     pages, cards, modules = plan_pages(plan), plan_cards(plan), plan_modules(plan)
     published = {p["page_id"]: p for p in ctx.db.published_pages(part["id"])}
 
-    modules_pub = [{"module_id": m["id"], "title": m.get("title", ""),
-                    "dir": m.get("dir", ""),
-                    "scope": json.dumps(m.get("scope", []), ensure_ascii=False),
-                    "depends_on": json.dumps(m.get("depends_on", []),
-                                             ensure_ascii=False),
-                    "related_to": json.dumps(m.get("related_to", []),
-                                             ensure_ascii=False)}
-                   for m in modules]
+    # r7 #63: 直接传 plan 模块列表 —— snapshot_hashes 经 _as_list 解码,
+    # 原垫片的 JSON 编码杂交形态是纯死工作(第三种模块行形态的维护负担)
     baseline = ctx.db.file_hashes(part["id"])
     current = snapshot_hashes(ctx, list(published.values()),
-                              modules_pub, cards, baseline=baseline)
+                              modules, cards, baseline=baseline)
     changed = {p for p in current
                if p not in baseline or baseline[p]["sha256"] != current[p]["sha256"]}
     # removed = 文件真的没了; 只是离开跟踪集(条目被删)不算删除。
@@ -237,7 +230,12 @@ def cmd_update(args) -> int:
     # 风格回退口径与 begin/submit/finish 一致(plan 优先, 否则 config):
     # 曾在这里退到 DEFAULT_STYLE(deep)而 run 用 ctx.style(concise),
     # 一次 update 就把整库按 deep 重排。空 style 的旧行视为漂移 → 复检。
-    plan_style = str(plan.get("style") or ctx.style)
+    # r7 #45: 补 run 层(与 finish 的 run>plan>ctx 同序)—— 空盖章旧行的
+    # 重盖章与 finish 的逐行合成曾按不同层级解析
+    plan_style = str(plan.get("style")
+                     or str((ctx.db.last_run(part["id"])
+                             or {"style": ""})["style"] or "")
+                     or ctx.style)
     style_drift = any(str(p["style"] or "") != plan_style
                       for p in published.values())
 

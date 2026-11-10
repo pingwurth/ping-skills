@@ -18,7 +18,6 @@ emit: 从 pwiki plan v3 生成 Qoder v1 格式的 wiki_plan.yaml(默认落
 from __future__ import annotations
 
 import os
-import re
 
 from . import config
 from .config import Ctx
@@ -34,11 +33,6 @@ CAP_HINTS_CHARS = 5_000       # hints(字符)
 CAP_TEMPLATE_CHARS = 5_000    # 单文档 template(字符; 全局 template 无上限)
 
 PRESET_TEMPLATES = ("architecture", "product_requirement")
-
-_PLANNER_BUDGET = {"max_depth": 2, "max_total": 500, "max_top": 120,
-                   "max_sub_per_parent": 80, "max_words": 6000,
-                   "dir_tree_tokens": 15000}
-
 
 def cmd_qoder_plan(args) -> int:
     ctx = Ctx(args).load()

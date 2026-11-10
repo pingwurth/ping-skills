@@ -42,7 +42,10 @@ def _md_anchor(text: str) -> str:
 # 链接规范化(qwiki bug18: writer 两类系统性相对链接错 + 双重编码空格)
 # --------------------------------------------------------------------------- #
 
-LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+# r7 #44: 目标段容忍一层嵌套括号 —— safe_filename 保留括号, 标题
+# '支付(核心)' 派生的路径含 '('')', [^)]+ 曾在首 ')' 处截断(链接不
+# 改写不校验, 坏链零警告出厂)
+LINK_RE = re.compile(r"\[([^\]]*)\]\(([^()]*(?:\([^()]*\))*[^()]*)\)")
 
 # "非导航链接"跳过前缀 —— 内链改写(normalize_links)与校验(validate_content
 # 的 links/internal)共用的单一来源: 两套检测器曾各持一份 lookahead/startswith,
@@ -314,7 +317,12 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                 # ordinal 守卫只在排队前跑, finish 重读手编 plan 后曾
                 # int(None) 裸崩在 LINING 中途; as_int 是本 crash 类的统一
                 # 容错(同族: lease_minutes/limbs 解码)
-                row["ordinal"] = as_int(item.get("ordinal"), p["ordinal"])
+                # r7 #67: 卡的默认序数与 queue_jobs 同规(950)—— kept 曾
+                # 回落行值, 同一张卡按 run 来源显示不同序数
+                row["ordinal"] = as_int(
+                    item.get("ordinal"),
+                    950 if config.is_card_kind(merged.get("kind"))
+                    else p["ordinal"])
                 row["title"] = str(item.get("title", p["title"]))
                 row["module"] = str(item.get("module") or "")
                 row["sheet"] = str(item.get("sheet") or "")
@@ -391,6 +399,9 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
     import hashlib as _hl
     _paths_sig = _hl.sha256(
         "\n".join(sorted(all_paths)).encode("utf-8")).hexdigest()[:16]
+    # r7 #69: run 级单一维度, 循环外求值一次(与 export_injects 同式)
+    _export_style = str((plan or {}).get("export_style")
+                        or ctx.config.get("export_style", "legacy"))
     _cache_path = os.path.join(ctx.root, "work", "compose-cache.json")
     try:
         with open(_cache_path, encoding="utf-8") as _fh:
@@ -411,8 +422,6 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
         # 继续供旧注入口径的文件, 后续 file_to_db 按新配置不剥, 注入物被
         # 吸进 page.content(bug10 防线被绕过; plan_hash 也不含它, update
         # 直接 noop 不给重合成机会)
-        _export_style = str((plan or {}).get("export_style")
-                            or ctx.config.get("export_style", "legacy"))
         _key = [str(p["page_id"]), str(p["content_hash"] or ""), row_style,
                 str(p["path"] or ""), _paths_sig, str(ctx.commit or ""),
                 _export_style]
@@ -745,22 +754,36 @@ def _write_generation_state(ctx: Ctx, part, run, pages: list) -> None:
         "locale": part["locale"],
         "run_id": run["id"],
         "pages": {p["page_id"]: {"path": p["path"],
-                                 "source_hashes": _source_hashes(ctx, p)}
+                                 "source_hashes": _source_hashes(
+                                     ctx, p,
+                                     baseline=ctx.db.file_hashes(part["id"]))}
                   for p in pages},
     }
     atomic_write(os.path.join(ctx.meta_dir(), "generation-state.json"),
                  json.dumps(state, ensure_ascii=False, indent=2))
 
 
-def _source_hashes(ctx: Ctx, p) -> dict:
+def _source_hashes(ctx: Ctx, p, baseline: dict = None) -> dict:
     out = {}
     # json_list 是该列解码的单一实现(本模块 :384/:417 同款)—— 裸
     # json.loads 对真值 'null' 返回 None, 'for s in None' 打死 finish 的
     # generation-state 写; 现行写库已归一, 此处是旧库/手改 DB 的兜底
+    baseline = baseline or {}
     for s in json_list(p["source_files"]):
         # c049: 仓外路径不哈希(导出文件不得携带宿主文件指纹)
         full = join_confined(ctx.repo, str(s).rstrip("/"))
         if full and os.path.isfile(full):
+            # r7 #50: (size, mtime) 命中复用上轮哈希(snapshot 侧同款短路)
+            # —— 每 CLI 进程的 ctx.file_sha 缓存从空开始, 零变更 finish 曾
+            # 对全部源文件整读重哈希只为写出与上轮相同的哈希
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            old = baseline.get(str(s))
+            if old and old.get("size") == st.st_size                     and old.get("mtime") == int(st.st_mtime * 1000)                     and old.get("sha256"):
+                out[str(s)] = old["sha256"]
+                continue
             # ctx 级共享缓存: 同一源文件喂多页 + snapshot_run 复用同一份哈希
             sha = ctx.file_sha(full)
             if sha:
@@ -824,9 +847,9 @@ def cmd_write(args) -> int:
     pid = ctx.partition()["id"]
     # c039: write 的基线刷新是读-合-写 —— 与 finish/update 并发会互相覆盖
     # 哈希行; 与 update 的活动 run 守卫同款, write 也要求无活动 run
-    if ctx.db.active_run(pid):
-        die("存在活动 run — 先 finish/cancel 再手工 write(避免基线互相覆盖)",
-            config.EXIT_PRECOND)
+    # 活动 run 前置单一属主(r7 #58)
+    ctx.db.die_if_active_run(pid, "finish/cancel 再手工 write"
+                             "(避免基线互相覆盖)")
     p = ctx.db.published_page(pid, args.page_id)
     if not p:
         die(f"未发布条目: {args.page_id}", config.EXIT_PRECOND)
@@ -885,9 +908,8 @@ def cmd_delete(args) -> int:
     # P12: 与 write(c039)/export file_to_db(c028)同门 —— 活跃 run 的 finish
     # 会用旧 job 行把删掉的页整页复活(重插行+重写文件); run 期间的
     # delete --all 更是当场清光已发布行, 留下 DB/计划/树三方不一致
-    if ctx.db.active_run(pid):
-        die("存在活动 run — 先 finish/cancel 再 delete(避免发布回滚删除)",
-            config.EXIT_PRECOND)
+    ctx.db.die_if_active_run(pid, "finish/cancel 再 delete"
+                             "(避免发布回滚删除)")
     if args.all:
         # 先清文件树再清 DB: 曾先提交 unpublish 再裸 os.unlink —— 一个
         # EBUSY/EACCES 文件让 DB 宣称"已全删"而树上挂着半堆 + 裸 traceback
@@ -969,9 +991,8 @@ def cmd_export(args) -> int:
     # file_to_db: 吸收手改文件(守卫 + 剥注入物 —— 只剥该风格真会注入的;
     # c028: 与 cmd_write 同款活动 run 守卫 —— 读树文件→写 DB 的循环可与
     # finish 的发布交错, 把 finish 刚发布的新内容用旧渲染盖回 DB)
-    if ctx.db.active_run(pid):
-        die("存在活动 run — 先 finish/cancel 再 export file_to_db"
-            "(避免与发布互相覆盖)", config.EXIT_PRECOND)
+    ctx.db.die_if_active_run(pid, "finish/cancel 再 export file_to_db"
+                             "(避免与发布互相覆盖)")
     # deep 的 cite 块是 writer 正文, 曾被无差别剥掉再反手判 deep 页违规)
     part = ctx.partition()
     if not args.force:
@@ -997,14 +1018,10 @@ def cmd_export(args) -> int:
         if not os.path.isfile(full):
             skipped += 1
             continue
-        try:
-            with open(full, encoding="utf-8") as fh:
-                content = fh.read()
-        except UnicodeDecodeError as e:
-            # c048 同族: 手编文件的坏字节给可诊断的门禁错(指明停在哪一页),
-            # 不是循环中途裸 traceback —— 早前页已吸收, 修好该文件重跑即可
-            die(f"发布文件不是合法 UTF-8({full}: {e}) — 修好后重跑 file_to_db",
-                config.EXIT_GATE)
+        # c048 同族: 坏字节给可诊断的门禁错(指明停在哪一页), 早前页已
+        # 吸收, 修好该文件重跑即可 —— 读取器单一属主 util.read_published_utf8
+        from .util import read_published_utf8
+        content = read_published_utf8(full)
         page_style = str(p["style"] or _fallback)
         if p["kind"] == "page" and export_injects(ctx, page_style, plan):
             content = _strip_injected(content)   # bug e: 剥注入物再入库

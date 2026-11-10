@@ -118,21 +118,10 @@ def cite_lines(path: str) -> int:
     hit = _CITE_LINE_CACHE.get(key)
     if hit is not None:
         return hit
-    n = 0
-    tail = b""
-    try:
-        with open(path, "rb") as fh:
-            while True:
-                chunk = fh.read(1 << 20)
-                if not chunk:
-                    break
-                n += chunk.count(b"\n")
-                tail = chunk[-1:]
-    except OSError:
-        n = 0
-    else:
-        if tail and tail != b"\n":
-            n += 1   # 末行无换行补 1(与截断版同口径)
+    # r7 #61: 分块计数走 _count_lines_chunked 共享实现(此前是一份逐字
+    # 手抄, CRLF/块大小等口径修正只会落进一边 —— 与 docstring 的"共用"
+    # 声明不符)
+    n = _count_lines_chunked(path)
     _CITE_LINE_CACHE[key] = n
     return n
 

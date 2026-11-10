@@ -269,8 +269,12 @@ def gate_item(content: str, item, repo: str, style: str,
 
     # 严重度选择器局部提升(r6 #51): 同一表达式曾 11+7 处内联,
     # 新增检查抄错一个变体会静默改变 concise LINING 行为且无测试把关
+    # (r7 #68: 第三族 section_sources 键控变体一并提升 —— 本轮 sev 重
+    # 绑定 bug 正是藏在这片内联景观里)
     sev = errors if strict else warnings
     sev_hard = errors if (strict and p["size_hard"]) else warnings
+    sev_sources = errors if (strict and p["section_sources"] == "error") \
+        else warnings
     kind = str(rowget(item, "kind") or "page")
     title = str(rowget(item, "title") or "")
     prose = strip_code_fences(content)
@@ -361,8 +365,7 @@ def gate_item(content: str, item, repo: str, style: str,
             # r7 #43: submit(strict=False)也报缺口(警告级)—— 曾整条消息
             # 被关进 strict 分支, writer 只在 finish 硬拒时才知道缺口,
             # 双严重度模型(submit 警告省一轮重写)在此规则上失效
-            (errors if (strict and p.get("section_sources") == "error")
-             else warnings).append(
+            sev_sources.append(
                 f"schema/sections: 计划要求 {len(required)} 节, 实得 {len(h2)}")
     else:
         job_type = str(rowget(item, "article_type") or
@@ -372,8 +375,7 @@ def gate_item(content: str, item, repo: str, style: str,
             # 预设键门控(与上方 required_sections 分支同款): concise 在
             # LINING 也保持警告(validation.md 契约)—— 曾写死 strict 升错,
             # 合法 concise run(type 页节数不足)整批死在 finish
-            (errors if (strict and p.get("section_sources") == "error")
-             else warnings).append(
+            sev_sources.append(
                 f"schema/sections: 类型 {job_type!r} 需 ≥{need} 节, 实得 {len(h2)}")
 
     # --- mermaid(形状类: submit 全警告; LINING 按 size_hard 升错误) ---
@@ -544,7 +546,7 @@ def _gate_card(content, item, p, strict, errors, warnings, repo=""):
                  if c["a"] is not None)
     if n_line < need:
         msg = f"D16: 卡片需 ≥{need} 条行级引用, 实得 {n_line}"
-        if need and strict:
+        if strict:   # r7 #70: need 恒真(块被到达时 ≥1)
             errors.append("knowledge/citations: " + msg)
         elif need:
             warnings.append("knowledge/citations: " + msg)
@@ -554,8 +556,11 @@ def _gate_sheet(content, p, strict, errors, warnings, n_cites):
     """模块速查表: concise 短式零链接; deep 需行级引用(D16)。"""
     # 严重度选择器局部提升(r6 #51): 同一表达式曾 11+7 处内联,
     # 新增检查抄错一个变体会静默改变 concise LINING 行为且无测试把关
+    # (r7 #68: section_sources 键控变体一并提升)
     sev = errors if strict else warnings
     sev_hard = errors if (strict and p["size_hard"]) else warnings
+    sev_sources = errors if (strict and p["section_sources"] == "error") \
+        else warnings
 
 
     concise_ = p["sheets"] == "short"
@@ -582,8 +587,7 @@ def _gate_sheet(content, p, strict, errors, warnings, n_cites):
         # deep 错误级门禁(紧邻两行之上的 D16 检查自己都剥)
         if n_cites and not SECTION_SOURCES_RE.search(
                 strip_code_fences(content)):
-            (errors if (strict and p["section_sources"] == "error")
-             else warnings).append("sources/section: 速查表缺 **章节来源**")
+            sev_sources.append("sources/section: 速查表缺 **章节来源**")
 
 
 # --------------------------------------------------------------------------- #
@@ -763,13 +767,9 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
             report_pages.append(entry)
             errors_total.extend(f"{path}: {e}" for e in entry["errors"])
             return entry
-        try:
-            with open(full, encoding="utf-8") as fh:
-                content = fh.read()
-        except UnicodeDecodeError as e:
-            # c048 同族: 手编发布文件的坏字节报"哪一页", 不是裸 traceback
-            from .util import die
-            die(f"发布文件不是合法 UTF-8({full}: {e})", config.EXIT_GATE)
+        # c048 同族: 坏字节报"哪一页"—— 读取器单一属主(r7 #62)
+        from .util import read_published_utf8
+        content = read_published_utf8(full)
         contents[path] = content
         # 页面发布文件含导出层注入的 <cite>/目录 —— 先剥掉再按 writer
         # 原稿口径复检(曾把引擎自己的产出判成 toc/cite 错误, 验证器不可用)。
@@ -836,8 +836,10 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     # 自持的 lookahead 曾漏 #/mailto: —— 邮箱链接发布器保留、校验器硬错
     from .publish import LINK_SKIP_PREFIXES
     _lookahead = "(?!" + "|".join(LINK_SKIP_PREFIXES) + ")"
+    # r7 #44: 目标容忍一层嵌套括号(与 publish.LINK_RE 同口径)
     _link_re = re.compile(
-        rf"\[[^\]]*\]\({_lookahead}([^)#]+\.md(?:#[^)\s]*)?)\)")
+        rf"\[[^\]]*\]\({_lookahead}([^()#]*(?:\([^()]*\))*[^()#]*"
+        rf"\.md(?:#[^)\s]*)?)\)")
     for pg in pages:
         path = page_paths[str(pg.get("id"))]
         content = contents.get(path)

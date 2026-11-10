@@ -163,6 +163,19 @@ def as_int(v, default: int = 0) -> int:
         return default
 
 
+def read_published_utf8(full: str, what: str = "发布文件") -> str:
+    """发布树的 UTF-8 读取(r7 #62: file_to_db 与 validate --content 的
+    读取器曾是两份逐字拷贝, 各自标注 c048 同族 —— 解码策略/诊断改动
+    改一边漏一边)。坏字节给可诊断的门禁错(die EXIT_GATE)。"""
+    try:
+        with open(full, encoding="utf-8") as fh:
+            return fh.read()
+    except UnicodeDecodeError as e:
+        die(f"{what}不是合法 UTF-8({full}: {e})", config.EXIT_GATE)
+    except OSError:
+        return ""   # 缺失由调用方的前置检查负责
+
+
 def atomic_write(path: str, text: str) -> None:
     """c045 同款原子写(临时文件 + fsync + os.replace)。
 

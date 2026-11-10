@@ -20,7 +20,9 @@ from .styles import preset
 from .util import as_int, die, info
 
 RESULT_RE = re.compile(r"(?s)<result>\s*(\{.*?\})\s*</result>")
-FENCE_JSON_RE = re.compile(r"(?s)```(?:json)?\s*(\{.*\})\s*```")
+# r7 #66: 栅栏体枚举与 gates 的 _FENCE_RE 同规则(P61 单源的 layers 侧
+# 接入 —— 规则演进时同步; 不能直接 import 编译私有名, 保持同款字面)
+_FENCE_BODY_RE = re.compile(r"(?s)```(?:json)?\s*(.*?)\s*```")
 SLUG_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 
 
@@ -63,7 +65,7 @@ def parse_result_block(text: str) -> dict:
     m = RESULT_RE.search(text)
     if m:
         return json.loads(m.group(1))
-    for fm in re.finditer(r"(?s)```(?:json)?\s*(.*?)\s*```", text):
+    for fm in _FENCE_BODY_RE.finditer(text):
         try:
             v = json.loads(fm.group(1))
         except ValueError:

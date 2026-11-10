@@ -156,6 +156,21 @@ KIND_TO_TYPE = {"overview": "overview", "architecture": "domain",
 HAND_LANGS = ("typescript", "tsx", "javascript", "python", "go", "rust",
               "java", "kotlin", "proto", "protobuf", "yaml", "sql", "markdown")
 
+def feature_leaf_id(fam_slug: str, path: str) -> str:
+    """feature 叶的 page_id 形态(r7 #71: 从嵌套闭包抽出 —— 族叶带族
+    前缀段, 独立功能叶不带, 测试可直锁)。"""
+    stem = slugify(stem_of(path))
+    return ("feature-" + fam_slug + "-" + stem) if fam_slug \
+        else ("feature-" + stem)
+
+
+def framework_mods_from_plan(plan: dict) -> set:
+    """plan aliases 的目标模块集(D21; r7 #72: 从 cmd_plan_themes 抽出,
+    非 dict 坏行跳过—— 消费侧守卫可被直接测试)。"""
+    return {str(r.get("module")) for r in (plan.get("aliases") or [])
+            if isinstance(r, dict)}
+
+
 def is_qualifying_source(f: dict) -> bool:
     """D9 播种/回填/伴生过滤共用的合格源谓词(r7 #39: 三份手抄曾各自
     漂移, 播种份缺 is_never_cite —— pnpm-lock/CLAUDE.md 直入 source)。"""
@@ -1458,12 +1473,9 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
 
             def add_feature_leaf(title, f, parent_id, fam_slug, hint):
                 # 两处调用点(族叶/独立功能叶)共用一份取源规则 —— 曾逐字
-                # 两份, 收紧 pick_files 上限或关键词时只有一份跟进。
-                # fam_slug 为空 = 独立功能叶(原 page_id 无族前缀段)
-                stem = slugify(stem_of(f["path"]))
+                # 两份, 收紧 pick_files 上限或关键词时只有一份跟进
                 builder.add(
-                    page_id=("feature-" + fam_slug + "-" + stem)
-                    if fam_slug else ("feature-" + stem),
+                    page_id=feature_leaf_id(fam_slug, f["path"]),
                     title=title, kind="feature", parent=parent_id,
                     scope=[dirname(f["path"])] if dirname(f["path"])
                     else parent["scope"],
@@ -2053,8 +2065,7 @@ def cmd_plan_themes(ctx: Ctx, args, plan: dict) -> int:
         return config.EXIT_GATE
     # D21 框架模块 = plan aliases 的目标模块(yudao 规则数据化);
     # 非 dict 条目跳过(--aliases 入口已校验, 这里防御坏行/旧库)
-    framework_mods = {str(r.get("module")) for r in (plan.get("aliases") or [])
-                      if isinstance(r, dict)}
+    framework_mods = framework_mods_from_plan(plan)
     profile_name = ctx.config.get("profile", "standard")
     if profile_name not in PROFILES:
         # config 值不经过 argparse choices 校验 —— 曾在 run_themes 裸

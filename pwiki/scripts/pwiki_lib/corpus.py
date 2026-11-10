@@ -263,6 +263,11 @@ class Corpus:
         self.modules = modules          # {module_path: entry} (modules.decompose)
         self.manifest_paths = manifest_paths
         self._text: dict = {}
+        # r7 #51: 原文+小写两份缓存的无界增长帽(合计)—— 10k 文件仓库的
+        # plan --themes 曾 ~400MB 常驻; 超帽后新文件不缓存(单文件本就有
+        # 300KB 读限, 已缓存的保留)
+        self._text_budget = 64 * 1024 * 1024
+        self._text_bytes = 0
         # P72: grep 的小写文本缓存 —— themes 每个 needle 曾对全部记忆文本
         # 重 .lower() 一遍(数十 needle = 数 GB 瞬时字符串扰动)
         self._text_lower: dict = {}
@@ -278,7 +283,12 @@ class Corpus:
 
     def read(self, path: str) -> str:
         if path not in self._text:
-            self._text[path] = read_text(os.path.join(self.repo, path))
+            text = read_text(os.path.join(self.repo, path))
+            if self._text_bytes + len(text) > self._text_budget \
+                    and self._text:
+                return text   # 超帽: 供本次使用, 不常驻
+            self._text[path] = text
+            self._text_bytes += len(text)
         return self._text[path]
 
     def match(self, patterns: list, exclude: list = None, pool: list = None) -> list:
@@ -293,9 +303,14 @@ class Corpus:
         ])
 
     def read_lower(self, path: str) -> str:
-        """read() 的小写视图(P72 记忆化; grep 专用)。"""
+        """read() 的小写视图(P72 记忆化; grep 专用; 受同一预算帽)。"""
         if path not in self._text_lower:
-            self._text_lower[path] = self.read(path).lower()
+            low = self.read(path).lower()
+            if self._text_bytes + len(low) > self._text_budget \
+                    and self._text_lower:
+                return low
+            self._text_lower[path] = low
+            self._text_bytes += len(low)
         return self._text_lower[path]
 
     def grep(self, pool: list, needles: list, limit: int = 300,

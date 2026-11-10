@@ -611,8 +611,11 @@ class WikiDB:
                     (token, now, expires, run_id))
                 if cur.rowcount == 0:
                     break
+                # r7 #54: 回读只取元数据列(_job_payload/_fmt_job 都不读
+                # content/report, 全行抓取曾把 10-30KB 稿体拖进事务窗口)
                 row = self.conn.execute(
-                    "SELECT * FROM page_job WHERE run_id=? AND claim_token=?",
+                    f"SELECT {JOB_META_COLS} FROM page_job "
+                    "WHERE run_id=? AND claim_token=?",
                     (run_id, token)).fetchone()
                 claimed.append(row)
             self.commit()
@@ -703,6 +706,27 @@ class WikiDB:
         except BaseException:
             self.rollback()
             raise
+
+    def cancel_run(self, run_id: str, note: str = "") -> tuple:
+        """取消三连的单一属主(r7 #57): 守卫式置 CANCELLED → 释放全部
+        认领 → log。"先置态后释放"的顺序是 stranding 防线(先释放会让
+        并发 next 在仍活动的 run 上认领)。begin --force / regenerate /
+        cancel 三处手抄曾各自维护。返回 (守卫是否生效, 释放数)。"""
+        ok = self.update_run_guarded(run_id, config.CANCELABLE_RUN_STATES,
+                                     state="CANCELLED",
+                                     finished_at=now_iso())
+        if not ok:
+            return False, 0
+        released = self.release_all_claims(run_id)
+        self.log(run_id, "run_cancelled", note)
+        return True, released
+
+    def die_if_active_run(self, pid: int, hint: str) -> None:
+        """手工命令的活动 run 前置(r7 #58): 四处 die 版手抄曾各自漂移
+        (delete 直到 P12、export 直到 c028 才补上守卫)。"""
+        from .util import die
+        if self.active_run(pid):
+            die(f"存在活动 run — 先 {hint}", config.EXIT_PRECOND)
 
     def set_job_report(self, run_id: str, page_id: str, report: dict) -> None:
         self.conn.execute(
@@ -943,16 +967,24 @@ class WikiDB:
 
     # -- glossary(活术语表) ----------------------------------------------------
     def glossary_add_terms(self, pid: int, terms: list, source_page_id: str = "") -> None:
-        for term in terms:
-            t = str(term).strip()
-            if not t:
-                continue
-            self.conn.execute(
+        # r7 #56: 整批单事务(P25 批式同款)—— 每术语一条自动提交曾把
+        # ~10 次 fsync 叠进 submit 热路径
+        rows = [(pid, str(t).strip(), "", source_page_id, now_iso())
+                for t in terms if str(t).strip()]
+        if not rows:
+            return
+        self.begin()
+        try:
+            self.conn.executemany(
                 "INSERT INTO glossary(partition_id,term,definition,source_page_id,"
                 "updated_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(partition_id,term) DO UPDATE SET "
                 "source_page_id=excluded.source_page_id, updated_at=excluded.updated_at",
-                (pid, t, "", source_page_id, now_iso()))
+                rows)
+            self.commit()
+        except BaseException:
+            self.rollback()
+            raise
 
     def glossary_all(self, pid: int) -> list:
         rows = self.conn.execute(

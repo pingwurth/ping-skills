@@ -261,7 +261,7 @@ def _apply_title_rename(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
             _move_published_file(ctx, plan, row, content, target,
                                  moved, missing, all_paths=paths_base)
         save_plan(ctx, plan)
-        _refresh_indexes(ctx, plan)
+        _refresh_indexes(ctx)
         ctx.db.log("manual", "reconcile_title",
                    f"{page_id}: {old_title} -> {proposed} "
                    f"({len(moved)} files moved"
@@ -275,7 +275,7 @@ def _apply_title_rename(ctx: Ctx, payload: dict, dry_run: bool) -> tuple:
     return "applied", msg
 
 
-def _refresh_indexes(ctx: Ctx, plan: dict) -> None:
+def _refresh_indexes(ctx: Ctx) -> None:
     """改名/移动后重算发布索引(_index.yaml / repowiki-metadata.json /
     _module.yaml) —— docstring 承诺过"重算索引", 曾留给下一次 finish。"""
     try:
@@ -285,6 +285,9 @@ def _refresh_indexes(ctx: Ctx, plan: dict) -> None:
         pages = ctx.db.published_pages(pid)
         modules = ctx.db.modules(pid)
         publish._write_indexes(ctx, part, pages, modules, "manual")
+        # r7 #46: generation-state 同步刷新(cmd_delete 同口径)—— 改名后
+        # 它曾携带旧页路径直到下次 finish, Qoder 导入面读到旧位置
+        publish._write_generation_state(ctx, part, {"id": "manual"}, pages)
     except Exception as e:   # noqa: BLE001 — 索引尽力而为, 不挡改名
         from .util import info
         info(f"note: 索引重算失败({e}) — 下次 finish 会重写")

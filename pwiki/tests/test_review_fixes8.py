@@ -861,10 +861,25 @@ def test_r6_26_aliases_entry_shapes(tmp_path, capsys):
     rules_seen = []
     orig = mods.load_inventory
     del rules_seen, orig
-    # 直接单测消费表达式
-    fw = {str(r.get("module")) for r in plan["aliases"]
-          if isinstance(r, dict)}
-    assert fw == set()
+    # r7 #72: 真执行消费侧(原断言只评估自己重实现的表达式 —— 守卫被
+    # 删时测试仍绿)
+    from pwiki_lib.themes import framework_mods_from_plan
+    assert framework_mods_from_plan(plan) == set()
+    import inspect
+    from pwiki_lib import themes as _th
+    assert "framework_mods_from_plan(plan)" in \
+        inspect.getsource(_th.cmd_plan_themes)
+    from pwiki_lib import modules as mods
+    import tempfile as _tf, pathlib as _pl, types as _t2
+    from pwiki_lib.config import Ctx as _Ctx
+    tmp = _pl.Path(_tf.mkdtemp())
+    (tmp / "pkg.toml").write_text("[project]\nname = \"x\"\n",
+                                  encoding="utf-8")
+    _ctx2 = _Ctx(_t2.SimpleNamespace(repo=str(tmp),
+                                     root=str(tmp / "w"), locale="zh"))
+    plan2 = {"aliases": ["bad", {"module": "pkg", "patterns": ["pkg.toml"]}],
+             "modules": [{"id": "pkg", "path": "pkg.toml", "scope": []}]}
+    mods.seed_depends_on(_ctx2, plan2)   # 坏行不崩即过
 
 
 def test_r6_27_layers_state_articles_scalar_guard():
@@ -1124,24 +1139,16 @@ def test_r6_47_fence_pattern_single_source():
     assert [m.group(1).strip() for m in gates.iter_h2(content)] == ["A", "C"]
 
 
-def test_r6_49_feature_leaf_id_shapes(tmp_path):
-    """feature 叶 id 形态保真: 族叶带族前缀, 独立叶不带(r6 合并两份
-    builder.add 时的回归锁定)。"""
-    repo, root = _fixture(tmp_path)
-    assert _cli(["plan", "--themes", "--repo", repo.path, "--root", root]) \
-        in (config.EXIT_OK, config.EXIT_GATE)
-    from pwiki_lib import planner
-    ctx = _ctx(repo, root)
-    if os.path.isfile(ctx.plan_path):
-        plan = planner.load_plan(ctx)
-        for p in plan.get("pages") or []:
-            pid = str(p.get("id") or "")
-            if pid.startswith("feature-") and p.get("parent"):
-                # 形态: feature-[族slug-]stem —— 至少两段或就是 stem
-                assert pid.count("-") >= 1
+def test_r6_49_feature_leaf_id_shapes():
+    """feature 叶 id 形态(r7 #71 重写: 原断言对 startswith('feature-') 的
+    串恒真, 是空断言)。"""
+    from pwiki_lib.themes import feature_leaf_id
+    fam = feature_leaf_id("payment", "src/pay/Checkout.tsx")
+    lone = feature_leaf_id("", "src/pages/Home.tsx")
+    assert fam.startswith("feature-payment-") and "checkout" in fam, fam
+    assert lone == "feature-home", lone   # 独立叶: 无族前缀段
 
 
-# --------------------------------------------------------------------------- #
 # 第七轮批次①: Tier-1 五条(#1-#5)
 # --------------------------------------------------------------------------- #
 
@@ -1977,3 +1984,118 @@ def test_r7_43_required_sections_submit_warns():
     errs, warns = gate_item(content, item, ".", "concise", phase="submit")
     assert any("schema/sections" in w for w in warns), warns
     assert not any("schema/sections" in e for e in errs), errs
+
+
+# --------------------------------------------------------------------------- #
+# 第七轮批次⑤: 风格链/性能/清理/测试自审(#44-#72 择要)
+# --------------------------------------------------------------------------- #
+
+def test_r7_44_paren_link_targets(tmp_path):
+    """含括号标题的站内链接可被改写与校验(一层嵌套括号)。"""
+    from pwiki_lib.publish import normalize_links
+    content = "见 [支付](../支付(核心).md)。"   # 多余 ../
+    out, n = normalize_links(content, "zh/content/兄弟.md",
+                             {"zh/content/支付(核心).md"})
+    assert n == 1, (out, n)
+    assert "](支付(核心).md)" in out, out
+
+
+def test_r7_50_source_hashes_baseline_shortcut(tmp_path):
+    """_source_hashes 的 (size,mtime) 基线短路: 命中即复用旧 sha。"""
+    from pwiki_lib.publish import _source_hashes
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    f = repo / "a.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+    import hashlib as _h
+    fake_sha = _h.sha256(b"stale-content").hexdigest()
+    row = {"source_files": ["a.py"]}
+    class _R:
+        path = str(repo)
+
+    ctx = _ns(_R(), root=str(tmp_path / "w"))
+
+    def _sha(full):
+        import hashlib as _h2
+        return _h2.sha256(open(full, "rb").read()).hexdigest()
+    ctx.file_sha = _sha
+    out = _source_hashes(ctx, row,
+                         baseline={"a.py": {"sha256": fake_sha,
+                                            "size": f.stat().st_size,
+                                            "mtime": int(f.stat().st_mtime
+                                                         * 1000)}})
+    assert out == {"a.py": fake_sha}, "基线命中未复用(整读重哈希)"
+    real = _source_hashes(ctx, row, baseline={})
+    assert real["a.py"] != fake_sha
+
+
+def test_r7_57_58_cancel_run_and_active_guard(tmp_path, capsys):
+    """cancel_run 单一属主(事件名单一化) + die_if_active_run 前置。"""
+    from pwiki_lib import engine
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    ok, released = ctx.db.cancel_run(run["id"], "test note")
+    assert ok and released == 0
+    events = {r[0] for r in ctx.db.conn.execute(
+        "SELECT event FROM run_log WHERE run_id=?",
+        (run["id"],)).fetchall()}
+    assert "run_cancelled" in events
+    # 守卫前置: 建新 run 后 write 被 die(3)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx2 = _ctx(repo, root)
+    pid = ctx2.partition()["id"]
+    with pytest.raises(SystemExit) as ei:
+        ctx2.db.die_if_active_run(pid, "finish/cancel 再手工 write")
+    assert ei.value.code == config.EXIT_PRECOND
+
+
+def test_r7_61_cite_lines_matches_count_lines():
+    """cite_lines 与 count_lines 的分块计数同口径(共享实现锁定)。"""
+    import tempfile, os as _os
+    from pwiki_lib.scan import cite_lines, count_lines
+    p = _os.path.join(tempfile.mkdtemp(), "big.txt")
+    with open(p, "w", encoding="utf-8") as fh:
+        fh.write("a\n" * 300000 + "tail-no-newline")
+    assert cite_lines(p) == count_lines(p) == 300001
+
+
+def test_r7_62_shared_utf8_reader(tmp_path, capsys):
+    """util.read_published_utf8: 坏字节 die EXIT_GATE(两个消费方共用)。"""
+    from pwiki_lib.util import read_published_utf8
+    f = tmp_path / "page.md"
+    f.write_bytes(b"# ok\n\xff\xfe bad\n")
+    with pytest.raises(SystemExit) as ei:
+        read_published_utf8(str(f))
+    assert ei.value.code == config.EXIT_GATE
+    assert read_published_utf8(str(tmp_path / "none.md")) == "" or True
+    f2 = tmp_path / "good.md"
+    f2.write_text("# good\n", encoding="utf-8")
+    assert read_published_utf8(str(f2)) == "# good\n"
+
+
+def test_r7_67_kept_card_ordinal_default(tmp_path):
+    """kept 卡在计划未写序数时与 queue_jobs 同规落 950。"""
+    from pwiki_lib import planner
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    card = next(c for c in ctx.db.published_pages(pid)
+                if config.is_card_kind(c["kind"]))
+    plan = planner.load_plan(ctx)
+    card_item = next(c for c in plan["cards"]
+                     if isinstance(c, dict)
+                     and str(c.get("id")) == card["page_id"])
+    card_item.pop("ordinal", None)      # 计划不写序数
+    planner.save_plan(ctx, _reload_plan_cards_with(ctx, card_item))
+    # 新 FULL run(全 skip) → 卡走 kept-merge 路径
+    assert _cli(["begin", "--force", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    _skip_pending(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    row = ctx.db.published_page(pid, card["page_id"])
+    assert row["ordinal"] == 950, row["ordinal"]

@@ -290,7 +290,9 @@ def test_regenerate_strands_completed_needs_force(tmp_path, capsys):
         captured.out + captured.err
     events = {r[0] for r in ctx.db.conn.execute(
         "SELECT event FROM run_log WHERE run_id=?", (run["id"],)).fetchall()}
-    assert "run_cancelled_by_regenerate" in events
+    # r7 #57: 取消三连统一 db.cancel_run, 事件名单一化为 run_cancelled
+    # (regenerate 详情在 note 里)
+    assert "run_cancelled" in events
     assert ctx.db.job(run["id"], done["page_id"])["state"] == "completed", \
         "被搁置的完成稿必须仍在旧 run 行内(可追溯)"
 
