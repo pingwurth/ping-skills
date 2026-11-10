@@ -139,7 +139,15 @@ def snapshot_run(ctx: Ctx, run, plan: dict, pages=None) -> str:
 
 def refresh_baseline_for(ctx: Ctx, page_ids: list) -> None:
     """`write`(手工修正)后刷新这些条目跟踪集的哈希基线(只 UPSERT 触及的行
-    —— 曾全表删写, 10k 跟踪文件的单页修正要白 churn 1000 倍行数)。"""
+    —— 曾全表删写, 10k 跟踪文件的单页修正要白 churn 1000 倍行数)。
+
+    r7 #15: 卡行走 cards 参数(跟踪契约 source_files ∪ scope, 与 finish 同
+    口径)—— 曾硬编码 [], 手工修卡只刷新 source_files 半边, 下轮 update 把
+    卡重判 sources_changed, 刚修的内容被整轮重写覆盖。
+    r7 #16: 只把**新增**跟踪文件入基线 —— 全量 upsert 会把与本次 write 无
+    关的在途源码编辑顺手吸收成新基线(该页及共享文件的其他页此后对这些
+    编辑永不再报 stale); 已有键保持上次 finish 的值, 宁可下轮 update 多报
+    一次 stale, 不静默吸收。"""
     part = ctx.partition()
     pid = part["id"]
     baseline = ctx.db.file_hashes(pid)
@@ -149,8 +157,11 @@ def refresh_baseline_for(ctx: Ctx, page_ids: list) -> None:
         if p is None:
             continue
         rows.append(p)
-    fresh = snapshot_hashes(ctx, rows, [], [], baseline=baseline)
-    ctx.db.upsert_file_hashes(pid, fresh)
+    page_rows = [r for r in rows if not config.is_card_kind(r["kind"])]
+    card_rows = [r for r in rows if config.is_card_kind(r["kind"])]
+    fresh = snapshot_hashes(ctx, page_rows, [], card_rows, baseline=baseline)
+    ctx.db.upsert_file_hashes(pid, {k: v for k, v in fresh.items()
+                                    if k not in baseline})
 
 
 # --------------------------------------------------------------------------- #
@@ -278,10 +289,20 @@ def cmd_update(args) -> int:
         if mid in mod_files:
             scope = mod_files[mid]
         watch = srcs | cited | old_srcs | scope
+        # r7 #6: 声明源集合本身的变化也对账 —— source_files/scope 曾不在
+        # 任何对账元组里、不被 kept-merge 同步、跟踪集又按 DB 行旧值构建,
+        # 手改声明源被三方同时静默丢弃(新文件永不跟踪, 该页后续变更全不
+        # 触发 stale)
+        new_declared = expand_dirs(_as_list(sources)
+                                   + _as_list(item.get("scope")))
+        old_declared = expand_dirs(_as_list(pub["source_files"])
+                                   + _as_list(pub["scope"]))
         if watch & changed:
             stale.append((item, "sources_changed"))
         elif watch & removed:
             stale.append((item, "sources_removed"))
+        elif new_declared != old_declared:
+            stale.append((item, "sources_redeclared"))
         elif str(item.get("prompt", "")) != (pub["prompt"] or ""):
             stale.append((item, "prompt_changed"))
         else:
@@ -300,18 +321,26 @@ def cmd_update(args) -> int:
                 return "|".join(str(x) for x in
                                 (v if isinstance(v, list) else _as_list(v)))
 
+            # r7 #8: 对账补 module/sheet(kept-merge 一直同步这两个字段,
+            # 曾"合而不比" —— 手改挂模块/换 sheet 对 update 完全不可见,
+            # 文件永远留在旧目录, validate --content 永久报"计划页未落盘");
+            # kind 不进元组: 行上是归一形态('card')与计划侧卡种类永不等,
+            # 且改型必改 path 已被路径对账覆盖
             before = (pub["title"], pub["parent_id"], pub["ordinal"],
                       pub["article_type"] or "", pub["slug"] or "",
                       _jjoin(pub["modules"]), str(pub["objective"] or ""),
                       _jjoin(pub["required_sections"]),
-                      str(pub["pack_key"] or ""))
+                      str(pub["pack_key"] or ""),
+                      pub["module"] or "", pub["sheet"] or "")
             after = (str(item.get("title") or ""), str(item.get("parent") or ""),
                      item_ordinal, str(item.get("type") or ""),
                      str(item.get("slug") or ""),
                      _jjoin(item.get("modules") or []),
                      str(item.get("objective") or ""),
                      _jjoin(item.get("required_sections") or []),
-                     str(item.get("pack_key") or ""))
+                     str(item.get("pack_key") or ""),
+                     str(item.get("module") or ""),
+                     str(item.get("sheet") or ""))
             if before != after:
                 stale.append((item, "catalog_changed"))
 

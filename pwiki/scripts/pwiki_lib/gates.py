@@ -782,6 +782,11 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
         errs, warns = gate_item(content, item2, ctx.repo, item_style,
                                 phase="lining",
                                 mod_titles=mod_titles_for(item, all_mods))
+        # r7 #14: 过滤策略与 write/file_to_db 同一属主(blocking_errors)
+        # —— 差一钳位是机械可修项, submit/finish/write/update 全部剔除后
+        # 由 compose 落盘时钳位, validate 曾把它当硬错(exit 2)与 write
+        # 对同一内容给出相反判定
+        errs = blocking_errors(errs)
         if fix:
             # 顺序: 先 D23 钳位再 D18 收割 —— 曾先收割, 未钳位的行号被抄进
             # 新的 **章节来源** 块, 钳位守卫(a<=n)永远够不着, --fix 不收敛
@@ -803,6 +808,7 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
                 errs, warns2 = gate_item(content3, item2, ctx.repo, item_style,
                                          phase="lining",
                                          mod_titles=mod_titles_for(item, all_mods))
+                errs = blocking_errors(errs)
                 warns = warns + warns2
         entry = {"path": path, "errors": errs, "warnings": warns}
         report_pages.append(entry)

@@ -364,6 +364,20 @@ def cmd_next(args) -> int:
     claimed = ctx.db.claim_jobs(run["id"], count=batch, lease_minutes=lease)
     summary = _jobs_summary(ctx.db, run["id"])
     if not claimed:
+        # r7 #11: 认领空集先复查 run 状态 —— claim_jobs 的事务内复查(r6 #20)
+        # 在取消竞态下返回 [], 只看 processing 会把已取消 run(pending>0、
+        # processing=0)报成"全部终态 + exit 0", 编排方照提示跑 finish 必失败
+        _now = ctx.db.conn.execute(
+            "SELECT state FROM run WHERE id=?", (run["id"],)).fetchone()
+        if _now is not None and _now["state"] not in config.ACTIVE_RUN_STATES:
+            _say(f"status: run 已被并发操作置 {_now['state']}(如 cancel) — "
+                 "不再派发; 状态以 `pwiki status` 为准")
+            if args.json:
+                print(json.dumps({"status": "run_closed",
+                                  "run": run["id"],
+                                  "state": _now["state"]},
+                                 ensure_ascii=False))
+            return config.EXIT_PRECOND
         # pending=0 但仍有租约在写 —— 不是"已终态"(轮询驱动曾据此提前
         # finish, 又被 in-flight 前置挡回); 如实报 in_flight
         if summary["processing"]:
@@ -1056,8 +1070,12 @@ def cmd_finish(args) -> int:
     # 把 run 置 CANCELLED 时, 无守卫 UPDATE 会把已取消的 run 复活成 LINING
     # (LINING ∈ 活动态集合) → 双活动 run, 僵尸 run 永卡 LINING。
     # LINING 本身也合法: d19 拒绝/发布中断都把 run 留在 LINING 等重跑 finish
+    # r7 #12: 守卫元组补 PAUSED —— 全部终态后 pause 过夜的 run, finish 曾
+    # 以"状态已被并发操作改变"的假诊断死掉且重试永无效(pending>0 的
+    # PAUSED run 仍被下方 counts 检查正常挡住, 不会误发布半程 run)
     if not ctx.db.update_run_guarded(
-            run["id"], ("DOCUMENT_GENERATING", "DOCUMENT_FAILED", "LINING"),
+            run["id"], ("DOCUMENT_GENERATING", "DOCUMENT_FAILED", "LINING",
+                        "PAUSED"),
             state="LINING", stage="lining"):
         die(f"run {run['id']} 状态已被并发操作改变(如 cancel/regenerate) — "
             "重读后重试", config.EXIT_PRECOND)

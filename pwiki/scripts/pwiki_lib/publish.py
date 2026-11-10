@@ -301,7 +301,12 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                 else:
                     row["kind"] = str(merged.get("kind") or "page")
                     row["card_kind"] = str(merged.get("card_kind") or "")
-                row["parent_id"] = str(item.get("parent", p["parent_id"]))
+                # r7 #7: 缺键/空值统一视为根(与 check_item 的 after 侧
+                # `str(item.get('parent') or '')` 同口径) —— 曾 .get 默认
+                # 回落旧父: 删 parent: 行提升顶层的合法手编被写回旧父 id
+                # 而 path 按无父重算, 行成"顶层路径+旧父"的自相矛盾态,
+                # 每轮 update 再报 catalog_changed(0-job 死循环)
+                row["parent_id"] = str(item.get("parent") or "")
                 # 显式 `ordinal:` 空值(None)会击穿 .get 默认 —— begin 的
                 # ordinal 守卫只在排队前跑, finish 重读手编 plan 后曾
                 # int(None) 裸崩在 LINING 中途; as_int 是本 crash 类的统一
@@ -324,6 +329,20 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                 row["required_sections"] = json.dumps(
                     merged.get("required_sections") or [], ensure_ascii=False)
                 row["pack_key"] = str(merged.get("pack_key") or "")
+                # r7 #6 收尾: 声明源也随 plan 同步(编码与 queue_jobs 同规)
+                # —— 被跳过/失败的项走 kept 时行曾保持旧声明, 而对账
+                # (sources_redeclared)已按新计划触发, 不同步则每轮 update
+                # 重报 stale 且跟踪集永不换新
+                row["source_files"] = json.dumps(
+                    merged.get("source_files")
+                    or (json.loads(p["source_files"] or "[]")
+                        if p["source_files"] else []),
+                    ensure_ascii=False)
+                row["scope"] = json.dumps(
+                    merged.get("scope")
+                    or (json.loads(p["scope"] or "[]")
+                        if p["scope"] else []),
+                    ensure_ascii=False)
             new_row = _row_like(row)
             if _republish_changed(p, new_row, p["content"]):
                 ctx.db.publish_page(pid, new_row, p["content"], run["id"])
@@ -767,8 +786,10 @@ def cmd_pages(args) -> int:
         def emit(parent, depth=0):
             for p in sorted(by_parent.get(parent, []),
                             key=lambda x: (x["ordinal"], x["page_id"])):
+                # r7 #10: .get 容错 —— regenerate 路径不跑 validate_plan,
+                # 任意 kind 字符串可落库(裸索引曾让 pages --tree 永久 KeyError)
                 kind = {"page": "", "module_sheet": " [速查表]",
-                        "card": " [卡]"}[p["kind"]]
+                        "card": " [卡]"}.get(p["kind"], "")
                 print("  " * depth + f"- {p['title']}{kind} · {p['page_id']}")
                 emit(p["page_id"], depth + 1)
         emit("")

@@ -112,7 +112,14 @@ def _move_published_file(ctx: Ctx, plan: dict, pub, content: str,
     # 剥除判定同口径) —— 曾用 plan 级风格: deep 行撞 concise 计划时文件被
     # 注入 TOC 而行戳仍 deep, file_to_db 由此把注入层吸收进 page.content
     # (与 export db_to_file 同族; 行戳在此不变更, 保持与 DB 内容一致)
-    style = str(pub["style"] or (plan or {}).get("style") or ctx.style)
+    # r7 #9: 兜底链补 last_run 层(与 file_to_db 的 行戳>plan>run>ctx 同序)
+    # —— 空盖章旧行 + plan 无显式风格时, 曾按 ctx 解析出与 file_to_db
+    # 相反的风格: 改名文件注入 cite/TOC 而 file_to_db 判"该风格不注入"
+    # 不剥, 注入物被吸进 page.content(bug10 防线重开)
+    _run_style = str((ctx.db.last_run(ctx.partition()["id"])
+                      or {"style": ""})["style"] or "")
+    style = str(pub["style"] or (plan or {}).get("style")
+                or _run_style or ctx.style)
     exported, _ = publish.compose_export_content(ctx, row, style, all_paths,
                                                  plan=plan)
     new_full = os.path.join(ctx.root, new_path)

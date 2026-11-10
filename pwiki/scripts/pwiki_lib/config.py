@@ -305,15 +305,26 @@ class Ctx:
 
     @property
     def branch(self) -> str:
+        # r7 #13: git 失败的回退 '-' 不缓存 —— 裸目录(受支持路径,
+        # --require-git 才是选通开关)首跑曾把全部 wiki 状态写进 ('-',
+        # locale) 分区, git init + commit 后 branch 解析成真名 → 不同分区
+        # id, 整个 wiki 静默消失。失败时每次重试(git rev-parse 足够便宜),
+        # 成功才落缓存
         if self._branch is None:
-            self._branch = self._git(self.repo, "rev-parse", "--abbrev-ref",
-                                     "HEAD") or "-"
+            b = self._git(self.repo, "rev-parse", "--abbrev-ref", "HEAD")
+            if b:
+                self._branch = b
+            return b or "-"
         return self._branch
 
     @property
     def commit(self) -> str:
+        # 同 r7 #13: 失败回退 '' 不缓存(baseline_commit 曾因此永久为空)
         if self._commit is None:
-            self._commit = self._git(self.repo, "rev-parse", "HEAD")
+            c = self._git(self.repo, "rev-parse", "HEAD")
+            if c:
+                self._commit = c
+            return c or ""
         return self._commit
 
     def partition(self):

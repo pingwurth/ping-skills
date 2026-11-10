@@ -1255,3 +1255,346 @@ def test_r7_05_diagram_sources_fence_blind(tmp_path):
     item = {"kind": "page", "title": "架构", "source_files": [], "scope": []}
     errs, _w = gate_item(content, item, str(repo), "deep", phase="lining")
     assert any("sources/diagram" in e for e in errs), errs
+
+
+# --------------------------------------------------------------------------- #
+# 第七轮批次②: 次级正确性 11 条(#6-#16)
+# --------------------------------------------------------------------------- #
+
+def _skip_pending(repo, root):
+    """把活动 run 的 pending job 全部置 skipped —— 测试里快速到终态
+    (被跳过项由 finish 的 kept 规则按 plan 重算/移动)。"""
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    assert run is not None
+    for j in ctx.db.jobs_meta(run["id"]):
+        if j["state"] == "pending":
+            ctx.db.set_job_state(run["id"], j["page_id"], "skipped",
+                                 notes="r7-test")
+
+
+def _published_fixture(tmp_path):
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    return repo, root
+
+
+def test_r7_06_source_redeclare_triggers_stale(tmp_path, capsys):
+    """手改页 source_files: update 报 sources_redeclared(三方不再静默
+    丢弃), finish 后 DB 行与跟踪集用新声明。"""
+    from pwiki_lib import planner
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    (repo.path if hasattr(repo, "path") else repo)
+    import os as _os
+    _os.makedirs(_os.path.join(repo.path, "docs"), exist_ok=True)
+    with open(_os.path.join(repo.path, "docs", "guide.md"), "w",
+              encoding="utf-8") as fh:
+        fh.write("# 手册\n\n内容。\n")
+    from gitrepo import GitRepo
+    plan = planner.load_plan(ctx)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page")
+    pg["source_files"] = ["docs/guide.md"]
+    planner.save_plan(ctx, plan)
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    out = capsys.readouterr().out
+    assert "sources_redeclared" in out, \
+        f"手改声明源被三方静默丢弃: {out}"
+    _skip_pending(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    row = ctx.db.published_page(ctx.partition()["id"], str(pg["id"]))
+    assert "docs/guide.md" in (row["source_files"] or "")
+    # 二轮: 声明已收敛
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert "no update required (noop)" in capsys.readouterr().out
+
+
+def test_r7_07_parent_delete_promotes_to_root(tmp_path, capsys):
+    """删 parent: 行提升为顶层(与对账口径一致), 二轮 update noop。"""
+    from pwiki_lib import planner
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    child = next((p for p in plan["pages"]
+                  if isinstance(p, dict) and p.get("parent")), None)
+    if child is None:   # 种子计划可能全顶层 —— 手工挂一个再发布
+        parent = next(p for p in plan["pages"]
+                      if isinstance(p, dict) and p.get("id"))
+        child = dict(parent, id="child-x", title="子页",
+                     slug="child-x", parent=parent["id"])
+        plan["pages"].append(child)
+        planner.save_plan(ctx, plan)
+        assert _cli(["begin", "--force", "--repo", repo.path,
+                     "--root", root]) == config.EXIT_OK
+        # child-x 必须真发布(skip 项从未发布, 会被 P11 跳过集挡住)
+        from pwiki_lib import engine as _eng
+        ctx2 = _ctx(repo, root)
+        run2 = ctx2.db.active_run(ctx2.partition()["id"])
+        while True:
+            got = ctx2.db.claim_jobs(run2["id"], count=1)
+            if not got:
+                break
+            j = got[0]
+            if j["page_id"] == "child-x":
+                from test_review_fixes import _write_job_file as _wjf
+                pf = _wjf(root, j)
+                assert _eng.cmd_submit(_ns(
+                    repo, root, page_id=j["page_id"], file=pf, summary="",
+                    key_topics="", report=None, lenient=False, force=False,
+                    claim=j["claim_token"])) == config.EXIT_OK
+            else:
+                ctx2.db.set_job_state(run2["id"], j["page_id"], "skipped",
+                                      notes="r7")
+        assert _cli(["finish", "--repo", repo.path, "--root", root,
+                     "--yes"]) == config.EXIT_OK
+        ctx = _ctx(repo, root)
+    child.pop("parent", None)
+    planner.save_plan(ctx, child and _reload_plan_with(ctx, child))
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert "(catalog_changed" in capsys.readouterr().out
+    _skip_pending(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    row = ctx.db.published_page(ctx.partition()["id"], str(child["id"]))
+    assert (row["parent_id"] or "") == "", \
+        f"删 parent 被写回旧父 {row['parent_id']!r}"
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert "no update required (noop)" in capsys.readouterr().out
+
+
+def _reload_plan_with(ctx, target):
+    """save_plan 需要 plan 全量 —— 重读后替换单条目。"""
+    from pwiki_lib import planner
+    plan = planner.load_plan(ctx)
+    for i, p in enumerate(plan["pages"]):
+        if isinstance(p, dict) and str(p.get("id")) == str(target["id"]):
+            plan["pages"][i] = target
+    return plan
+
+
+def test_r7_08_module_change_triggers_stale(tmp_path, capsys):
+    """手改页的 module: update 报 catalog_changed, finish 后行同步新模块
+    (曾"合而不比" —— 改挂模块对 update 完全不可见)。"""
+    from pwiki_lib import planner
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page" and p.get("module"))
+    mods = [str(m.get("id")) for m in plan.get("modules", [])
+            if isinstance(m, dict) and m.get("id")
+            and str(m.get("id")) != str(pg.get("module"))]
+    assert mods, "需要第二个模块"
+    pg["module"] = mods[0]
+    planner.save_plan(ctx, _reload_plan_with(ctx, pg))
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    out = capsys.readouterr().out
+    assert pg["id"] in out and "catalog_changed" in out, out
+    _skip_pending(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    row = ctx.db.published_page(ctx.partition()["id"], str(pg["id"]))
+    assert row["module"] == mods[0], \
+        f"kept-merge 未同步 module(仍 {row['module']!r})"
+    # 二轮收敛
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert "no update required (noop)" in capsys.readouterr().out
+
+
+def test_r7_09_rename_style_chain_includes_run(tmp_path):
+    """空盖章行 + plan 无 style + last_run deep + ctx concise: 改名重组
+    按 deep(不注入)而不是 ctx(concise 注入)—— 与 file_to_db 同序。"""
+    from pwiki_lib import planner, reconcile
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    # 现场手术: 行无盖章、最后一个 run 盖 deep、plan 删 style
+    ctx.db.conn.execute("UPDATE page SET style='' WHERE partition_id=?",
+                        (pid,))
+    ctx.db.conn.execute(
+        "UPDATE run SET style='deep' WHERE id=(SELECT id FROM run WHERE "
+        "partition_id=? ORDER BY started_at DESC LIMIT 1)", (pid,))
+    plan = planner.load_plan(ctx)
+    plan.pop("style", None)
+    planner.save_plan(ctx, plan)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page")
+    status, msg = reconcile._apply_title_rename(
+        ctx, {"page_id": pg["id"], "proposed": "改名后的页"}, False)
+    assert status == "applied", msg
+    row = ctx.db.published_page(pid, str(pg["id"]))
+    with open(os.path.join(root, row["path"]), encoding="utf-8") as fh:
+        body = fh.read()
+    assert "\n## 目录\n" not in body, \
+        "改名重组按 ctx(concise)注入目录 —— 与 file_to_db 判定分叉"
+
+
+def test_r7_10_pages_tree_tolerates_unknown_kind(tmp_path, capsys):
+    """非法 kind 落库(regenerate 不跑 validate)后 pages --tree 不再崩。"""
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    ctx.db.conn.execute(
+        "UPDATE page SET kind='tutorial' WHERE partition_id=? "
+        "AND kind='page' LIMIT 1", (ctx.partition()["id"],))
+    assert _cli(["pages", "--tree", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+
+
+def test_r7_11_next_reports_run_closed_after_cancel(tmp_path, capsys, monkeypatch):
+    """cancel 落在 next 读 run 与 claim 事务之间: next 报 run_closed
+    (exit 3)而不是假 complete(exit 0)。"""
+    from pwiki_lib import engine
+    from pwiki_lib.db import WikiDB
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    # next 读到的快照(仍 DG); 并发 cancel 落在这之后 —— cmd_next 自建
+    # Ctx, 守卫只能打在类上(claim_jobs 的事务复查走裸 SQL 不受影响)
+    stale = dict(ctx.db.conn.execute(
+        "SELECT * FROM run WHERE id=?", (run["id"],)).fetchone())
+    assert stale["state"] == "DOCUMENT_GENERATING"
+    ctx.db.update_run(run["id"], state="CANCELLED", finished_at=now_iso())
+    monkeypatch.setattr(WikiDB, "active_run", lambda self, p: stale)
+    capsys.readouterr()
+    rc = engine.cmd_next(_ns(repo, root, batch=1, json=True))
+    assert rc == config.EXIT_PRECOND, f"假 complete: exit {rc}"
+    out = capsys.readouterr().out
+    assert '"status": "run_closed"' in out or '"status":"run_closed"' in out
+
+
+def test_r7_12_finish_after_overnight_pause(tmp_path):
+    """全部 job 终态( run 仍活动)后 pause 过夜: finish 直接收尾,
+    不再"状态已被并发操作改变"假诊断死掉。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)          # 全部 completed, run=DG
+    assert _cli(["pause", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    assert ctx.db.active_run(ctx.partition()["id"])["state"] == "PAUSED"
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    assert ctx.db.active_run(ctx.partition()["id"]) is None
+
+
+def test_r7_13_branch_failure_not_cached(tmp_path):
+    """git 失败的 '-' 回退不缓存: 裸目录 init 后同进程解析出真分支。"""
+    import types as _t
+    from pwiki_lib.config import Ctx
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    ns = _t.SimpleNamespace(repo=str(bare), root=str(tmp_path / "wiki"),
+                            locale="zh")
+    ctx = Ctx(ns)
+    assert ctx.branch == "-"
+    from pwiki_lib.util import git
+    git(str(bare), "init", "-q")
+    git(str(bare), "commit", "-q", "--allow-empty", "-m", "init")
+    assert ctx.branch not in ("-", ""), \
+        "git 恢复后仍缓存 '-'(wiki 状态写错分区)"
+
+
+def test_r7_14_validate_tolerates_off_by_one(tmp_path):
+    """validate --content 对差一引用与 write 同判(机械可修项不硬错)。"""
+    from pwiki_lib import planner
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page")
+    row = ctx.db.published_page(ctx.partition()["id"], str(pg["id"]))
+    f = os.path.join(root, row["path"])
+    with open(f, encoding="utf-8") as fh:
+        body = fh.read()
+    # README.md 在 fixture 里很短; 引一个必然越界的行范围
+    body = body.replace("](file://README.md", "](file://README.md#L1-L9999"
+                        ).replace("#L1-L9999#L", "#L")
+    with open(f, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    from pwiki_lib.gates import validate_content
+    _report, code = validate_content(ctx, plan)
+    assert code == 0, f"差一引用被 validate 当硬错(write 同内容会钳位放行)"
+
+
+def test_r7_15_16_write_baseline_new_files_only(tmp_path, capsys):
+    """write 修卡: scope 文件进基线(下轮不重排); 已跟踪文件的在途编辑
+    不被吸收(下轮仍检出 stale)。"""
+    from pwiki_lib import planner, publish, snapshot
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    card = next(c for c in ctx.db.published_pages(pid)
+                if config.is_card_kind(c["kind"]))
+    plan = planner.load_plan(ctx)
+    card_item = next(c for c in plan["cards"]
+                     if isinstance(c, dict) and str(c.get("id")) == card["page_id"])
+    # 卡声明 scope(docs/ 目录) —— 手编扩展声明并发布
+    import os as _os
+    _os.makedirs(_os.path.join(repo.path, "docs"), exist_ok=True)
+    with open(_os.path.join(repo.path, "docs", "extra.md"), "w",
+              encoding="utf-8") as fh:
+        fh.write("# 新文档\n\n新内容。\n")
+    card_item["scope"] = ["docs/"]
+    planner.save_plan(ctx, _reload_plan_cards_with(ctx, card_item))
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _skip_pending(repo, root)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    # 手工 write 修卡(不 through run): 基线刷新只吸收新跟踪文件
+    card_file = os.path.join(root,
+                             ctx.db.published_page(pid, card["page_id"])["path"])
+    with open(card_file, encoding="utf-8") as fh:
+        body = fh.read()
+    with open(card_file, "w", encoding="utf-8") as fh:
+        fh.write(body + "\n手工补一句。\n")
+    assert publish.cmd_write(_ns(repo, root, page_id=card["page_id"],
+                                 file=card_file, lenient=False,
+                                 force=False, claim=None)) == config.EXIT_OK
+    assert "docs/extra.md" in ctx.db.file_hashes(pid), \
+        "卡的新 scope 文件没进基线(下轮必重排)"
+    # 已跟踪文件的在途编辑: 基线保持旧哈希 → 下轮 update 检出 stale
+    readme = os.path.join(repo.path, "README.md")
+    with open(readme, "a", encoding="utf-8") as fh:
+        fh.write("\n在途编辑。\n")
+    capsys.readouterr()
+    assert _cli(["update", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    out = capsys.readouterr().out
+    assert "stale items: 0" not in out, \
+        f"在途编辑被 write 顺手吸收进基线(永不报 stale): {out}"
+
+
+def _reload_plan_cards_with(ctx, target):
+    from pwiki_lib import planner
+    plan = planner.load_plan(ctx)
+    for i, c in enumerate(plan["cards"]):
+        if isinstance(c, dict) and str(c.get("id")) == str(target["id"]):
+            plan["cards"][i] = target
+    return plan
