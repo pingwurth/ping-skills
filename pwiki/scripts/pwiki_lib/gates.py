@@ -336,14 +336,13 @@ def gate_item(content: str, item, repo: str, style: str,
         # 发布层注入 <cite>/目录; writer 不得自带(qwiki 契约; 判定走预设键,
         # 不再散落 style == "concise" 字面比较)。注入物类是风格错误 ——
         # validation.md: concise 在 LINING 也保持警告(曾一律升错误级)
-        _sev = sev_hard
         if i18n.TOC_HEADING_RE.search(prose):
-            _sev.append("schema/toc: 不要写目录节 —— 发布层会注入")
+            sev_hard.append("schema/toc: 不要写目录节 —— 发布层会注入")
         if "<cite>" in content:
-            _sev.append("schema/cite: 不要写 <cite> 块 —— 发布层会注入")
+            sev_hard.append("schema/cite: 不要写 <cite> 块 —— 发布层会注入")
         if re.search(r"^\s*##\s+(结论|结语|总结|Conclusion|Summary|Next Steps)\s*$",
                      prose, re.M):
-            _sev.append("schema/wrapup: 不要写结论/收尾节")
+            sev_hard.append("schema/wrapup: 不要写结论/收尾节")
     else:
         # deep: writer 自带 cite 块, 且集合必须与正文一致
         # (else 分支里 cite_block_required 恒真 —— 内层再测是死代码)
@@ -379,8 +378,10 @@ def gate_item(content: str, item, repo: str, style: str,
     diagrams = len(re.findall(r"```mermaid", content))
     lo, hi = p["mermaid"]
     if diagrams < lo or diagrams > hi:
-        sev = sev_hard
-        sev.append(f"size/mermaid: {diagrams} 图 (目标 {lo}-{hi})")
+        # r7 #3: 曾 `sev = sev_hard` 重绑定覆盖局部选择器, 其后全部
+        # sev.append(citation/extra、sources/*、module_mention)跟着
+        # 路由进错误列表 —— 硬错误严重级随无关的图表数翻转
+        sev_hard.append(f"size/mermaid: {diagrams} 图 (目标 {lo}-{hi})")
 
     # --- 尺寸(按风格) ---
     n_lines = len(content.splitlines())
@@ -476,7 +477,11 @@ def gate_item(content: str, item, repo: str, style: str,
         else:
             warnings.append("sources/section: " + msg)
     # diagrams==0 时 findall 数恒 ≥0, 无需单列分支(曾 if…pass/elif 死形状)
-    if diagrams and len(DIAGRAM_SOURCES_RE.findall(content)) < diagrams:
+    # r7 #5: 来源字面量按剥栅栏正文计数 —— 栅栏示例里的 '**图表来源**'
+    # 曾满足 deep 错误级 diagram 门禁(mermaid 数量本身按栅栏标记数, 不变)
+    _prose_diagram = len(DIAGRAM_SOURCES_RE.findall(
+        strip_code_fences(content)))
+    if diagrams and _prose_diagram < diagrams:
         msg = f"{diagrams} 图中部分缺 **图表来源**"
         if p["diagram_sources"] == "error":
             sev.append("sources/diagram: " + msg)
@@ -552,12 +557,12 @@ def _gate_sheet(content, p, strict, errors, warnings, n_cites):
     concise_ = p["sheets"] == "short"
     if concise_:
         # 形状类: submit 全警告(validation.md 双严重度模型), LINING 按
-        # size_hard —— 曾在 submit 就把 concise 速查表硬拒
-        sev = sev_hard
+        # size_hard —— 曾在 submit 就把 concise 速查表硬拒(r7 #3: 别再
+        # 重绑定局部选择器, 直接用 sev_hard)
         if "file://" in content:
-            sev.append("sheet/links: concise 速查表不写 file:// 链接(正文页承载)")
+            sev_hard.append("sheet/links: concise 速查表不写 file:// 链接(正文页承载)")
         if re.search(r"^##\s+", strip_code_fences(content), re.M):
-            sev.append("sheet/shape: concise 速查表只有 H1, 不写 ## 小节")
+            sev_hard.append("sheet/shape: concise 速查表只有 H1, 不写 ## 小节")
         n_sent = len([s for s in content.splitlines() if s.strip()])
         if n_sent > p.get("sheet_max_lines", 40):
             warnings.append(f"sheet/length: {n_sent} 行 — concise 速查表应 1-3 句(每节)")
@@ -569,7 +574,10 @@ def _gate_sheet(content, p, strict, errors, warnings, n_cites):
         if n_line < need:
             msg = f"D16: deep 速查表需 ≥{need} 条行级引用, 实得 {n_line}"
             sev.append("knowledge/citations: " + msg)
-        if n_cites and not SECTION_SOURCES_RE.search(content):
+        # r7 #4: 剥栅栏 —— 栅栏示例里的 '**章节来源**' 字面量曾满足
+        # deep 错误级门禁(紧邻两行之上的 D16 检查自己都剥)
+        if n_cites and not SECTION_SOURCES_RE.search(
+                strip_code_fences(content)):
             (errors if (strict and p["section_sources"] == "error")
              else warnings).append("sources/section: 速查表缺 **章节来源**")
 

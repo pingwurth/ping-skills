@@ -97,8 +97,14 @@ def toc_titles() -> set:
 
 # 注入目录节的识别/剥除正则(发射与剥除共用一份 —— 双份曾漂移漏掉 "Contents"):
 # 覆盖 i18n 两拼法 + Qoder 兼容的 "Table of Contents"。
+# r7 #1: 只匹配注入物自身的形态(标题 + 编号行块), 不再 `.*?` 吃到下一个
+# '^## ' —— 注入位(</cite>/H1 之后)与剥除区间曾不对称: 导语在目录与首个
+# H2 之间时, file_to_db/validate 的剥除把正文段落整段吞掉并写回
+# page.content(静默内容丢失)。手写的非编号目录节从此不再被整节删
+# (更保守: 剥自己的注入物, 永不多吃正文)。
 TOC_SECTION_RE = re.compile(
-    r"(?ms)^## (?:目录|Table of Contents|Contents)\s*\n.*?(?=^## |\Z)")
+    r"(?m)^## (?:目录|Table of Contents|Contents)[ \t]*\n"
+    r"\n?(?:\d+\.\s[^\n]*\n)+\n?")
 
 # 门禁侧的目录标题行(单行形态, "不要写目录节"警告用)—— 与 TOC_SECTION_RE
 # 同源。曾两份漂移漏掉 'Contents': en writer 的合法 Contents 节过得了

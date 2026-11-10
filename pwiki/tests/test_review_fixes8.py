@@ -1092,11 +1092,16 @@ def test_r6_42_wide_cite_packs_locked_to_config():
 
 
 def test_r6_48_toc_titles_match_section_re():
-    """注入侧过滤集合与剥除正则同源: TOC_SECTION_RE 认的标题都在集合里。"""
+    """注入侧过滤集合与剥除正则同源: 注入形态(标题+编号行)能被剥,
+    且剥除只吃编号行不吃其后正文(r7 #1 的新口径)。"""
     from pwiki_lib import i18n
     titles = i18n.toc_titles()
     for t in titles:
-        assert i18n.TOC_SECTION_RE.search(f"## {t}\n正文"), t
+        body = f"## {t}\n\n1. [x](#x)\n2. [y](#y)\n\n正文段。\n\n## 一\n"
+        stripped = i18n.TOC_SECTION_RE.sub("", body)
+        assert "1. [x]" not in stripped, t
+        assert "正文段。" in stripped, t          # 导语不被吞(r7 #1)
+        assert "## 一" in stripped, t
     assert i18n.TOC_HEADING_RE.match("## Table of Contents")
 
 
@@ -1134,3 +1139,119 @@ def test_r6_49_feature_leaf_id_shapes(tmp_path):
             if pid.startswith("feature-") and p.get("parent"):
                 # 形态: feature-[族slug-]stem —— 至少两段或就是 stem
                 assert pid.count("-") >= 1
+
+
+# --------------------------------------------------------------------------- #
+# 第七轮批次①: Tier-1 五条(#1-#5)
+# --------------------------------------------------------------------------- #
+
+def test_r7_01_toc_strip_keeps_lead_paragraph(tmp_path):
+    """注入位(cite/H1 后)与剥除区间对称: 导语在目录与首个 H2 之间时,
+    剥除不再把正文段落整段吞掉写回 page.content。"""
+    from pwiki_lib import publish
+    from pwiki_lib.gates import strip_injected_layers
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    page = {"content": "# 支付\n\n导语段落, 必须活着。\n\n"
+                       "## 一\n\n事实 [README.md:1-2](file://README.md#L1-L2)。\n"
+                       "## 二\n\n事实 [README.md:1](file://README.md#L1)。\n"
+                       "## 三\n\n事实 [README.md:2](file://README.md#L2)。\n",
+            "path": "zh/content/pay.md", "kind": "page"}
+    composed, _ = publish.compose_export_content(
+        ctx, page, "concise", {"zh/content/pay.md"})
+    assert "\n## 目录\n" in composed, "前置失败: 未注入目录"
+    stripped = strip_injected_layers(composed)
+    assert "导语段落, 必须活着。" in stripped, \
+        "导语段被 TOC 剥除吞掉(r7 #1)"
+    assert "\n## 目录\n" not in stripped
+    for sec in ("## 一", "## 二", "## 三"):
+        assert sec in stripped, sec
+    # 手写目录节(带空行形态)同样只剥编号行, 节后正文保留
+    hand = "## 目录\n\n1. [x](#x)\n\n手写的目录后正文。\n\n## 一\n"
+    assert "手写的目录后正文。" in strip_injected_layers(hand)
+
+
+def test_r7_02_lining_interrupt_lands_recoverable(tmp_path, monkeypatch):
+    """LINING 循环中 Ctrl-C(KeyboardInterrupt): run 落 DOCUMENT_FAILED
+    (可重跑 finish 恢复)而不是永卡 LINING 的死锁态。"""
+    from pwiki_lib import engine, gates
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    _write_all_jobs(repo, root)
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+
+    def boom(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gates, "gate_item", boom)
+    with pytest.raises(KeyboardInterrupt):
+        engine.cmd_finish(_ns(repo, root, lenient=False, force=False,
+                              prune=False, yes=True))
+    row = ctx.db.active_run(ctx.partition()["id"])
+    assert row is not None and row["state"] == "DOCUMENT_FAILED", \
+        f"中断后 run 卡在 {row and row['state']}(死锁态)"
+    # 恢复路径畅通: 重跑 finish(修好门禁)可推进
+    monkeypatch.undo()
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+
+
+def test_r7_03_sev_no_rebind_after_mermaid(tmp_path):
+    """mermaid 越带不再翻转后续检查的严重级: concise LINING 下
+    size/mermaid 进 warnings 的同时, citation/extra 硬错误仍在 errors。"""
+    from pwiki_lib.gates import gate_item
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(12):
+        (repo / f"src{i}.py").write_text("x = 1\n", encoding="utf-8")
+    mermaid = "```mermaid\ngraph TD\nA-->B\n```\n"
+    content = ("# 支付\n" + mermaid * 9 + "\n"
+               "## 一\n\nx\n\n## 二\n\ny\n\n## 三\n\nz\n\n")
+    # 12 个真实引用文件全落在声明 source_files 之外 → citation/extra
+    cites = "\n".join(f"- [{i}.py](file://src{i}.py)" for i in range(12))
+    content += f"\n<cite>\n引用文件\n{cites}\n</cite>\n"
+    item = {"kind": "page", "title": "支付",
+            "source_files": [], "scope": []}
+    errs, warns = gate_item(content, item, str(repo), "concise",
+                            phase="lining")
+    assert any("size/mermaid" in w for w in warns), warns
+    assert any("citation/extra" in e for e in errs), \
+        f"硬错误被 mermaid 越带翻转进 warnings: {errs}"
+
+
+def test_r7_04_sheet_section_sources_fence_blind(tmp_path):
+    """deep 速查表: 唯一的 '**章节来源**' 只在栅栏示例里 → LINING 仍报
+    缺失(引用真实且行级数达标, 排除 D16 干扰)。"""
+    from pwiki_lib.gates import gate_item
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    content = ("# 模块速查\n\n一句话"
+               " [a.py:1-2](file://a.py#L1-L2)。\n\n"
+               "```text\n**章节来源**\n- [a.py](file://a.py)\n```\n")
+    item = {"kind": "module_sheet", "title": "模块速查",
+            "module": "m", "sheet": "overview",
+            "source_files": ["a.py"], "scope": []}
+    errs, _w = gate_item(content, item, str(repo), "deep", phase="lining")
+    assert any("sources/section" in e for e in errs), errs
+    assert not any("knowledge/citations" in e for e in errs), errs
+
+
+def test_r7_05_diagram_sources_fence_blind(tmp_path):
+    """deep 页: 图表真实存在但 '**图表来源**' 全在非 mermaid 栅栏里 →
+    sources/diagram 仍报缺失(mermaid 计数按栅栏标记, 来源按正文)。"""
+    from pwiki_lib.gates import gate_item
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for i in range(3):
+        (repo / f"m{i}.py").write_text("x = 1\n", encoding="utf-8")
+    content = ("# 架构\n\n<cite>\n引用文件\n"
+               + "\n".join(f"- [m{i}.py](file://m{i}.py)" for i in range(3))
+               + "\n</cite>\n\n"
+               + "```mermaid\ngraph TD\nA-->B\n```\n\n" * 5
+               + "```text\n" + "**图表来源**\n- x\n" * 5 + "```\n")
+    item = {"kind": "page", "title": "架构", "source_files": [], "scope": []}
+    errs, _w = gate_item(content, item, str(repo), "deep", phase="lining")
+    assert any("sources/diagram" in e for e in errs), errs

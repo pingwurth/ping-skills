@@ -1103,6 +1103,17 @@ def cmd_finish(args) -> int:
                    f"{type(e).__name__}: {e}")
         die(f"LINING 执行失败({type(e).__name__}: {e}) — run 已标 "
             "DOCUMENT_FAILED; 修好后重跑 `pwiki finish`", config.EXIT_ENV)
+    except BaseException:
+        # r7 #2: Ctrl-C/kill 落在"被拒 job 置回 pending"与 DOCUMENT_FAILED
+        # 落态之间时不被 except Exception 捕获 —— run 曾永卡 LINING 且带
+        # pending job(next 照常派发、submit 撞 busy 集必孤儿化, 变更命令
+        # 全被 LINING 守卫拒绝的死锁态)。落可恢复态再让中断语义传播
+        ctx.db.update_run_guarded(
+            run["id"], ("LINING",), state="DOCUMENT_FAILED",
+            error="lining 中断(KeyboardInterrupt) — 重跑 `pwiki finish`",
+            finished_at=now_iso())
+        ctx.db.log(run["id"], "lining_interrupted", "")
+        raise
     if lining_failed:
         for pid, errs in lining_failed[:20]:
             print(f"  lining rejected {pid}: {errs[0]}", file=sys.stderr)
