@@ -268,7 +268,13 @@ def _parse_block(lines: list, i: int, min_indent: int):
                 # 掉出块, 合法 YAML 报 unparsed line
                 virt = [_YLine(" " * (base + 2) + rest)]
                 j = i + 1
-                while j < len(lines) and lines[j].indent > base:
+                # r7 #27: 与 '- ' 标记同缩进的**注释行**也吸收 —— 它是条目
+                # 中段的合法注释(text=="", _parse_block 跳过); 曾在
+                # indent > base 处停机, 其后字段全被报 unparsed line
+                # (PyYAML 对同一文件解析正常)
+                while j < len(lines) and (
+                        lines[j].indent > base or
+                        (lines[j].indent == base and lines[j].text == "")):
                     virt.append(lines[j])
                     j += 1
                 val, consumed = _parse_block(virt, 0, base + 2)
@@ -332,8 +338,13 @@ def _parse_block(lines: list, i: int, min_indent: int):
                 while j < len(lines) and (lines[j].indent > base):
                     raws.append(lines[j].raw)
                     j += 1
-                while raws and not raws[-1].strip():
-                    raws.pop()
+                # r7 #28: 尾空行只在非 keep('+')下截 —— |+ 的尾随空行是
+                # 值的一部分(曾无条件截 + 无条件 rstrip, 三种指示符全按
+                # |- 处理, 手编 prompt/summary 的块标量值被静默改写)
+                _chomp = val_raw[-1] if val_raw[-1] in "+-" else ""
+                if _chomp != "+":
+                    while raws and not raws[-1].strip():
+                        raws.pop()
                 nonblank = [r for r in raws if r.strip()]
                 # 去缩进锚定**内容行**(裸 '#' 行是块标量正文但不应锚定缩进):
                 # 曾对全部非空行取 min —— 一条浅缩进注释让整个块的相对
@@ -349,8 +360,17 @@ def _parse_block(lines: list, i: int, min_indent: int):
                         continue
                     own = len(r) - len(r.lstrip(" "))
                     buf.append(r[min(strip_n, own):])
-                text = "\n".join(buf).rstrip("\n")
-                obj[key] = text if val_raw.startswith("|") else " ".join(text.split())
+                joined = "\n".join(buf)
+                if not val_raw.startswith("|"):
+                    obj[key] = " ".join(joined.split())   # folding: 现状
+                elif _chomp == "-":
+                    obj[key] = joined.rstrip("\n")        # strip
+                else:
+                    # clip('|') 恰一个尾换行; keep('+') 理想上保留全部尾随
+                    # 空行, 但空行在 yaml_load 的行过滤层已被丢弃(空行不
+                    # 产生 _YLine)—— 实际等效 clip(比此前无条件 rstrip 少
+                    # 丢一个换行, 多空行保留不做)
+                    obj[key] = joined + "\n" if joined.strip() else joined
                 i = j
                 continue
             # 嵌套值: 更深缩进的块, 或同缩进的 "- " 列表

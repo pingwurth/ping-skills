@@ -1004,10 +1004,10 @@ def test_r4_48_nested_flow_list():
 def test_r4_49_block_scalar_dedent_anchors_content():
     from pwiki_lib.yamlite import yaml_load
     doc = yaml_load("prompt: |\n      line1\n    # note\n      line2\n")
-    assert doc["prompt"] == "line1\n# note\nline2", repr(doc["prompt"])
+    assert doc["prompt"] == "line1\n# note\nline2\n", repr(doc["prompt"])
     # 相对缩进保持: 内容行更深时
     doc2 = yaml_load("prompt: |\n      a\n        b\n")
-    assert doc2["prompt"] == "a\n  b", repr(doc2["prompt"])
+    assert doc2["prompt"] == "a\n  b\n", repr(doc2["prompt"])
 
 
 # --------------------------------------------------------------------------- #

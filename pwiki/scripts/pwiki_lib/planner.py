@@ -15,11 +15,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from collections import Counter
 
 from . import config, i18n
 from .config import Ctx, PROFILE_BUDGETS
-from .util import posix, die, info, join_confined, safe_filename, slugify
+from .util import (as_int, posix, die, info, join_confined, safe_filename,
+                   slugify)
 from .yamlite import yaml_dump, yaml_load
 
 PLAN_HEADER = """\
@@ -323,6 +325,23 @@ def _check_repo_path(ctx: Ctx, raw, what: str, errors: list, warnings: list,
             f"{what} 路径不存在: {raw}")
 
 
+def entry_shape_errors(plan: dict) -> list:
+    """pages/cards/modules 条目形状门(validate 与 cmd_plan 增量分支共用)。
+    裸标量条目(`- 快速开始` / `- user-service`)曾让校验器与 --sheets/
+    --review 路线各自 AttributeError/TypeError 裸栈 exit 1(r7 #17/#18/
+    #19: 增量分支从不跑 validate_plan, 只能在入口共享这道门)。"""
+    errs = []
+    for label in ("pages", "cards", "modules"):
+        items = plan.get(label)
+        if not isinstance(items, list):
+            continue   # 顶层类型检查各有归属(validate_plan/plan_pages)
+        bad = [x for x in items if not isinstance(x, dict)]
+        if bad:
+            errs.append(f"{label} 条目必须是映射(got "
+                        f"{type(bad[0]).__name__}): {bad[0]!r}")
+    return errs
+
+
 def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
                   warn_missing: bool = False, strict: bool = True) -> tuple:
     """计划门禁。strict = begin/FULL 口径(形状下限为错误); update 路径传
@@ -330,8 +349,12 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
     errors, warnings = [], []
     shape: list = errors if strict else warnings
     sv = plan.get("schema_version")
-    if sv not in (1, 2, 3):
+    # r7 #22: bool 显式拒绝 —— yamlite 把裸 yes/true 解析为 True, 而
+    # True == 1 使 `schema_version: yes` 静默按 v1 校验(卡/模块检查全跳过)。
+    # 坏值短路成 None: 不驱动任何版本开关(保守全查)
+    if sv not in (1, 2, 3) or isinstance(sv, bool):
         errors.append(f"schema_version 必须是 1/2/3( got {sv!r})")
+        sv = None
     if sv == 2:
         warnings.append("schema_version 2 可读; 建议升级 3(加 style/aliases 与"
                         " pages 新字段) — 编辑保存时自动完成")
@@ -344,7 +367,13 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
     pages = plan_pages(plan)
     cards = plan_cards(plan) if sv != 1 else []
     modules = plan_modules(plan) if sv != 1 else []
-
+    # r7 #17/#18: modules 条目形状守卫(P33 家族 —— r6 修了 pages/cards/
+    # aliases 三个集合, 漏了第四个): 标量条目曾让 str(m.get) 直接
+    # AttributeError, 应挡 begin 的门禁自己先死(exit 1 非 2)
+    if any(not isinstance(m, dict) for m in modules):
+        errors.append("modules 条目必须是映射(got "
+                      f"{[m for m in modules if not isinstance(m, dict)][0]!r})")
+        modules = [m for m in modules if isinstance(m, dict)]
     mod_id_list = [str(m.get("id", "")).strip() for m in modules]
     mod_ids = set(mod_id_list)
     # 重复 module id 检查要在**原始列表**上数(曾数去重后的 set, 恒为 1,
@@ -359,7 +388,12 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
         mt = str(m.get("module_type") or "real")
         if mt not in MODULE_TYPES:
             errors.append(f"module {mid}: module_type 必须是 {MODULE_TYPES}(got {mt!r})")
-        for s in m.get("scope") or []:
+        _scope = m.get("scope")
+        if _scope is not None and not isinstance(_scope, list):
+            errors.append(f"module {mid}: scope 必须是列表"
+                          f"(got {_scope!r})")
+            _scope = []
+        for s in _scope or []:
             # c049 同族: 计划 scope 不得逃出 repo(绝对/../ 一律拒)
             _check_repo_path(ctx, s, f"module {mid}: scope",
                              errors, warnings, warn_missing)
@@ -377,15 +411,10 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
 
     if not pages and not cards:
         errors.append("pages 与 cards 均为空")
-    # 条目形状先于一切 .get(P33 家族): 裸标量条目(`- 快速开始`)曾
-    # AttributeError 裸栈打死 validate/begin(exit 1 而非门禁的 2)——
-    # 报错后短路, 后续循环不再触碰坏条目
-    for label, items in (("pages", pages), ("cards", cards)):
-        bad = [x for x in items if not isinstance(x, dict)]
-        if bad:
-            errors.append(f"{label} 条目必须是映射(got "
-                          f"{type(bad[0]).__name__}): {bad[0]!r}")
-    if any(not isinstance(x, dict) for x in pages + cards):
+    # 条目形状先于一切 .get(P33 家族, 共享门见 entry_shape_errors)
+    errors += entry_shape_errors(plan)
+    if any(not isinstance(x, dict)
+           for x in pages + cards + plan_modules(plan)):
         return errors, warnings
     ids = [str(p.get("id", "")).strip() for p in pages] + \
           [str(c.get("id", "")).strip() for c in cards]
@@ -770,12 +799,13 @@ def scaffold_pages(inv: dict, plan: dict) -> list:
         mod_paths = [str(m.get("path") or m["id"])] + \
                     [str(s.get("path") or s["id"]) for s in subs]
         pages.append({
-            "id": dom_id, "slug": dom_id, "title": m["title"], "parent": "",
+            "id": dom_id, "slug": dom_id,
+                "title": str(m.get("title") or m.get("id") or ""), "parent": "",
             "ordinal": ordinal, "kind": "page", "type": "domain",
             "module": m["id"], "modules": mod_paths,
-            "objective": f"聚合 {m['title']} 领域的模块、边界与跨组件流程。"
+            "objective": f"聚合 {m.get('title') or m['id']} 领域的模块、边界与跨组件流程。"
                          "Out of scope: 单个子模块的实现细节。",
-            "prompt": (f"为领域「{m['title']}」（{m.get('dir') or '根'}）撰写领域级"
+            "prompt": (f"为领域「{m.get('title') or m['id']}」（{m.get('dir') or '根'}）撰写领域级"
                        "文档：该领域解决的问题、包含哪些子模块与边界、跨组件流程、"
                        "设计取舍。子模块细节交给子文章，不要复述。"),
             "source_files": m.get("scope") or [],
@@ -785,13 +815,14 @@ def scaffold_pages(inv: dict, plan: dict) -> list:
             sid = _unique_id(slugify(s.get("path") or s.get("title") or "deep",
                                      f"deep-{ordinal}"), used_ids)
             pages.append({
-                "id": sid, "slug": sid, "title": s["title"], "parent": dom_id,
+                "id": sid, "slug": sid,
+                    "title": str(s.get("title") or s.get("id") or ""), "parent": dom_id,
                 "ordinal": len([p for p in pages if p.get("parent") == dom_id]),
                 "kind": "page", "type": "deep_dive", "module": s["id"],
                 "modules": [str(s.get("path") or s["id"])],
-                "objective": f"深入分析模块 {s['title']}：职责、关键抽象、"
+                "objective": f"深入分析模块 {s.get('title') or s['id']}：职责、关键抽象、"
                              "内部数据流与配置。",
-                "prompt": (f"为模块「{s['title']}」（{s.get('dir') or '根'}）撰写"
+                "prompt": (f"为模块「{s.get('title') or s['id']}」（{s.get('dir') or '根'}）撰写"
                            "深入文档：职责、关键组成、内部结构与数据流、配置项、"
                            "关键文件地图。先通读该模块再下笔。"),
                 "source_files": s.get("scope") or [],
@@ -1013,6 +1044,15 @@ def cmd_plan(args) -> int:
     # 已存在且未 --reset: 只做增量操作, 绝不静默覆盖。
     if plan is None:
         plan = load_plan(ctx)
+    # r7 #19: 增量分支(--sheets/--deps/--aliases/--review)从不跑
+    # validate_plan —— 条目形状至少过共享门, 否则标量条目让各路线
+    # AttributeError 裸崩 exit 1
+    _shape_errs = entry_shape_errors(plan)
+    if _shape_errs:
+        for e in _shape_errs:
+            print(f"  error: {e}", file=sys.stderr)
+        die("plan 条目形状非法 — 先修 wiki_plan.yaml(`pwiki validate` 定位)",
+            config.EXIT_GATE)
     changed = False
     sheets_profile = getattr(args, "sheets", None)
     if sheets_profile:
@@ -1060,7 +1100,9 @@ def cmd_plan(args) -> int:
         # 变更标志决定
     if changed:
         assign_paths(plan, ctx.locale)
-        plan["schema_version"] = max(3, int(plan.get("schema_version") or 2))
+        # r7 #21: as_int 容错 —— `schema_version: three` 曾在算完工作、
+        # save_plan 之前 ValueError 裸崩(exit 1), 改动静默不落盘
+        plan["schema_version"] = max(3, as_int(plan.get("schema_version"), 2))
         save_plan(ctx, plan)
         info(f"plan 已更新: {ctx.plan_path}")
     else:

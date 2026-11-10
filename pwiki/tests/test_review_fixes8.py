@@ -1598,3 +1598,170 @@ def _reload_plan_cards_with(ctx, target):
         if isinstance(c, dict) and str(c.get("id")) == str(target["id"]):
             plan["cards"][i] = target
     return plan
+
+
+# --------------------------------------------------------------------------- #
+# 第七轮批次③: 手编面 traceback 代门禁 12 条(#17-#28)
+# --------------------------------------------------------------------------- #
+
+def test_r7_17_18_module_shapes_gated(tmp_path):
+    """模块条目/模块 scope 的标量手编: validate 报门禁错(exit 2 路径)
+    而不是校验器自己 TypeError/AttributeError。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["modules"] = ["user-service"] + plan["modules"]
+    errors, _w = planner.validate_plan(ctx, plan, strict=True)
+    assert any("modules 条目必须是映射" in e for e in errors), errors
+    # 模块 scope 标量
+    plan2 = planner.load_plan(ctx)
+    plan2["modules"][0]["scope"] = 42
+    errors2, _w = planner.validate_plan(ctx, plan2, strict=True)
+    assert any("scope 必须是列表" in e for e in errors2), errors2
+
+
+def test_r7_19_plan_sheets_scalar_entry(tmp_path, capsys):
+    """pages 标量条目 + plan --sheets: 入口形状门 die exit 2 不裸崩。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["pages"] = ["快速开始"]
+    planner.save_plan(ctx, plan)
+    with pytest.raises(SystemExit) as ei:
+        _cli(["plan", "--sheets", "standard", "--repo", repo.path,
+              "--root", root])
+    assert ei.value.code == config.EXIT_GATE
+    assert "必须是映射" in capsys.readouterr().err
+
+
+def test_r7_20_reset_without_module_title(tmp_path):
+    """模块删 title 行: plan --reset 用 id 兜底, 不再 KeyError。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["modules"][0].pop("title", None)
+    planner.save_plan(ctx, plan)
+    assert _cli(["plan", "--reset", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+
+
+def test_r7_21_schema_version_string_no_crash(tmp_path):
+    """schema_version: three —— as_int 容错, 改动落盘而不是中途 ValueError。"""
+    from pwiki_lib import planner
+    from pwiki_lib.yamlite import yaml_dump, yaml_load
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan_path = ctx.plan_path
+    raw = open(plan_path, encoding="utf-8").read().replace(
+        "schema_version: 3", "schema_version: three")
+    assert "three" in raw
+    with open(plan_path, "w", encoding="utf-8") as fh:
+        fh.write(raw)
+    assert _cli(["plan", "--sheets", "lite", "--repo", repo.path,
+                 "--root", root]) in (config.EXIT_OK, config.EXIT_GATE)
+    del yaml_dump, yaml_load
+
+
+def test_r7_22_schema_version_bool_rejected(tmp_path):
+    """schema_version: yes(bool True==1)显式拒绝 —— 卡/模块检查不再静默跳过。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["schema_version"] = True
+    plan["cards"] = [{"id": "bad", "kind": "NOT_A_KIND", "title": "x"}]
+    errors, _w = planner.validate_plan(ctx, plan, strict=True)
+    assert any("schema_version" in e for e in errors), errors
+    assert any("kind" in e for e in errors), errors
+
+
+def test_r7_23_compose_rowget_kind(tmp_path):
+    """compose 对无 kind 键的 dict 与 sqlite3.Row 都不裸崩。"""
+    from pwiki_lib import publish
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    page = {"content": "# T\n\n## A\n\nx\n\n## B\n\ny\n\n## C\n\nz\n",
+            "path": "zh/content/t.md"}   # 无 kind 键
+    out, _ = publish.compose_export_content(ctx, page, "concise",
+                                            {"zh/content/t.md"})
+    assert out.startswith("# T")
+
+
+def test_r7_24_locale_null(tmp_path):
+    """config.json locale: null 回落 zh —— status 不再 NoneType 裸崩。"""
+    import json as _json
+    repo, root = _fixture(tmp_path)
+    cfg = os.path.join(root, "config.json")
+    with open(cfg, encoding="utf-8") as fh:
+        data = _json.load(fh)
+    data["locale"] = None
+    with open(cfg, "w", encoding="utf-8") as fh:
+        fh.write(_json.dumps(data))
+    assert _cli(["status", "--repo", repo.path, "--root", root]) in (
+        config.EXIT_OK, config.EXIT_PRECOND)
+
+
+def test_r7_25_layers_bad_article_purged(tmp_path):
+    """apply 把坏条目从 state 清出: 同次 apply 收尾与后续 status/commit
+    不再在坏条目上裸崩。"""
+    import json as _json
+    repo, root = _fixture(tmp_path)
+    assert _cli(["plan", "--layers", "init", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    sess = os.path.join(root, "work", "plan-layers.json")
+    with open(sess, encoding="utf-8") as fh:
+        state = _json.load(fh)
+    state["articles"] = ["broken-scalar"] + state.get("articles", [])
+    with open(sess, "w", encoding="utf-8") as fh:
+        fh.write(_json.dumps(state, ensure_ascii=False))
+    payload = {"articles": [
+        {"slug": "overview", "title": "t", "type": "overview",
+         "objective": "o", "modules": ["/"], "need_further_planning": False}]}
+    text = "<result>" + _json.dumps(payload, ensure_ascii=False) + "</result>"
+    from pwiki_lib.layers import apply_layer_result
+    added, problems = apply_layer_result(None, {"limits": {}, "modules": [],
+                                                "pages": [], "cards": []},
+                                         state, text)
+    assert added, problems
+    assert all(isinstance(a, dict) for a in state["articles"]), \
+        "坏条目未从持久层清出"
+
+
+def test_r7_26_qoderplan_scalar_entries(tmp_path):
+    """qoder-plan --lint 对标量 documents 条目报 warn 不崩; author_notes
+    标量不崩 --emit。"""
+    from pwiki_lib import qoderplan
+    from pwiki_lib.yamlite import yaml_dump
+    bad = ("version: 1\nrepowiki:\n  documents:\n    - just a string\n"
+           "knowledgecard:\n  notes: []\n")
+    d = os.path.join(root_w := str(tmp_path), "hand")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, "plan.yaml")
+    with open(f, "w", encoding="utf-8") as fh:
+        fh.write(bad)
+    import types as _t
+    from pwiki_lib.config import Ctx
+    ctx = Ctx(_t.SimpleNamespace(repo=d, root=d, locale="zh"))
+    rc = qoderplan._lint(ctx, f)
+    assert rc in (config.EXIT_OK, config.EXIT_GATE), "lint 自己崩了"
+    del yaml_dump, root_w
+
+
+def test_r7_27_yamlite_dash_level_comment():
+    """条目中段与 '- ' 同缩进的注释不再让余下字段 unparsed。"""
+    from pwiki_lib.yamlite import yaml_load
+    doc = yaml_load("items:\n  - x: 1\n  # note\n    y: 2\n")
+    assert doc == {"items": [{"x": 1, "y": 2}]}, doc
+
+
+def test_r7_28_yamlite_chomping():
+    """三种 chomping 指示符按规范: |- strip / | clip / |+ keep。"""
+    from pwiki_lib.yamlite import yaml_load
+    assert yaml_load("a: |-\n  l1\n  l2\n") == {"a": "l1\nl2"}
+    assert yaml_load("a: |\n  l1\n  l2\n") == {"a": "l1\nl2\n"}
+    # |+ 的多尾空行不做(空行在行过滤层已丢), 等效 clip —— 单尾换行保留
+    assert yaml_load("a: |+\n  l1\n\n") == {"a": "l1\n"}

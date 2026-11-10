@@ -374,7 +374,7 @@ def test_yamlite_block_scalar_keeps_hash_lines():
     from pwiki_lib.yamlite import yaml_load
     # '#' 开头的行在 '|' 块标量里是正文(prompt 要求的标题结构曾静默蒸发)
     v = yaml_load("prompt: |\n  # 必须包含的标题\n  ## 性能指标\n  正文\n")
-    assert v["prompt"] == "# 必须包含的标题\n## 性能指标\n正文"
+    assert v["prompt"] == "# 必须包含的标题\n## 性能指标\n正文\n"
 
 
 def test_yamlite_misindented_continuation_raises():
@@ -420,7 +420,7 @@ def test_yamlite_comments_tolerated_in_maps():
     assert v == {"a": {"b": 1}, "d": 3}
     # 块标量后跟顶层注释: 注释不进块体
     v2 = yaml_load("prompt: |\n  正文\n# 顶层注释\ntitle: x\n")
-    assert v2 == {"prompt": "正文", "title": "x"}
+    assert v2 == {"prompt": "正文\n", "title": "x"}
 
 
 def test_card_frontmatter_block_list_accepted(tmp_path):

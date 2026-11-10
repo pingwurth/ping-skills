@@ -59,7 +59,8 @@ def test_multiline_via_quoted_scalar():
 def test_block_scalar_accepted():
     """| 块标量可被解析(手写文件友好); 发射器不产出它。"""
     obj = yamlite.yaml_load("hints: |\n    line1\n    line2\n")
-    assert obj == {"hints": "line1\nline2"}
+    # r7 #28: clip 按规范恰一个尾换行
+    assert obj == {"hints": "line1\nline2\n"}
 
 
 def test_flow_list_roundtrip():

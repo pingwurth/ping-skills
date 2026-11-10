@@ -164,7 +164,10 @@ def compose_export_content(ctx: Ctx, p, style: str, all_paths: set,
     # 只改导出文件, DB 仍存 writer 原稿)
     content, n_clamp = gates.fix_off_by_one(content, ctx.repo)
     n_links += n_clamp
-    if p["kind"] != "page":
+    # r7 #23: kind 容错 —— 无 kind 键的合法计划页(validate_plan 用
+    # .get('kind','page') 放行)曾让 validate --content --fix 在裸索引处
+    # KeyError 崩掉。rowget 兼容 sqlite3.Row 与 dict 两种调用方
+    if str(gates.rowget(p, "kind", "page") or "page") != "page":
         return content, n_links
     if not export_injects(ctx, style, plan):
         # 判定收敛到 export_injects(注入侧与剥除侧共用)—— 曾 compose 看

@@ -259,7 +259,12 @@ class Ctx:
             self._info(f"note: configured repo path missing ({stored_repo}); "
                        f"using {self.repo}")
         if self.locale is None:
-            self.locale = self.config.get("locale", "zh")
+            # r7 #24: 显式 JSON null 走默认 —— config.get 的默认只管缺键,
+            # locale=None 曾让 partition 的 SELECT WHERE locale=NULL 永不
+            # 命中、INSERT OR IGNORE 被 NOT NULL 静默吸收返回 None, 首个
+            # 消费者裸崩
+            loc = self.config.get("locale")
+            self.locale = loc if isinstance(loc, str) and loc else "zh"
         from .db import WikiDB, SchemaVersionError   # 惰性导入(db 导入本模块, 避免环)
         from .util import die                        # 局部导入避免环(同 __init__)
         try:

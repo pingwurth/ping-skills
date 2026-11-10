@@ -191,6 +191,11 @@ def apply_layer_result(ctx, plan: dict, state: dict, text: str,
     problems += [f"存量条目不是映射(跳过): {a!r}" for a in bad_articles]
     articles = [a for a in state.get("articles", [])
                 if isinstance(a, dict)]
+    # r7 #25: 坏条目同时从 state 持久层清出 —— 只过滤局部列表时, 同一次
+    # apply 的收尾(:a.get)与后续 status/commit 照样在坏条目上裸崩,
+    # _save_layers 还把坏条目原样写回盘
+    if bad_articles:
+        state["articles"] = articles
     if parent_slug:
         parent_node = next((a for a in articles
                             if a.get("slug") == parent_slug), None)
@@ -428,7 +433,9 @@ def cmd_plan_layers(ctx: Ctx, args) -> int:
             info(f"保留计划内已有、本轮分层未覆盖的手编页 {kept_manual} 个"
                  "(整体重建用 `pwiki plan --reset`)")
         plan["pages"] = merged + kept_sheets
-        plan["schema_version"] = max(3, int(plan.get("schema_version") or 2))
+        # r7 #21: as_int 容错(同 planner; 曾在 validate_plan 之前崩,
+        # 校验器的干净报错不可达)
+        plan["schema_version"] = max(3, as_int(plan.get("schema_version"), 2))
         assign_paths(plan, ctx.locale)
         # 保存前过自家 validate(themes 路线同款闸): 预算/深度只作为 payload
         # 建议曾无门 —— commit 落盘的 plan 自己都过不了 begin, 规划全废

@@ -202,11 +202,11 @@ def test_p0_10_cite_lines_counts_beyond_1mb(tmp_path):
 def test_p0_13_yaml_block_scalar_keeps_separator_lines():
     from pwiki_lib.yamlite import yaml_load
     v = yaml_load("prompt: |\n  step one\n  ---\n  step two\n")
-    assert v["prompt"] == "step one\n---\nstep two"
+    assert v["prompt"] == "step one\n---\nstep two\n"
     # 列表项内的块标量同样保留(virt 行重组路径)
     v2 = yaml_load("pages:\n  - id: a\n    prompt: |\n      step\n"
                    "      ---\n      more\n")
-    assert v2["pages"][0]["prompt"] == "step\n---\nmore"
+    assert v2["pages"][0]["prompt"] == "step\n---\nmore\n"
     # 顶层文档分隔符: 首/尾跳过; 中途出现显式报错(多文档不支持)
     assert yaml_load("---\na: 1\n") == {"a": 1}
     assert yaml_load("a: 1\n---\n") == {"a": 1}

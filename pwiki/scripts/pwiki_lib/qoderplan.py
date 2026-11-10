@@ -151,6 +151,8 @@ def _emit(ctx: Ctx, out_path: str) -> int:
 def _notes_from_plan(plan: dict) -> list:
     notes = []
     for n in (plan.get("author_notes") or [])[:CAP_NOTES_COUNT]:
+        if not isinstance(n, dict):
+            continue   # r7 #26: 手编标量条目不崩 --emit(其余条目照常)
         text = str(n.get("text") or "").strip()
         if not text:
             continue    # 空文本 note 被 normalizeNotes 静默丢弃
@@ -187,6 +189,12 @@ def _check_caps(documents: list, notes: list) -> list:
     warns = []
     titles_seen = {}
     for i, doc in enumerate(documents):
+        if not isinstance(doc, dict):
+            # r7 #26: lint 存在的意义就是预检手写文件 —— 标量条目曾让
+            # 专职预检的自己 AttributeError 裸崩 exit 1
+            warns.append(f"documents[{i}]: 条目必须是映射(got "
+                         f"{type(doc).__name__}): {doc!r}")
+            continue
         title = str(doc.get("title") or "")
         goal = str(doc.get("goal") or "")
         tb = len(title.encode("utf-8"))
@@ -227,6 +235,8 @@ def _check_caps(documents: list, notes: list) -> list:
         titles_seen.setdefault(title.strip(), i)
     dup = {}
     for i, doc in enumerate(documents):
+        if not isinstance(doc, dict):   # r7 #26: 标量条目(上面已 warn)
+            continue
         t = str(doc.get("title") or "").strip()
         if t in titles_seen and titles_seen[t] != i:
             dup.setdefault(t, [titles_seen[t]]).append(i)
