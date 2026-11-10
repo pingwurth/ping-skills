@@ -49,7 +49,10 @@ def build_digest(ctx: Ctx, plan: dict, inv: dict) -> str:
             lines.append(f"- {label}命令：{shown}")
     if len(lines) and lines[-1] != "":
         lines.append("")
-    mods = plan_modules(plan)
+    # r8 #27: cmd_digest 从不跑 validate_plan —— 共享摘要(写手全队的前置
+    # 步骤)对标量条目裸崩 exit 1, 而"能点名坏条目"的 validate 是另一个
+    # 后续步骤; 消费面只取 dict 条目, 标量条目留给 validate 报
+    mods = [m for m in plan_modules(plan) if isinstance(m, dict)]
     if mods:
         lines += ["## 模块表", "",
                   "| id | 标题 | 目录 | 类型 | 依赖 |", "|---|---|---|---|---|"]
@@ -57,7 +60,9 @@ def build_digest(ctx: Ctx, plan: dict, inv: dict) -> str:
             # depends_on 的合法形态是 str 或 {path: ...}(validate_plan 两态
             # 都收)—— 曾假定 str, dict 条目让 join 直接 TypeError
             dep_list = []
-            for d in m.get("depends_on") or []:
+            # r8 #27: 标量 depends_on 逐字符迭代同理跳过(validate 负责报错)
+            _deps = m.get("depends_on")
+            for d in (_deps if isinstance(_deps, list) else []):
                 v = d.get("path") if isinstance(d, dict) else d
                 if v:
                     dep_list.append(str(v))
@@ -70,6 +75,8 @@ def build_digest(ctx: Ctx, plan: dict, inv: dict) -> str:
     if pages:
         lines += ["## 页面目录（标题 · id · 父）", ""]
         for p in pages:
+            if not isinstance(p, dict):   # r8 #27: 同 mods, 标量条目跳过
+                continue
             kind = p.get("kind", "page")
             tag = ""
             if kind == "module_sheet":
@@ -84,6 +91,8 @@ def build_digest(ctx: Ctx, plan: dict, inv: dict) -> str:
     if cards:
         lines += ["## 知识卡", ""]
         for c in cards:
+            if not isinstance(c, dict):   # r8 #27: 同 mods
+                continue
             lines.append(f"- [{c.get('kind')}] {c.get('title')} · {c.get('id')}")
         lines.append("")
     # 活术语表(从 DB 再生)

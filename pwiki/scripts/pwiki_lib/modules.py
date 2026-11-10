@@ -783,7 +783,17 @@ def cmd_modules(args) -> int:
             # 当 moved-out 孤儿剪除。其余人工编辑面一律原样保留。
             info("--reset: 仅重导 modules 注册表, 计划其余内容保持不变")
         else:
-            old_by_id = {str(m.get("id")): m for m in plan.get("modules") or []}
+            # r8 #22: 模块条目形状门(validate_plan/cmd_plan 之后的第三个
+            # 未设防入口)—— 标量条目曾让昂贵的 decompose 跑完后在这里
+            # AttributeError exit 1(traceback 代门禁错误)
+            _old_mods = plan.get("modules") or []
+            _bad = next((m for m in _old_mods if not isinstance(m, dict)),
+                        None)
+            if _bad is not None:
+                _u.die(f"modules 条目必须是映射(got {_bad!r}) — 先修 "
+                       "wiki_plan.yaml(`pwiki validate` 定位)",
+                       config.EXIT_GATE)
+            old_by_id = {str(m.get("id")): m for m in _old_mods}
             # 保留人工编辑过的标题/notes/依赖(与分解结果按 id 合并, 分解赢在结构)
             for m in registry:
                 old = old_by_id.get(m["id"])
@@ -794,7 +804,11 @@ def cmd_modules(args) -> int:
                     if old.get(field) not in (None, "", []):
                         m[field] = old[field]
         plan["modules"] = registry
-        plan["schema_version"] = max(3, int(plan.get("schema_version") or 2))
+        # r8 #23: 第三处裸 int() 换共享属主(planner.bump_schema_version)
+        # —— 非数值 schema_version 曾在 decompose 之后、save_plan 之前
+        # ValueError exit 1
+        from .planner import bump_schema_version
+        plan["schema_version"] = bump_schema_version(plan)
     else:
         plan = {
             "schema_version": 3, "locale": ctx.locale, "style": ctx.style,

@@ -342,6 +342,25 @@ def entry_shape_errors(plan: dict) -> list:
     return errs
 
 
+def die_on_entry_shape(plan: dict) -> None:
+    """cmd_plan 家族各入口的共享形状门(r8 #18/#28): r7 #19 的门只落在
+    增量分支, themes/reset/layers 各自的先行返回曾绕过它 —— 标量条目让
+    昂贵规划跑完后再裸崩 exit 1(traceback 代门禁错误)。"""
+    errs = entry_shape_errors(plan)
+    if errs:
+        for e in errs:
+            print(f"  error: {e}", file=sys.stderr)
+        die("plan 条目形状非法 — 先修 wiki_plan.yaml(`pwiki validate` 定位)",
+            config.EXIT_GATE)
+
+
+def bump_schema_version(plan: dict) -> int:
+    """写入侧的 schema_version 抬升(单一属主, r8 #23): 容错到 2 再 max 3
+    —— `pwiki modules` 曾是 planner/layers 之外第三处裸 int()(非数值
+    ValueError exit 1)。"""
+    return max(3, as_int(plan.get("schema_version"), 2))
+
+
 def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
                   warn_missing: bool = False, strict: bool = True) -> tuple:
     """计划门禁。strict = begin/FULL 口径(形状下限为错误); update 路径传
@@ -397,7 +416,19 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
             # c049 同族: 计划 scope 不得逃出 repo(绝对/../ 一律拒)
             _check_repo_path(ctx, s, f"module {mid}: scope",
                              errors, warnings, warn_missing)
-        for dep in (m.get("depends_on") or []) + (m.get("related_to") or []):
+        # r8 #19: 标量 depends_on/related_to 曾直接 str+list TypeError 打死
+        # 校验器自己(应报 exit 2 的门禁 exit 1; r7 #17/#18 修了 scope/
+        # 模块条目, 独漏紧邻下方这两个字段)—— 先归一成列表再比
+        _dep_lists = []
+        for _key in ("depends_on", "related_to"):
+            _v = m.get(_key)
+            if _v is None:
+                _v = []
+            elif not isinstance(_v, list):
+                errors.append(f"module {mid}: {_key} 必须是列表(got {_v!r})")
+                _v = []
+            _dep_lists.append(_v)
+        for dep in _dep_lists[0] + _dep_lists[1]:
             dep = dep.get("path") if isinstance(dep, dict) else dep
             if dep and dep not in mod_ids:
                 errors.append(f"module {mid}: 未知 depends_on/related_to: {dep}")
@@ -506,6 +537,16 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
             srcs = []
         if not srcs and not warn_missing:
             warnings.append(f"page {pid}: 无 source_files(无证据页)")
+        # r8 #21: 页级 scope/modules 形状守卫(r7 #17 只给了模块 scope)
+        # —— 裸串 scope 曾逐字符过 _check_repo_path, 出"路径不存在:
+        # s / r / c"式垃圾诊断; 标量 modules 把单字符喂进覆盖检查
+        _pscope = p.get("scope")
+        if _pscope is not None and not isinstance(_pscope, list):
+            errors.append(f"page {pid}: scope 必须是列表(got {_pscope!r})")
+            _pscope = []
+        _pmods = p.get("modules")
+        if _pmods is not None and not isinstance(_pmods, list):
+            errors.append(f"page {pid}: modules 必须是列表(got {_pmods!r})")
         for s in srcs:
             s = str(s)
             if not s:
@@ -514,7 +555,7 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
             # 谓词曾与模块/卡片门漂移 —— 同一个坏路径三个门行为不一致
             _check_repo_path(ctx, s, f"page {pid}: 源", errors, warnings,
                              warn_missing, is_dir=s.endswith("/"))
-        for s in p.get("scope") or []:
+        for s in _pscope or []:
             _check_repo_path(ctx, s, f"page {pid}: scope",
                              errors, warnings, warn_missing, is_dir=True)
         if not str(p.get("prompt", "")).strip():
@@ -618,8 +659,11 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
         module_keys[mid] = {k.rstrip("/") for k in keys if k}
     covered = set()
     for p in tree:
-        for mod in (p.get("modules") or []):
-            covered.add(str(mod).rstrip("/"))
+        # r8 #21: 只认列表形态的 modules(标量已在页循环报错)—— 逐字符
+        # 进覆盖集会让覆盖硬规对着单字符比对
+        _pm = p.get("modules")
+        if isinstance(_pm, list):
+            covered.update(str(mod).rstrip("/") for mod in _pm)
     for m in modules:
         mid = str(m.get("id", ""))
         if mid == "root":
@@ -991,6 +1035,10 @@ def cmd_plan(args) -> int:
                 "title": "Repo Wiki", "repo_summary": "", "modules": [],
                 "pages": [], "cards": [],
             })
+        # r8 #18: 形状门前置 —— 增量分支的共享门(:1050 家族)在本分支
+        # 返回之后, 标量 pages/cards 条目曾让 --themes 跑完全量语料规划后
+        # 在 merge_manual/themes 裸崩 exit 1(昂贵工作白做)
+        die_on_entry_shape(plan_t)
         return themes.cmd_plan_themes(ctx, args, plan_t)
 
     if getattr(args, "seed", False) or getattr(args, "reset", False) or not has_plan:
@@ -1000,6 +1048,17 @@ def cmd_plan(args) -> int:
         # 已发布 knowledge/<模块>/*.md 当 moved-out 孤儿整树剪掉(themes
         # 路线的同款守卫)
         old = plan if plan is not None else (load_plan(ctx) if has_plan else {})
+        # r8 #20: reset/seed 不跑 validate_plan —— modules 注册表是唯一从
+        # 旧计划带入 scaffold_pages 的条目集, 标量/缺 id 条目曾让 scaffold
+        # 裸 KeyError('id')/AttributeError exit 1(增量分支的共享门盖不到
+        # 这条先行返回的路; pages/cards 整体重建不需旧形状)
+        _old_mods = old.get("modules") or []
+        _bad_mod = next((m for m in _old_mods
+                         if not isinstance(m, dict)
+                         or not str(m.get("id") or "").strip()), None)
+        if _bad_mod is not None:
+            die(f"modules 条目必须是带 id 的映射(got {_bad_mod!r}) — 先修 "
+                "wiki_plan.yaml", config.EXIT_GATE)
         old_pages = old.get("pages") if isinstance(old.get("pages"), list) \
             else []
         kept_sheets = [dict(p) for p in old_pages
@@ -1045,14 +1104,10 @@ def cmd_plan(args) -> int:
     if plan is None:
         plan = load_plan(ctx)
     # r7 #19: 增量分支(--sheets/--deps/--aliases/--review)从不跑
-    # validate_plan —— 条目形状至少过共享门, 否则标量条目让各路线
-    # AttributeError 裸崩 exit 1
-    _shape_errs = entry_shape_errors(plan)
-    if _shape_errs:
-        for e in _shape_errs:
-            print(f"  error: {e}", file=sys.stderr)
-        die("plan 条目形状非法 — 先修 wiki_plan.yaml(`pwiki validate` 定位)",
-            config.EXIT_GATE)
+    # validate_plan —— 条目形状至少过共享门(单一属主 die_on_entry_shape,
+    # r8 #18/#28 已把 themes/layers 分支也并入门下), 否则标量条目让各
+    # 路线 AttributeError 裸崩 exit 1
+    die_on_entry_shape(plan)
     changed = False
     sheets_profile = getattr(args, "sheets", None)
     if sheets_profile:
@@ -1102,7 +1157,7 @@ def cmd_plan(args) -> int:
         assign_paths(plan, ctx.locale)
         # r7 #21: as_int 容错 —— `schema_version: three` 曾在算完工作、
         # save_plan 之前 ValueError 裸崩(exit 1), 改动静默不落盘
-        plan["schema_version"] = max(3, as_int(plan.get("schema_version"), 2))
+        plan["schema_version"] = bump_schema_version(plan)
         save_plan(ctx, plan)
         info(f"plan 已更新: {ctx.plan_path}")
     else:

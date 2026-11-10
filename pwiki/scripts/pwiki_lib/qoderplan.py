@@ -242,6 +242,9 @@ def _check_caps(documents: list, notes: list) -> list:
     if len(notes) > CAP_NOTES_COUNT:
         warns.append(f"notes {len(notes)} 条 > {CAP_NOTES_COUNT} — 截断")
     for i, n in enumerate(notes):
+        if not isinstance(n, dict):   # r8 #24: r7 #26 修了 documents 循环,
+            warns.append(f"notes[{i}]: 条目必须是映射 — 忽略")  # 独漏本循环
+            continue
         nb = len(str(n.get("text") or "").encode("utf-8"))
         if not str(n.get("text") or "").strip():
             warns.append(f"notes[{i}]: 空文本 — 静默丢弃")

@@ -36,7 +36,7 @@ def _load_layers(ctx: Ctx):
         return None
     try:
         with open(p, encoding="utf-8") as fh:
-            return json.load(fh)
+            state = json.load(fh)
     except ValueError:
         # 半份文件(截断/ENOSPC)是有价值的手编会话状态 —— 曾吞成"无状态",
         # 把用户引进 init 一键覆盖可挽救的大纲
@@ -45,6 +45,21 @@ def _load_layers(ctx: Ctx):
     except OSError as e:
         die(f"{p} 读取失败({e})", config.EXIT_ENV)
         return None
+    # r8 #25/#26: 会话状态形状在读取边界归一 —— 报错文案引导手工挽救,
+    # 挽救出的任意形态(缺 articles 键/非列表/标量条目)曾让 apply(KeyError)
+    # 与 status(AttributeError)/commit(a["depth"] TypeError)各自裸崩
+    # exit 1; r7 #25 的非 dict 清理只盖 apply 内部, 与其"后续 status/
+    # commit 不再照崩"的声明相悖。键名拼错的挽救态宁可响亮拒绝(默认 []
+    # 会把挽救出的大纲静默清空)
+    if not isinstance(state, dict):
+        die(f"{p} 顶层必须是映射(手工挽救后重试) — 或删除后 "
+            "`pwiki plan --layers init`", config.EXIT_GATE)
+    arts = state.get("articles")
+    if not isinstance(arts, list) or \
+            any(not isinstance(a, dict) for a in arts):
+        die(f"{p} articles 必须是映射列表(手工挽救后重试) — 或删除后 "
+            "`pwiki plan --layers init`", config.EXIT_GATE)
+    return state
 
 
 def _save_layers(ctx: Ctx, state) -> None:
@@ -349,6 +364,11 @@ def layer_status_text(state: dict) -> str:
 def cmd_plan_layers(ctx: Ctx, args) -> int:
     from .planner import load_plan
     plan = load_plan(ctx)
+    # r8 #28: 计划形状门先于一切裸 .get(commit 的 kept_sheets/materialize
+    # 曾对标量 pages/modules 条目 AttributeError exit 1, 先于自家
+    # validate_plan 门报出干净错误)
+    from .planner import die_on_entry_shape
+    die_on_entry_shape(plan)
     profile = ctx.config.get("profile", "standard")
     ac = (args.layers or "").strip()
     state = _load_layers(ctx)
@@ -422,7 +442,8 @@ def cmd_plan_layers(ctx: Ctx, args) -> int:
         # "重建只经 --reset"; themes 路线 c027 同款契约): 同 id 保留手工
         # 字段, 计划里有而本轮分层没再输出的内容页原样保留, 只有
         # `pwiki plan --reset` 才整体重建
-        from .planner import MANUAL_FIELDS, assign_paths, validate_plan
+        from .planner import (MANUAL_FIELDS, assign_paths, bump_schema_version,
+                              validate_plan)
         from .themes import (load_manual_baseline, merge_manual,
                              save_manual_baseline)
         # 三路合并基线(themes 路线同款): 显式清空/删键也是人工编辑
@@ -437,7 +458,7 @@ def cmd_plan_layers(ctx: Ctx, args) -> int:
         plan["pages"] = merged + kept_sheets
         # r7 #21: as_int 容错(同 planner; 曾在 validate_plan 之前崩,
         # 校验器的干净报错不可达)
-        plan["schema_version"] = max(3, as_int(plan.get("schema_version"), 2))
+        plan["schema_version"] = bump_schema_version(plan)
         assign_paths(plan, ctx.locale)
         # 保存前过自家 validate(themes 路线同款闸): 预算/深度只作为 payload
         # 建议曾无门 —— commit 落盘的 plan 自己都过不了 begin, 规划全废

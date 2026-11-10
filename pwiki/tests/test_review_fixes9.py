@@ -324,3 +324,142 @@ def test_r8_16_generation_state_reads_baseline_once(tmp_path, monkeypatch):
     publish._write_generation_state(ctx, {"id": 1, "locale": "zh"},
                                     {"id": "r1"}, pages)
     assert calls["n"] == 1, calls
+
+
+# --------------------------------------------------------------------------- #
+# 批次②: 手编面 traceback 代门禁错误(r8 #18-#28)
+# --------------------------------------------------------------------------- #
+
+def _corrupt_plan(ctx, mutate):
+    from pwiki_lib import planner
+    plan = planner.load_plan(ctx)
+    mutate(plan)
+    planner.save_plan(ctx, plan)
+
+
+def test_r8_18_themes_gate_before_dispatch(tmp_path):
+    """`plan --themes` 对标量 pages 条目报 EXIT_GATE, 不再跑完全量规划后
+    AttributeError exit 1。"""
+    repo, root = _fixture(tmp_path)
+
+    def bad(plan):
+        plan["pages"].append("快速开始")
+    _corrupt_plan(_ctx(repo, root), bad)
+    with pytest.raises(SystemExit) as ei:
+        _cli(["plan", "--themes", "--repo", repo.path, "--root", root])
+    assert ei.value.code == config.EXIT_GATE
+
+
+def test_r8_19_validate_plan_scalar_depends_on(tmp_path):
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    from pwiki_lib import planner
+    plan = planner.load_plan(ctx)
+    plan["modules"][0]["depends_on"] = "user-service"
+    errors, _w = planner.validate_plan(ctx, plan, strict=False)
+    assert any("depends_on 必须是列表" in e for e in errors), errors
+
+
+def test_r8_20_reset_gate_on_module_without_id(tmp_path):
+    repo, root = _fixture(tmp_path)
+
+    def bad(plan):
+        plan["modules"].append({"parent": "root", "title": "X"})
+    _corrupt_plan(_ctx(repo, root), bad)
+    with pytest.raises(SystemExit) as ei:
+        _cli(["plan", "--reset", "--repo", repo.path, "--root", root])
+    assert ei.value.code == config.EXIT_GATE
+
+
+def test_r8_21_validate_plan_scalar_page_scope_and_modules(tmp_path):
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    from pwiki_lib import planner
+    plan = planner.load_plan(ctx)
+    page = next(p for p in plan["pages"]
+                if p.get("kind") not in ("module_sheet", "card"))
+    page["scope"] = "src/"
+    page["modules"] = "services"
+    errors, _w = planner.validate_plan(ctx, plan, strict=False)
+    joined = "\n".join(errors)
+    assert "scope 必须是列表" in joined and "modules 必须是列表" in joined, \
+        errors
+
+
+def test_r8_22_modules_cmd_shape_gate(tmp_path):
+    """`pwiki modules` 对标量模块条目报 EXIT_GATE(decompose 之后不再
+    AttributeError)。"""
+    repo, root = _fixture(tmp_path)
+
+    def bad(plan):
+        plan["modules"].append("oops-scalar")
+    _corrupt_plan(_ctx(repo, root), bad)
+    with pytest.raises(SystemExit) as ei:
+        _cli(["modules", "--repo", repo.path, "--root", root])
+    assert ei.value.code == config.EXIT_GATE
+
+
+def test_r8_23_modules_cmd_tolerates_bad_schema_version(tmp_path):
+    """`pwiki modules` 对非数值 schema_version 容错抬升(bump_schema_version
+    单一属主)—— 曾第三处裸 int() ValueError exit 1。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+
+    def bad(plan):
+        plan["schema_version"] = "three"
+    _corrupt_plan(_ctx(repo, root), bad)
+    assert _cli(["modules", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert planner.load_plan(_ctx(repo, root))["schema_version"] == 3
+
+
+def test_r8_24_qoderplan_notes_scalar_warns():
+    from pwiki_lib.qoderplan import _check_caps
+    warns = _check_caps([], ["oops-scalar"])
+    assert any("必须是映射" in w for w in warns), warns
+
+
+def test_r8_25_26_layers_state_shape_gate(tmp_path):
+    """挽救的 plan-layers.json: 缺 articles 键 / 标量条目 → 干净 EXIT_GATE,
+    apply/status/commit 不再 KeyError/AttributeError。"""
+    import json
+    from pwiki_lib import layers
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    state_path = os.path.join(root, "work", "plan-layers.json")
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    for payload in ({"profile": "standard", "project": "T"},
+                    {"articles": ["oops"]}):
+        with open(state_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        with pytest.raises(SystemExit) as ei:
+            layers._load_layers(ctx)
+        assert ei.value.code == config.EXIT_GATE
+
+
+def test_r8_28_layers_gate_on_scalar_plan_pages(tmp_path):
+    repo, root = _fixture(tmp_path)
+
+    def bad(plan):
+        plan["pages"].append("裸条目")
+    _corrupt_plan(_ctx(repo, root), bad)
+    with pytest.raises(SystemExit) as ei:
+        _cli(["plan", "--layers", "status", "--repo", repo.path,
+              "--root", root])
+    assert ei.value.code == config.EXIT_GATE
+
+
+def test_r8_27_digest_tolerates_scalar_entries():
+    """build_digest 对标量条目跳过(validate 负责报错), 写手共享摘要
+    不再被打死。"""
+    from pwiki_lib.digest import build_digest
+
+    class _CtxLite:
+        db = None
+
+        def partition(self):
+            return {"id": 1}
+    out = build_digest(_CtxLite(),
+                       {"modules": ["auth-core"], "pages": [], "cards": []},
+                       {})
+    assert "共享摘要" in out
