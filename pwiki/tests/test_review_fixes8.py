@@ -1765,3 +1765,215 @@ def test_r7_28_yamlite_chomping():
     assert yaml_load("a: |\n  l1\n  l2\n") == {"a": "l1\nl2\n"}
     # |+ 的多尾空行不做(空行在行过滤层已丢), 等效 clip —— 单尾换行保留
     assert yaml_load("a: |+\n  l1\n\n") == {"a": "l1\n"}
+
+
+# --------------------------------------------------------------------------- #
+# 第七轮批次④: 状态机 4 + scan 解析器 5 + themes 证据面 6(#29-#43)
+# --------------------------------------------------------------------------- #
+
+def test_r7_29_next_json_stdout_on_early_exits(tmp_path, capsys):
+    """PAUSED 与无活动 run 的 next --json: stdout 恒合法 JSON。"""
+    import json as _json
+    repo, root = _fixture(tmp_path)
+    capsys.readouterr()
+    assert _cli(["next", "--json", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_PRECOND
+    assert _json.loads(capsys.readouterr().out)["status"] == "no_run"
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    assert _cli(["pause", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    capsys.readouterr()
+    assert _cli(["next", "--json", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_PRECOND
+    assert _json.loads(capsys.readouterr().out)["status"] == "paused"
+
+
+def test_r7_30_regenerate_queue_window_cancelled(tmp_path, monkeypatch):
+    """regenerate 排队后守卫复查: 窗口内被并发 cancel → die 而不是向死
+    run 报"单项重做成功"。"""
+    from pwiki_lib import engine
+    from pwiki_lib.db import WikiDB
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    from pwiki_lib import planner
+    plan = planner.load_plan(ctx)
+    pg = next(p for p in plan["pages"]
+              if isinstance(p, dict) and p.get("id")
+              and p.get("kind", "page") == "page")
+    orig = WikiDB.queue_jobs
+
+    def spy(self, run_id, items, style=""):
+        r = orig(self, run_id, items, style=style)
+        self.update_run(run_id, state="CANCELLED", finished_at=now_iso())
+        return r
+
+    monkeypatch.setattr(WikiDB, "queue_jobs", spy)
+    with pytest.raises(SystemExit) as ei:
+        engine.cmd_regenerate(_ns(repo, root, page_id=str(pg["id"]),
+                                  force=True, claim=None, error=""))
+    assert ei.value.code == config.EXIT_PRECOND
+    assert ctx.db.active_run(pid) is None
+
+
+def test_r7_31_begin_interrupt_cancels_run(tmp_path, monkeypatch):
+    """begin 排队段 Ctrl-C: 死 DIRECTORY_GENERATING run 落 CANCELLED
+    (不再留 next 永报 queueing 的死锁态)。"""
+    from pwiki_lib import engine
+    from pwiki_lib.db import WikiDB
+    repo, root = _fixture(tmp_path)
+    orig = WikiDB.queue_jobs
+
+    def boom(self, run_id, items, style=""):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(WikiDB, "queue_jobs", boom)
+    with pytest.raises(KeyboardInterrupt):
+        engine.cmd_begin(_ns(repo, root))
+    monkeypatch.setattr(WikiDB, "queue_jobs", orig)
+    ctx = _ctx(repo, root)
+    assert ctx.db.active_run(ctx.partition()["id"]) is None, \
+        "中断后留下死 DG run(next 永报排队中)"
+
+
+def test_r7_32_final_state_sees_late_fail(tmp_path, monkeypatch):
+    """counts 快照后窗口内的 fail --force 对终态可见: run 报
+    PARTLY_COMPLETED 而不是 COMPLETED。"""
+    from pwiki_lib import engine, gates
+    repo, root = _fixture(tmp_path)
+    assert _cli(["begin", "--repo", repo.path, "--root", root]) == \
+        config.EXIT_OK
+    ctx = _ctx(repo, root)
+    run = ctx.db.active_run(ctx.partition()["id"])
+    _write_all_jobs(repo, root)
+    flipped = []
+    _orig_gate = gates.gate_item
+
+    def spy(content, item, repo_, style, phase="submit", mod_titles=None):
+        if not flipped and phase == "lining":
+            # LINING 已置位、counts 已快照: 模拟窗口内操作员对另一个
+            # completed job 落笔 fail --force 的等价裸写
+            flipped.append(1)
+            other = next(j["page_id"] for j in ctx.db.jobs(run["id"])
+                         if j["state"] == "completed"
+                         and j["page_id"] != item["page_id"])
+            ctx.db.set_job_state(run["id"], other, "failed",
+                                 error="late-fail", claim_token="")
+        return _orig_gate(content, item, repo_, style, phase=phase,
+                          mod_titles=mod_titles)
+
+    monkeypatch.setattr(gates, "gate_item", spy)
+    assert _cli(["finish", "--repo", repo.path, "--root", root,
+                 "--yes"]) == config.EXIT_OK
+    row = ctx.db.conn.execute(
+        "SELECT state FROM run WHERE id=?", (run["id"],)).fetchone()
+    assert row["state"] == "PARTLY_COMPLETED", \
+        f"窗口内的 fail --force 对终态不可见: {row['state']}"
+
+
+def test_r7_33_to_37_scan_parsers(tmp_path):
+    """parse_pom 子 pom / pyproject 说明符与尾注释 / gradle 多项 / uv。"""
+    from pwiki_lib.scan import (parse_gradle_settings, parse_pom,
+                                 parse_pyproject)
+    child = tmp_path / "child.pom.xml"
+    child.write_text(
+        "<project><parent><groupId>acme</groupId>"
+        "<artifactId>acme-parent</artifactId></parent>"
+        "<artifactId>child-lib</artifactId></project>", encoding="utf-8")
+    assert parse_pom(str(child))["artifact"] == "child-lib"
+
+    py = tmp_path / "pyproject.toml"
+    py.write_text(
+        "[project]\nname = \"demo\"\n"
+        "dependencies = [\"sqlalchemy>=2.0\", \"onnxruntime>=1.18\"]\n",
+        encoding="utf-8")
+    out = parse_pyproject(str(py))
+    assert out["dependencies"] == ["sqlalchemy", "onnxruntime"], out
+
+    py2 = tmp_path / "py2.toml"
+    py2.write_text(
+        "[project]\ndependencies = [\"foo\"]  # pinned\n"
+        "[tool.poetry.dependencies]\npython = \"^3.11\"\n"
+        "requests = \"^2\"\n"
+        "[tool.uv]\nindex-url = \"https://x\"\n", encoding="utf-8")
+    out2 = parse_pyproject(str(py2))
+    assert out2["dependencies"] == ["foo", "python", "requests"], out2
+
+    gr = tmp_path / "settings.gradle"
+    gr.write_text(
+        "include ':app', ':lib', ':service:api'\ninclude ':extra'\n",
+        encoding="utf-8")
+    assert parse_gradle_settings(str(gr))["includes"] == \
+        ["app", "lib", "service:api", "extra"]
+
+
+def test_r7_38_anchor_empty_decline():
+    """锚定源池为空的子主题丢弃入 theme_declined(P45 评审踪迹)。"""
+    from pwiki_lib.themes import instantiate_pack
+    import types as _t
+
+    class _B:
+        style, locale = "concise", "zh"
+        overrides: dict = {}
+        theme_declined: list = []
+        theme_gaps: list = []
+        title_collisions: list = []
+        sibling_trims: list = []
+        pages: list = []
+
+        def add(self, **kw):
+            page = dict(kw, id=kw.get("page_id"), scope=kw.get("scope") or [])
+            self.pages.append(page)
+            return page
+
+    class _C:
+        def collect(self, spec=None, pool=None):
+            # pack 父证据 ≥2 且 patterns 命中根目录文件(锚定目录=''),
+            # 子项证据全在 docs/(锚外) → anchored 空
+            if pool is None:
+                return [{"path": "docker-compose.yml", "lines": 50,
+                         "lang": "yaml"},
+                        {"path": "deploy.sh", "lines": 40, "lang": "shell"}]
+            return [{"path": f"docs/ci{i}.py", "lines": 10,
+                     "lang": "python"} for i in range(3)]
+
+        def module_for(self, path):
+            return ""
+
+    pack = {"key": "deploy", "title": "部署", "kind": "architecture",
+            "patterns": ["docker"], "min": 2,
+            "children": [{"key": "ci"}],
+            "source_keywords": ["deploy"]}
+    profile = {"source_limit": 4, "pack_scale": 1.0, "cap": 8,
+               "min_files": 2}
+    b = _B()
+    instantiate_pack(b, _C(), pack, profile, set())
+    assert any(d.get("child") == "ci" and "anchored" in d.get("reason", "")
+               for d in b.theme_declined), b.theme_declined
+
+
+def test_r7_39_seed_excludes_never_cite():
+    """is_qualifying_source 单一谓词含 is_never_cite(播种不再收
+    pnpm-lock/CLAUDE.md)。"""
+    from pwiki_lib import themes
+    assert themes.is_qualifying_source({"path": "src/app.py",
+                                        "lang": "python"})
+    assert not themes.is_qualifying_source({"path": "pnpm-lock.yaml",
+                                            "lang": "yaml"})
+    assert not themes.is_qualifying_source({"path": "CLAUDE.md",
+                                            "lang": "markdown"})
+    assert not themes.is_qualifying_source({"path": "src/app.test.py",
+                                            "lang": "python"})
+
+
+def test_r7_43_required_sections_submit_warns():
+    """required_sections 缺口在 submit 也警告(writer 尽早知道)。"""
+    from pwiki_lib.gates import gate_item
+    content = "# T\n\n## A\n\nx [README.md:1-2](file://README.md#L1-L2)\n"
+    item = {"kind": "page", "title": "T", "required_sections": ["A", "B", "C"]}
+    errs, warns = gate_item(content, item, ".", "concise", phase="submit")
+    assert any("schema/sections" in w for w in warns), warns
+    assert not any("schema/sections" in e for e in errs), errs

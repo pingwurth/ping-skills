@@ -357,8 +357,12 @@ def gate_item(content: str, item, repo: str, style: str,
     h2 = re.findall(r"^## (.+)$", prose, re.M)
     required = json_list(rowget(item, "required_sections"))
     if required:
-        if len(h2) < len(required) and strict:
-            (errors if p.get("section_sources") == "error" else warnings).append(
+        if len(h2) < len(required):
+            # r7 #43: submit(strict=False)也报缺口(警告级)—— 曾整条消息
+            # 被关进 strict 分支, writer 只在 finish 硬拒时才知道缺口,
+            # 双严重度模型(submit 警告省一轮重写)在此规则上失效
+            (errors if (strict and p.get("section_sources") == "error")
+             else warnings).append(
                 f"schema/sections: 计划要求 {len(required)} 节, 实得 {len(h2)}")
     else:
         job_type = str(rowget(item, "article_type") or

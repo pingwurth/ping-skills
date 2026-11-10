@@ -702,7 +702,9 @@ def test_p16_parse_pyproject_pep621(tmp_path):
         encoding="utf-8")
     out = parse_pyproject(str(f))
     assert out["name"] == "demo"
-    assert out["dependencies"] == ["requests>=2.28", "pydantic>=2",
+    # r7 #34: PEP-621 依赖剥版本说明符存裸名(poetry 分支同口径,
+    # 依赖卡门才匹配得到)
+    assert out["dependencies"] == ["requests", "pydantic",
                                    "python", "httpx"], out["dependencies"]
 
 

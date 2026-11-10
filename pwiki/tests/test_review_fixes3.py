@@ -590,7 +590,10 @@ def test_p1_24_next_json_stdout_pure_on_no_run(tmp_path, capsys):
     assert _cli(["next", "--json", "--repo", repo.path,
                  "--root", root]) == config.EXIT_PRECOND
     cap = capsys.readouterr()
-    assert cap.out == "", f"stdout 混入人类可读行: {cap.out!r}"
+    # r7 #29: 无活动 run 的 stdout 是合法 JSON(编排方 json.loads 不崩)
+    import json as _json
+    assert _json.loads(cap.out)["status"] == "no_run", \
+        f"stdout 不是纯 JSON: {cap.out!r}"
     assert "status:" in cap.err
 
 

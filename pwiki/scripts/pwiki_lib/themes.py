@@ -156,6 +156,15 @@ KIND_TO_TYPE = {"overview": "overview", "architecture": "domain",
 HAND_LANGS = ("typescript", "tsx", "javascript", "python", "go", "rust",
               "java", "kotlin", "proto", "protobuf", "yaml", "sql", "markdown")
 
+def is_qualifying_source(f: dict) -> bool:
+    """D9 播种/回填/伴生过滤共用的合格源谓词(r7 #39: 三份手抄曾各自
+    漂移, 播种份缺 is_never_cite —— pnpm-lock/CLAUDE.md 直入 source)。"""
+    return (f.get("lang") in HAND_LANGS
+            and not is_generated(f["path"])
+            and not match_any(f["path"], P_TEST)
+            and not is_never_cite(f["path"]))
+
+
 
 # --------------------------------------------------------------------------- #
 # overrides(试点标题映射的落点)
@@ -562,9 +571,7 @@ def make_leaves(builder: Builder, corpus: Corpus, parent: dict, spec: dict,
                         f for f in corpus.files
                         if (f["path"] == d or f["path"].startswith(d + "/"))
                         and f["path"] not in have
-                        and not is_generated(f["path"])
-                        and not match_any(f["path"], P_TEST)
-                        and f.get("lang") in HAND_LANGS
+                        and is_qualifying_source(f)
                     ]
                     for f in sorted(cand, key=lambda x: (-(x.get("lines") or 0),
                                                          x["path"])):
@@ -717,6 +724,10 @@ def instantiate_pack(builder: Builder, corpus: Corpus, pack: dict,
         if not child_src:
             child_src = [f["path"] for f in pool_for_src[: profile["source_limit"]]]
         if not child_src:
+            # r7 #38: 锚定源池为空的丢弃也入 theme_declined(P45 契约:
+            # 静默丢弃必须留人工评审踪迹 —— 曾裸 continue 无声蒸发)
+            _decline(child, f"anchored source pool empty (pack anchor "
+                      f"{sorted(anchor_dirs)[:3]})")
             continue
         child_page = builder.add(
             page_id="pack-" + pack["key"] + "-" + child["key"],
@@ -1369,8 +1380,7 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
             page_id="quickstart", title="快速开始", kind="feature", parent=None,
             scope=dirs_of(readme_docs) or ["."], source_files=qsrc,
             priority=980,
-            prompt="创建快速开始指南：环境要求、安装、配置、启动、验证、常见问题。"
-                   "命令必须来自仓库脚本或文档。")
+            prompt=prompt_for("快速开始", "feature", style, builder.locale))
 
     # ---------- packs ----------
     packs = build_packs(builder, corpus, modules)
@@ -1387,6 +1397,10 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
             p = f["path"]
             if not p.endswith((".tsx", ".jsx", ".vue", ".svelte")):
                 continue
+            # r7 #40: 共置测试文件不进 feature 候选(P41 共享谓词曾未
+            # 覆盖本路由 —— __tests__/mockPage.tsx 成了特性页的源)
+            if match_any(p, P_TEST):
+                continue
             parts = p.split("/")
             stem = stem_of(p)
             low = stem.lower()
@@ -1397,6 +1411,8 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
         for f in files:
             p = f["path"]
             if not p.endswith(("page.tsx", "page.ts", "page.js")):
+                continue
+            if match_any(p, P_TEST):   # r7 #40 同上
                 continue
             parts = p.split("/")
             if "app" not in parts:
@@ -1598,10 +1614,7 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
     # P73: 合格候选排序一次 + 路径索引 —— 曾每个薄页对全仓文件列表过一
     # 遍 ~45 项模式检查(几十薄页 × 10k 文件 = 数千万次字符串操作)
     _eligible = sorted(
-        f["path"] for f in files
-        if f.get("lang") in hand_langs
-        and not is_generated(f["path"])
-        and not match_any(f["path"], P_TEST))
+        f["path"] for f in files if is_qualifying_source(f))
     _by_path = {f["path"]: f for f in files}
 
     def backfill_from_scope(page, need):
@@ -1679,10 +1692,7 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
                     if stem_of(f["path"]).lower()[:4] == prim[:4]
                     and f["path"] not in page["source_files"]
                     and f["path"] != prim_path
-                    and f.get("lang") in hand_langs
-                    and not is_generated(f["path"])
-                    and not match_any(f["path"], P_TEST)
-                    and not is_never_cite(f["path"])
+                    and is_qualifying_source(f)
                 ]
                 take(comp, cap=2)
                 comp_dirs = [dirname(s) for s in got]
@@ -1736,7 +1746,10 @@ def run_themes(ctx: Ctx, inv: dict, decomposed: dict, profile_name: str,
             repaired["backfilled"] += len(p["source_files"]) - before
             # 实例化期的 thin 标记在回填到 4 后过期
             if len(p["source_files"]) >= 4 and p.get("evidence_thin") \
-                    and not p.get("skeleton"):
+                    and not p.get("skeleton_scope"):
+                # r7 #42: builder 页携带的是 'skeleton_scope'(:1565 写入)
+                # —— 曾测不存在的 'skeleton' 键恒真, 骨架页被回填后静默
+                # 失去 thin 标记(评审信号丢失)
                 p["evidence_thin"] = False
         for s in p["source_files"]:
             backfill_claims[s] += 1

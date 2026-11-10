@@ -253,7 +253,9 @@ def parse_pyproject(path: str) -> dict:
             # P16: PEP 621 dependencies 数组可跨行 —— 逐项收引号项
             m2 = re.match(r'^["\']([^"\'#]+?)["\']\s*,?\s*(#.*)?$', s)
             if m2:
-                out["dependencies"].append(m2.group(1).strip())
+                dep = re.split(r"[<>=!~\[;\s]", m2.group(1).strip(), 1)[0]
+                if dep:
+                    out["dependencies"].append(dep)
                 continue
             # 末项带闭合括号的合法 TOML(`"bar"]`)既不是纯项也不以 ']'
             # 开头 —— 项曾整个被丢且数组永不收口, in_deps_array 吞掉文件
@@ -274,11 +276,20 @@ def parse_pyproject(path: str) -> dict:
             # (name/version/requires-python/…)全当依赖, 真依赖整批丢失
             inline = s.split("=", 1)[1]
             for m2 in re.finditer(r'["\']([^"\'#]+?)["\']', inline):
-                out["dependencies"].append(m2.group(1).strip())
-            if not inline.rstrip().endswith("]"):
+                # r7 #34: 剥版本说明符存裸名(poetry 分支同口径) ——
+                # 'sqlalchemy>=2.0' 曾原样入库, themes 的依赖卡门
+                # (ARCH_SHAPING_DEPS/basename 词干)永远匹配不到
+                dep = re.split(r"[<>=!~\[;\s]", m2.group(1).strip(), 1)[0]
+                if dep:
+                    out["dependencies"].append(dep)
+            # r7 #37: 判收口前先剥行尾注释 —— '["foo"]  # pinned' 曾因
+            # endswith 检查失配永不收口, in_array 吞掉后续全部段
+            if not inline.split("#", 1)[0].rstrip().endswith("]"):
                 in_deps_array = True
             continue
-        if section in ("[tool.poetry.dependencies]", "[tool.uv]") \
+        # r7 #36: [tool.uv] 不再当依赖来源(段内存的是 index-url 等
+        # 配置项 —— 曾混出 'index-url' 假依赖卡); uv 的真依赖走 [project]
+        if section == "[tool.poetry.dependencies]" \
                 and re.match(r'^[A-Za-z0-9_.-]+\s*=\s*["\']', s):
             out["dependencies"].append(s.split("=", 1)[0].strip())
         if section == "[tool.uv.workspace]" and s.startswith("- "):
@@ -334,14 +345,23 @@ def parse_cargo(path: str) -> dict:
 
 def parse_gradle_settings(path: str) -> dict:
     text = read_text(path)
-    includes = re.findall(r'include\s*\(?\s*["\']([^"\']+)["\']', text)
+    # r7 #35: 按语句迭代再收全部引号项 —— findall 的字面 'include' 前缀
+    # 从上一匹配末尾续扫, 同一语句的其余子项目全部丢弃
+    includes = []
+    for m in re.finditer(r"include\s*\(?([^)\n]*)", text):
+        includes += re.findall(r'["\']([^"\']+)["\']', m.group(1))
     return {"includes": [i.lstrip(":") for i in includes]}
 
 
 def parse_pom(path: str) -> dict:
     text = read_text(path)
+    # r7 #33: 先剥 <parent> 块再取 artifactId —— 子 pom 的第一个
+    # artifactId 在 parent 块内, 每个子模块的清单名都曾是父 pom 的
+    # artifactId(兄弟依赖解析成 None/错模块)
+    body = re.sub(r"(?s)<parent>.*?</parent>", "", text)
     return {
-        "artifact": (re.search(r"<artifactId>([^<]+)</artifactId>", text) or [None, None])[1],
+        "artifact": (re.search(r"<artifactId>([^<]+)</artifactId>", body)
+                     or [None, None])[1],
         "modules": re.findall(r"<module>([^<]+)</module>", text),
     }
 

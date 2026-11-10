@@ -176,7 +176,16 @@ def cmd_begin(args) -> int:
         return config.EXIT_OK
     items = [queue_item(it, pages, ctx.locale, modules_by_id)
              for it in list(queue_pages) + list(queue_cards)]
-    ctx.db.queue_jobs(run_id, items, style=style)
+    try:
+        ctx.db.queue_jobs(run_id, items, style=style)
+    except BaseException:
+        # r7 #31: 排队段(Ctrl-C/kill)中断曾留死 DIRECTORY_GENERATING run
+        # —— next 永报"正在建立/排队", begin 非强制报"续用"指回它,
+        # 恢复出口只有输出里从未提示的 --force。中断即取消(守卫式)
+        ctx.db.update_run_guarded(
+            run_id, config.CANCELABLE_RUN_STATES,
+            state="CANCELLED", finished_at=now_iso())
+        raise
     # 排队窗口(数百行插入, 数秒)的裸 UPDATE 是全引擎最后一批无守卫 run 写
     # 之一 —— 期间并发 cancel/begin --force 合法置 CANCELLED 后, 裸写把已
     # 取消的 run 翻回活动态继续派发; 守卫式写只在仍是本 begin 建的
@@ -332,13 +341,23 @@ def cmd_next(args) -> int:
         if last and last["state"] in config.TERMINAL_STATES:
             _say(f"status: {last['state']} (run {last['id']}) — 无活动 run")
             info("用 `pwiki begin`(全量) 或 `pwiki update`(增量) 开跑")
+            _json_status = {"status": "run_closed", "run": last["id"],
+                            "state": last["state"]}
         else:
             _say("status: 尚无 run — 先 `pwiki begin`")
+            _json_status = {"status": "no_run"}
+        # r7 #29: --json 契约(stdout 恒纯 JSON)对早退分支同样成立 ——
+        # PAUSED/无 run 的 stdout 空字节曾让编排方 json.loads 直接崩
+        if args.json:
+            print(json.dumps(_json_status, ensure_ascii=False))
         # c086: 契约表(config)把"无活动 run"归 EXIT_PRECOND —— 与
         # submit/pause/regenerate/finish 的同类前置一致, 别让编排方误判环境故障
         return config.EXIT_PRECOND
     if run["state"] == "PAUSED":
         _say(f"status: PAUSED (run {run['id']}) — `pwiki resume` 继续")
+        if args.json:
+            print(json.dumps({"status": "paused", "run": run["id"]},
+                             ensure_ascii=False))
         return config.EXIT_PRECOND
     if run["state"] in ("WAITING", "INITIALIZING", "DIRECTORY_GENERATING"):
         # P23: create_run_guarded 与 queue_jobs 事务之间 job 表还是空的 ——
@@ -909,6 +928,13 @@ def cmd_regenerate(args) -> int:
     # <root> 直接 IsADirectoryError 且复崩
     job_item = queue_item(item, pages, ctx.locale, modules_by_id)
     ctx.db.queue_jobs(run_id, [job_item], style=style)
+    # r7 #30: 排队窗口守卫式复查(cmd_begin 同款)—— create 与 queue 之间
+    # 并发 cancel 置 CANCELLED 后, 曾照样把 job 插进死 run 还报"单项重做"
+    if not ctx.db.update_run_guarded(
+            run_id, ("DOCUMENT_GENERATING",),
+            state="DOCUMENT_GENERATING", stage="document"):
+        die(f"run {run_id} 在排队期间被并发操作取消 — 重新 `pwiki "
+            f"regenerate {args.page_id}`", config.EXIT_PRECOND)
     print(f"run {run_id} (regenerate) — 单项重做 {args.page_id}")
     print("next: pwiki next")
     return config.EXIT_OK
@@ -1195,7 +1221,12 @@ def cmd_finish(args) -> int:
                    f"{type(e).__name__}: {e}")
         die(f"发布/快照失败({type(e).__name__}: {e}) — run 已标 "
             "DOCUMENT_FAILED; 修好后重跑 `pwiki finish`", config.EXIT_ENV)
-    final = "PARTLY_COMPLETED" if (counts["failed"] or counts["skipped"]
+    # r7 #32: 终态判定用发布后的**重读**计数 —— 开头 counts 是 load_plan
+    # 之前的快照, 窗口内的 `fail/skip --force`(守卫集合含 DG, 合法)曾对
+    # 终态不可见: run 报 COMPLETED 而发布集里少了被翻失败的页
+    _final_counts = ctx.db.pending_counts(run["id"])
+    final = "PARTLY_COMPLETED" if (_final_counts["failed"]
+                                   or _final_counts["skipped"]
                                    or needs_review) else "COMPLETED"
     # 终态写入带状态复核: begin --force 刚取消本 run 时(守卫放开的历史
     # 窗口), 曾无条件把 CANCELLED 复活成 COMPLETED/PARTLY_COMPLETED
