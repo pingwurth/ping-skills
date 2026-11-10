@@ -243,6 +243,22 @@ class WikiDB:
         self.conn = sqlite3.connect(self.path, timeout=10.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.isolation_level = None   # 自动提交; 原子块显式 BEGIN IMMEDIATE
+        if not need_init:
+            # r8 #42: 外代库的拒绝先于一切会改库的语句 —— WAL PRAGMA(重写
+            # db 头/掉 -wal/-shm)与 executescript(SCHEMA)(补建 v3 表)曾先
+            # 落库再 raise, "不碰别代 schema"的门禁自己先写了外代库。
+            # 探测吞 "no such table"(db_meta 之前的老库 = 合法隐式迁移对象)
+            try:
+                _stamp = self.meta_get("schema_version")
+            except sqlite3.OperationalError:
+                _stamp = None
+            if _stamp and _stamp != SCHEMA_VERSION \
+                    and _stamp not in IMPLICIT_SCHEMA_VERSIONS:
+                raise SchemaVersionError(
+                    f"{self.path} 的 schema_version={_stamp!r} 不被本版本支持"
+                    f"(当前 {SCHEMA_VERSION}, 可隐式迁移: "
+                    f"{'/'.join(sorted(IMPLICIT_SCHEMA_VERSIONS))}) — "
+                    "该库可能由更新版本的 pwiki 写入, 请用对应版本打开")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         # 与 connect(timeout=10.0) 同刻度: 5000 曾把 10s 等锁压回 5s ——

@@ -31,6 +31,8 @@ from .yamlite import yaml_load
 # --------------------------------------------------------------------------- #
 
 # 概述类小节免"章节来源"(gate 与 --fix 共用一份 —— 两份曾漂移出不可修复态)
+# 非分析节的**整题**名单(章节来源豁免用; r8 #32 起精确匹配 —— 子串匹配
+# 曾把'架构概述'/'目录结构'这类分析节题名整类误豁免)
 OVERVIEW_SECTIONS = ("概述", "介绍", "简介", "引言", "目录", "结论",
                      "Overview", "Introduction", "Conclusion")
 
@@ -173,14 +175,59 @@ def lint_mermaid(content: str) -> list:
 
 # 栅栏模式单一来源: split_fences(捕获组保留栅栏段)与 iter_h2(偏移枚举)
 # 共用 —— iter_h2 曾自持一份字面正则, 栅栏规则演进(~~~ 等)没有跟进渠道,
-# 栅栏内标题会被当真实节(P61 描述的幻影节 bug 重现)
-_FENCE_RE = re.compile(r"(```.*?```)", re.S)
+# 栅栏内标题会被当真实节(P61 描述的幻影节 bug 重现)。
+# r8 #29: 惰性 ``` 到 ``` 配对升级为 CommonMark 长度规则 —— 开栏 run
+# (长度 L)只被 ≥L 的 run 关闭。旧正则在"4 反引号外栏包 3 反引号示例"
+# (写栅栏 markdown 的合法页)上把示例体漏进正文, H1 计数/幻影节/示例内
+# file:// 全被当真内容门禁; 未闭合栅栏同理(现按渲染语义吃到文末)
+_FENCE_RUN_RE = re.compile(r"`{3,}")
+
+
+def _fence_spans(content: str) -> list:
+    """栅栏 (start, end) 偏移对: 开栏 run 只被 ≥ 长度的 run 关闭, 未闭合
+    吃到文末; 更短的 run 是栏内字面量。"""
+    spans, open_start, open_len = [], None, 0
+    for m in _FENCE_RUN_RE.finditer(content):
+        if open_start is None:
+            open_start, open_len = m.start(), len(m.group(0))
+        elif len(m.group(0)) >= open_len:
+            spans.append((open_start, m.end()))
+            open_start = None
+    if open_start is not None:
+        spans.append((open_start, len(content)))
+    return spans
 
 
 def split_fences(content: str) -> list:
     """按代码栅栏切分: 以 ``` 开头的段是栅栏, 其余是正文(P61 共用实现
     —— 栅栏正则曾散在六个转换点各持一份, 规则要变只改这里)。"""
-    return _FENCE_RE.split(content)
+    parts, pos = [], 0
+    for s, e in _fence_spans(content):
+        if s > pos:
+            parts.append(content[pos:s])
+        parts.append(content[s:e])
+        pos = e
+    if pos < len(content):
+        parts.append(content[pos:])
+    return parts
+
+
+def fence_bodies(content: str) -> list:
+    """每个栅栏的体内文本(不含围栏 run 本身; 未闭合栅栏体到文末)。
+
+    r8 #46: layers 的 _FENCE_BODY_RE 曾是本文件栅栏规则的手抄副本
+    ('保持同款字面'), 栅栏规则演进须靠注释纪律改两处。"""
+    out = []
+    for s, e in _fence_spans(content):
+        seg = content[s:e]
+        opener = _FENCE_RUN_RE.match(seg)
+        body_start = opener.end()
+        closer = None
+        for m in _FENCE_RUN_RE.finditer(seg, body_start):
+            closer = m          # 关栏 run 是段内最后一个(顶到段尾)
+        body_end = closer.start() if closer is not None else len(seg)
+        out.append(seg[body_start:body_end])
+    return out
 
 
 def strip_code_fences(content: str) -> str:
@@ -195,7 +242,7 @@ def iter_h2(content: str):
     章节来源 gate / --fix / 目录注入的共用枚举器: 栅栏里的 '## ' 是
     示例内容不是分析节 —— 三处调用点曾各自拿原始 content 枚举, 幻影节
     改变计数, --fix 还把"章节来源"块注进代码栅栏里。"""
-    spans = [(m.start(1), m.end(1)) for m in _FENCE_RE.finditer(content)]
+    spans = _fence_spans(content)
     for m in re.finditer(r"(?m)^##\s+(.+)$", content):
         if not any(s <= m.start() < e for s, e in spans):
             yield m
@@ -342,7 +389,9 @@ def gate_item(content: str, item, repo: str, style: str,
         # validation.md: concise 在 LINING 也保持警告(曾一律升错误级)
         if i18n.TOC_HEADING_RE.search(prose):
             sev_hard.append("schema/toc: 不要写目录节 —— 发布层会注入")
-        if "<cite>" in content:
+        # r8 #31: 剥栅栏(用 prose)—— 反例栅栏里的字面 <cite> 曾触发
+        # 警告, 与 r7 #4/#5 在本区域建立的栅栏感知口径相悖
+        if "<cite>" in prose:
             sev_hard.append("schema/cite: 不要写 <cite> 块 —— 发布层会注入")
         if re.search(r"^\s*##\s+(结论|结语|总结|Conclusion|Summary|Next Steps)\s*$",
                      prose, re.M):
@@ -399,8 +448,11 @@ def gate_item(content: str, item, repo: str, style: str,
             warnings.append(f"size/page: {n_lines} 行 (目标 {lo_l}-{hi_l})")
     # 词上限: 预设值(3300)本身即 max_article_words 的 1.1 倍产物 —— 不再
     # 二次 ×1.1(曾实际执行到 3630 的死区); 与其他尺寸同走 size_hard
-    # (concise 软执行=警告, 曾把 concise 页 LINING 硬拒)
-    words = len(content.split())
+    # (concise 软执行=警告, 曾把 concise 页 LINING 硬拒)。
+    # r8 #35: CJK 按字符计词 —— split() 对无空格的中文差两个数量级,
+    # 默认 zh locale 下唯一 concise 长度界(3300 词)曾是恒不触发的死门,
+    # 失控页零尺寸反馈通过 submit 与 LINING
+    words = _count_words(content)
     wlo, whi = p["page_words"]
     if whi and words > whi:
         (sev_hard).append(
@@ -471,7 +523,10 @@ def gate_item(content: str, item, repo: str, style: str,
     missing_ss = 0
     for head, body in section_spans(content):
         n_sections += 1
-        if any(k in head for k in OVERVIEW_SECTIONS):
+        # r8 #32: 豁免改整题精确匹配 —— 子串匹配曾把'架构概述'/'目录结构'
+        # '/接口介绍'等含概览词的**分析节**整类静默豁免 deep 错误级要求
+        # (同源节名'实现分析'却硬败); fix_section_sources 同步同口径
+        if head.strip() in OVERVIEW_SECTIONS:
             continue
         if not SECTION_SOURCES_RE.search(body):
             missing_ss += 1
@@ -507,6 +562,18 @@ def gate_item(content: str, item, repo: str, style: str,
     return errors, warnings
 
 
+def _count_words(text: str) -> int:
+    """词数计量(r8 #35): CJK 逐字符计(中文无空格), 其余按词元计。"""
+    cjk = len(_CJK_RE.findall(text))
+    words = len(_WORD_RE.findall(text))
+    return cjk + words
+
+
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿"
+                     r"぀-ヿ가-힯]")
+_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9'’_-]*")
+
+
 def _gate_card(content, item, p, strict, errors, warnings, repo=""):
     """卡片: frontmatter kind/name 机器校验 + 证据存在性 + D16 引用。
 
@@ -526,9 +593,14 @@ def _gate_card(content, item, p, strict, errors, warnings, repo=""):
     if str(data.get("name") or "").strip() != title.strip():
         errors.append(f"knowledge/frontmatter: name {data.get('name')!r} != 卡片标题 {title!r}")
     # repowiki 保证回补: frontmatter 声明的 source_files 必须真实存在
-    # (声明已删文件的"证据"不再能随卡发布)
-    if repo and isinstance(data.get("source_files"), list):
-        for s in data["source_files"]:
+    # (声明已删文件的"证据"不再能随卡发布)。
+    # r8 #34: 人自然写的标量形 `source_files: src/a.py` 曾静默跳过存在性
+    # 检查(isinstance 只认列表)—— 标量按单元素列表同规核验
+    _sf = data.get("source_files")
+    if repo and _sf is not None:
+        if not isinstance(_sf, list):
+            _sf = [_sf]
+        for s in _sf:
             sp = str(s).rstrip("/")
             if not sp:
                 continue
@@ -568,7 +640,9 @@ def _gate_sheet(content, p, strict, errors, warnings, n_cites):
         # 形状类: submit 全警告(validation.md 双严重度模型), LINING 按
         # size_hard —— 曾在 submit 就把 concise 速查表硬拒(r7 #3: 别再
         # 重绑定局部选择器, 直接用 sev_hard)
-        if "file://" in content:
+        # r8 #31: 剥栅栏再测 —— 相邻的 shape 检查(:573)剥, 本行曾对原文
+        # 测: 反例栅栏里的 [x](file://a.py#L1) 触发硬错, 合法反例被逼删除
+        if "file://" in strip_code_fences(content):
             sev_hard.append("sheet/links: concise 速查表不写 file:// 链接(正文页承载)")
         if re.search(r"^##\s+", strip_code_fences(content), re.M):
             sev_hard.append("sheet/shape: concise 速查表只有 H1, 不写 ## 小节")
@@ -583,6 +657,20 @@ def _gate_sheet(content, p, strict, errors, warnings, n_cites):
         if n_line < need:
             msg = f"D16: deep 速查表需 ≥{need} 条行级引用, 实得 {n_line}"
             sev.append("knowledge/citations: " + msg)
+        # r8 #30: D15 'module' 总量带 —— gate_item 把 module_sheet 路由进
+        # 本函数提前 return, cite_band_for 的 module_sheet 分支从原调用点
+        # 不可达(deep 速查表 5 或 150 条引用都无总量带, 与
+        # references/validation.md 契约表相悖); 在此按同档严重度补上
+        band = cite_band_for({"kind": "module_sheet"}, p)
+        if band:
+            blo, bhi = band
+            if not (blo <= n_cites <= bhi):
+                msg = (f"size/citations: {n_cites} 条引用 "
+                       f"(速查表分档 {blo}-{bhi})")
+                if strict and p["size_hard"]:
+                    errors.append(msg)
+                else:
+                    warnings.append(msg)
         # r7 #4: 剥栅栏 —— 栅栏示例里的 '**章节来源**' 字面量曾满足
         # deep 错误级门禁(紧邻两行之上的 D16 检查自己都剥)
         if n_cites and not SECTION_SOURCES_RE.search(
@@ -614,7 +702,7 @@ def fix_section_sources(content: str, locale: str = "zh") -> tuple:
         body_clean = strip_code_fences(body)
         title = m.group(1)
         if not SECTION_SOURCES_RE.search(body_clean) and \
-                not any(k in title for k in OVERVIEW_SECTIONS):
+                title.strip() not in OVERVIEW_SECTIONS:
             seen, lines = set(), []
             for c in extract_citations(body_clean):
                 if c["path"] in seen:
@@ -728,8 +816,10 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     _stamps: dict = {}
     _run_style = ""
     if getattr(ctx, "db", None):
-        # ctx 未 load(裸构造/只读探测)时无行戳可用, 整树走 base 兜底
-        _pid = ctx.partition()["id"]
+        # ctx 未 load(裸构造/只读探测)时无行戳可用, 整树走 base 兜底;
+        # r8 #44: 分区行只读探测(缺失 → 空行戳, 全树走 base)
+        _part = ctx.partition(create=False)
+        _pid = _part["id"] if _part is not None else -1
         _stamps = {str(r["page_id"]): str(r["style"] or "")
                    for r in ctx.db.published_pages(_pid)}
         _run_style = str((ctx.db.last_run(_pid) or {"style": ""})["style"] or "")
@@ -834,11 +924,12 @@ def validate_content(ctx: Ctx, plan: dict, fix: bool = False) -> tuple:
     from urllib.parse import unquote
     # 跳过前缀与 normalize_links 同源(publish.LINK_SKIP_PREFIXES): 校验器
     # 自持的 lookahead 曾漏 #/mailto: —— 邮箱链接发布器保留、校验器硬错
-    from .publish import LINK_SKIP_PREFIXES
+    from .publish import LINK_SKIP_PREFIXES, paren_tolerant_target
     _lookahead = "(?!" + "|".join(LINK_SKIP_PREFIXES) + ")"
-    # r7 #44: 目标容忍一层嵌套括号(与 publish.LINK_RE 同口径)
+    # r7 #44: 目标容忍一层嵌套括号; r8 #45: 形态从 publish 的构造器派生
+    # (曾手抄同款字面, 同步全靠注释纪律)
     _link_re = re.compile(
-        rf"\[[^\]]*\]\({_lookahead}([^()#]*(?:\([^()]*\))*[^()#]*"
+        rf"\[[^\]]*\]\({_lookahead}({paren_tolerant_target('[^()#]')}"
         rf"\.md(?:#[^)\s]*)?)\)")
     for pg in pages:
         path = page_paths[str(pg.get("id"))]

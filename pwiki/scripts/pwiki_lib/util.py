@@ -197,6 +197,17 @@ def atomic_write(path: str, text: str) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        # r8 #43: 目录项也要落盘 —— rename 本身不保证持久, 崩电可丢
+        # 重命名而 wiki.db 的 WAL 已持久化新 content_hash(DB 说新、树是
+        # 旧的静默分叉)。部分文件系统对目录 fsync 报 EINVAL, 尽力而为
+        try:
+            dfd = os.open(d or ".", os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        except OSError:
+            pass
     except BaseException:
         # c018: open/write/fsync 失败时清掉 tmp —— 无清扫方(prune 只删
         # .md, 空目录 rmdir 对含 tmp 的目录失败), 残件会随发布树一起发布
@@ -216,6 +227,19 @@ def sha256_file(path: str) -> str:
         return h.hexdigest()
     except OSError:
         return ""
+
+
+def baseline_sha(baseline, key: str, st) -> "str | None":
+    """(size, mtime) 命中基线即复用旧哈希(r8 #47 单一属主): snapshot 的
+    基线化与 publish 的 generation-state 两处内联短路曾各自维护谓词、
+    已微妙分叉, 演进漏一边即静默失同步。mtime 约定 ms 粒度
+    (int(st.st_mtime*1000)); 基线条目需带非空 sha256。"""
+    old = (baseline or {}).get(key)
+    if old and old.get("size") == st.st_size \
+            and old.get("mtime") == int(st.st_mtime * 1000) \
+            and old.get("sha256"):
+        return old["sha256"]
+    return None
 
 
 def safe_filename(title: str) -> str:

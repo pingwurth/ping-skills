@@ -281,8 +281,13 @@ def parse_pyproject(path: str) -> dict:
         if section == "[tool.poetry.dependencies]" \
                 and re.match(r'^[A-Za-z0-9_.-]+\s*=\s*["\']', s):
             out["dependencies"].append(s.split("=", 1)[0].strip())
+        # r8 #39: 规范 TOML 数组形 `members = ["packages/*"]` —— 曾只匹配
+        # YAML 式 '- item' 行(TOML 里非法), 分支在真实 uv workspace 上全死
         if section == "[tool.uv.workspace]" and s.startswith("- "):
             out["workspace_members"].append(s[2:].strip().strip("'\""))
+        if section == "[tool.uv.workspace]" and s.startswith("members"):
+            out["workspace_members"].extend(
+                re.findall(r'["\']([^"\']+)["\']', s))
     seen = set()
     out["dependencies"] = [d for d in out["dependencies"]
                            if not (d in seen or seen.add(d))]
@@ -318,17 +323,35 @@ def parse_cargo(path: str) -> dict:
     text = read_text(path)
     out = {"name": None, "workspace_members": []}
     section = None
+    # r8 #40: members 数组跨行收集 —— 只收单行 `members = [...]` 且赋值
+    # 覆盖(非追加)曾让 rust workspace 规范的多行数组得零成员
+    members_buf = None
     for line in text.splitlines():
         s = line.strip()
         if s.startswith("[") and s.endswith("]"):
             section = s
+            members_buf = None   # 新段终止悬空数组
             continue
         if section == "[package]":
             m = re.match(r'^name\s*=\s*["\']([^"\']+)["\']', s)
             if m:
                 out["name"] = m.group(1)
-        if section == "[workspace]" and s.startswith("members"):
-            out["workspace_members"] = re.findall(r'["\']([^"\']+)["\']', s)
+        if section != "[workspace]":
+            continue
+        if members_buf is not None:
+            members_buf += " " + s
+            if "]" in s:
+                out["workspace_members"] = re.findall(
+                    r'["\']([^"\']+)["\']', members_buf)
+                members_buf = None
+            continue
+        m = re.match(r"^members\s*=\s*(.+)$", s)
+        if m:
+            if "]" in m.group(1):
+                out["workspace_members"] = re.findall(
+                    r'["\']([^"\']+)["\']', m.group(1))
+            else:
+                members_buf = m.group(1)
     return out
 
 

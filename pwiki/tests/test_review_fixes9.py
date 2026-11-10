@@ -463,3 +463,233 @@ def test_r8_27_digest_tolerates_scalar_entries():
                        {"modules": ["auth-core"], "pages": [], "cards": []},
                        {})
     assert "共享摘要" in out
+
+
+# --------------------------------------------------------------------------- #
+# 批次③: 门禁有效性/边界值/持久性/清理(r8 #29-#49)
+# --------------------------------------------------------------------------- #
+
+def test_r8_29_fence_length_pairing(tmp_path):
+    """4 反引号外栏包 3 反引号示例: 示例体不再漏进正文被当真内容。"""
+    from pwiki_lib import gates
+    content = ("# T\n\n````markdown\n# 示例标题\n```python\nx = 1\n```\n"
+               "````\n\n## 正文\n\nx\n")
+    stripped = gates.strip_code_fences(content)
+    assert "示例标题" not in stripped and "x = 1" not in stripped
+    assert "正文" in stripped
+    # 未闭合栅栏按渲染语义吃到文末
+    assert gates.strip_code_fences("# T\n\n```\n# 里面\n").strip() == "# T"
+
+
+def test_r8_29_gate_h1_inside_outer_fence(tmp_path):
+    """外层 4 反引号示例里的 H1 不再被计成第二个 H1 硬错。"""
+    from test_gates import _item, _repo
+    from pwiki_lib import gates
+    repo = _repo(tmp_path)
+    content = ("# 测试页\n\n````markdown\n# 示例 H1\n````\n\n## 正文\n\n"
+               "x\n\n**章节来源**\n- [src/a.py:1-3](file://src/a.py#L1-L3)\n")
+    errs, _w = gates.gate_item(content, _item(), repo, "concise",
+                               phase="submit")
+    assert not any("H1" in e for e in errs), errs
+
+
+def test_r8_31_sheet_links_and_cite_fence_blind(tmp_path):
+    """反例栅栏里的 file:// 链接与 <cite> 字面量不再触发门禁。"""
+    from test_gates import _item, _repo
+    from pwiki_lib import gates
+    repo = _repo(tmp_path)
+    sheet_item = {"kind": "module_sheet", "title": "概述",
+                  "sheet": "overview", "module": "src"}
+    sheet = ("# 概述\n\n模块负责 X。\n\n反例:\n\n```\n"
+             "[x](file://src/a.py#L1-L2)\n```\n")
+    errs, warns = gates.gate_item(sheet, sheet_item, repo, "concise",
+                                  phase="lining")
+    assert not any("file://" in x for x in errs + warns), (errs, warns)
+    page = ("# 测试页\n\n## 正文\n\n```\n<cite>x</cite>\n```\n\n"
+            "事实 [a](file://src/a.py#L1-L3)。\n")
+    errs, warns = gates.gate_item(page, _item(), repo, "concise",
+                                  phase="submit")
+    assert not any("<cite>" in x for x in warns), warns
+
+
+def test_r8_32_section_exemption_exact_match(tmp_path):
+    """'架构概述'/'目录结构'/'接口介绍'不再因子串豁免 deep 章节来源要求
+    (旧的子串匹配下这组节名只余 1 个待检节, 容差内静默放行)。"""
+    from test_gates import _item, _repo
+    from pwiki_lib import gates
+    repo = _repo(tmp_path)
+    heads = "\n\n".join(f"## {h}\n\nx" for h in
+                        ("架构概述", "目录结构", "接口介绍", "实现分析"))
+    content = f"# 测试页\n\n{heads}\n"
+    errs, _w = gates.gate_item(content, _item(), repo, "deep",
+                               phase="lining")
+    assert any("章节来源" in e for e in errs), errs
+
+
+def test_r8_33_http_relative_targets_not_skipped(tmp_path):
+    """http-client.md 等相对目标不再被裸 'http' 前缀挡在改写之外;
+    真 http:// 链接照旧跳过。"""
+    from pwiki_lib import publish
+    out, n = publish.normalize_links(
+        "见 [x](wrong/http-client.md)\n", "page.md", {"dir/http-client.md"})
+    assert n == 1 and "dir/http-client.md" in out
+    _out2, n2 = publish.normalize_links(
+        "外链 [y](http://example.com/a.md)\n", "page.md", set())
+    assert n2 == 0
+
+
+def test_r8_34_card_scalar_source_files_validated(tmp_path):
+    """卡片 frontmatter 的标量形 source_files 同样过存在性检查。"""
+    from test_gates import _repo
+    from pwiki_lib import gates
+    repo = _repo(tmp_path)
+    item = {"kind": "card", "card_kind": "external_dependency",
+            "title": "lodash"}
+    content = ("---\nkind: external_dependency\nname: lodash\n"
+               "source_files: deleted/path.py\n---\n\n## 1. 总体方案\n\n"
+               "事实 [a](file://src/a.py#L1-L3)。\n")
+    errs, _w = gates.gate_item(content, item, repo, "concise",
+                               phase="lining")
+    assert any("source_files 越界或不存在" in e for e in errs), errs
+
+
+def test_r8_35_cjk_word_count():
+    from pwiki_lib.gates import _count_words
+    assert _count_words("中文内容" * 100) == 400
+    assert _count_words("hello world foo") == 3
+
+
+def test_r8_36_layers_modules_shape_and_top_domain(tmp_path):
+    """模型回的裸串 modules 记问题项; 顶层也核域成员资格。"""
+    from pwiki_lib import layers
+    plan = {"modules": [{"id": "root", "path": "/"},
+                        {"id": "svc", "path": "services"}], "limits": {}}
+    text = ('<result>{"articles": [{"slug": "a", "title": "A", '
+            '"type": "domain", "modules": "services", '
+            '"objective": "o"}]}</result>')
+    added, problems = layers.apply_layer_result(
+        None, plan, {"articles": [], "profile": "standard"}, text)
+    assert not added and any("modules 必须是非空字符串列表" in p
+                             for p in problems), problems
+    text2 = ('<result>{"articles": [{"slug": "b", "title": "B", '
+             '"type": "domain", "modules": ["nowhere"], '
+             '"objective": "o"}]}</result>')
+    added2, problems2 = layers.apply_layer_result(
+        None, plan, {"articles": [], "profile": "standard"}, text2)
+    assert not added2 and any("outside" in p for p in problems2), problems2
+
+
+def test_r8_37_kept_title_none_keeps_old(tmp_path):
+    """显式空 title: 走 kept 时行标题保持旧值, 不再写字面量 'None'。
+    场景按发现原文: run 进行中手改计划 —— begin/update 入口的校验盖不到
+    finish 的重读(regenerate 路线本身也不跑 validate_plan)。"""
+    from pwiki_lib import planner
+    repo, root = _published_fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    pid = ctx.partition()["id"]
+    plan = planner.load_plan(ctx)
+    pages = [p for p in plan["pages"]
+             if p.get("kind") not in ("module_sheet", "card")]
+    target, other = pages[0], pages[1]
+    old_title = ctx.db.published_page(pid, str(target["id"]))["title"]
+    target["title"] = None
+    planner.save_plan(ctx, plan)
+    # 建一个全 skipped 的 run 直达 finish(绕过会校验计划的入口, 复现
+    # "run 进行中手改计划"的原始场景)
+    run_id, _raced = ctx.db.create_run_guarded(
+        pid, "regenerate", "retry", "INCREMENT", "DOCUMENT_GENERATING",
+        ctx.commit, "ph", {"locale": ctx.locale}, style="concise")
+    mods_by_id = {m.get("id"): m for m in plan["modules"]}
+    ctx.db.queue_jobs(run_id, [planner.queue_item(other, plan["pages"],
+                                                  ctx.locale, mods_by_id)],
+                      style="concise")
+    ctx.db.set_job_state(run_id, str(other["id"]), "skipped")
+    assert _cli(["finish", "--yes", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    assert ctx.db.published_page(pid, str(target["id"]))["title"] == \
+        old_title
+
+
+def test_r8_39_uv_members_array_form(tmp_path):
+    from pwiki_lib.scan import parse_pyproject
+    p = tmp_path / "pyproject.toml"
+    p.write_text('[tool.uv.workspace]\nmembers = ["packages/*", "libs/a"]\n',
+                 encoding="utf-8")
+    out = parse_pyproject(str(p))
+    assert out["workspace_members"] == ["packages/*", "libs/a"], out
+
+
+def test_r8_40_cargo_multiline_members(tmp_path):
+    from pwiki_lib.scan import parse_cargo
+    p = tmp_path / "Cargo.toml"
+    p.write_text('[workspace]\nmembers = [\n    "crates/a",\n    "crates/b",'
+                 '\n]\n', encoding="utf-8")
+    out = parse_cargo(str(p))
+    assert out["workspace_members"] == ["crates/a", "crates/b"], out
+
+
+def test_r8_41_row_module_keeps_path_column():
+    from pwiki_lib.publish import row_module
+    m = row_module({"module_id": "svc", "title": "T", "dir": "src/svc",
+                    "path": "services/svc", "parent_id": "root"})
+    assert m["path"] == "services/svc" and m["id"] == "svc"
+
+
+def test_r8_42_schema_gate_no_mutation_before_reject(tmp_path):
+    """外代库的拒绝先于 WAL/SCHEMA —— 门禁自己不写外代库。"""
+    import sqlite3
+    from pwiki_lib.db import SchemaVersionError, WikiDB
+    dbfile = tmp_path / "wiki.db"
+    con = sqlite3.connect(dbfile)
+    con.execute("CREATE TABLE db_meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT INTO db_meta VALUES('schema_version','v9')")
+    con.commit()
+    con.close()
+    with pytest.raises(SchemaVersionError):
+        WikiDB(str(tmp_path))
+    con = sqlite3.connect(dbfile)
+    mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+    tables = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    con.close()
+    assert mode != "wal", mode
+    assert "page" not in tables and "run" not in tables, tables
+
+
+def test_r8_44_readonly_pages_no_partition_insert(tmp_path):
+    """`pages --locale en` 不再静默 INSERT ('-',en) 分区行。"""
+    repo, root = _fixture(tmp_path)
+    assert _cli(["pages", "--locale", "en", "--repo", repo.path,
+                 "--root", root]) == config.EXIT_OK
+    ctx = _ctx(repo, root)
+    n = ctx.db.conn.execute(
+        "SELECT COUNT(*) c FROM partition").fetchone()["c"]
+    assert n == 1, n
+
+
+def test_r8_46_parse_result_block_shared_fences():
+    from pwiki_lib.layers import parse_result_block
+    assert parse_result_block("````\n{\"articles\": []}\n````\n") == \
+        {"articles": []}
+
+
+def test_r8_47_baseline_sha_shared():
+    import os as _os
+    from pwiki_lib.util import baseline_sha
+    st = _os.stat(".")
+    base = {"a": {"size": st.st_size, "mtime": int(st.st_mtime * 1000),
+                  "sha256": "x"}}
+    assert baseline_sha(base, "a", st) == "x"
+    assert baseline_sha(base, "b", st) is None
+
+
+def test_r8_48_single_module_shape_error(tmp_path):
+    """一个标量模块条目只报一条形状错误(内联版与共享门曾各报一条)。"""
+    from pwiki_lib import planner
+    repo, root = _fixture(tmp_path)
+    ctx = _ctx(repo, root)
+    plan = planner.load_plan(ctx)
+    plan["modules"].append("oops")
+    errors, _w = planner.validate_plan(ctx, plan, strict=False)
+    n = sum("modules 条目必须是映射" in e for e in errors)
+    assert n == 1, errors

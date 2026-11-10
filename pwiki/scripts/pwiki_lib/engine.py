@@ -649,13 +649,14 @@ def cmd_submit(args) -> int:
     if _json_list(job["modules"]) or job["module"]:
         # r7 #52: 注册表读 DB module 表(finish 每轮重发布的同一份)——
         # 曾为每个带模块 job 整个重解析 wiki_plan.yaml(24-80ms × 全队);
-        # 空(首跑未发布)再兜底 plan
+        # 空(首跑未发布)再兜底 plan。
+        # r8 #41: 行→计划模块映射走 publish.row_module 单一属主 —— 手抄
+        # 版把 path 列映射成 dir, path≠dir 的模块提示标题静默丢失
         _mods = ctx.db.modules(part["id"])
         if _mods:
+            from .publish import row_module
             mod_titles = mod_titles_for(
-                job, [{"id": m["module_id"], "title": m["title"],
-                       "path": m.get("dir", ""), "dir": m.get("dir", "")}
-                      for m in _mods])
+                job, [row_module(m) for m in _mods])
         else:
             try:
                 mod_titles = mod_titles_for(job, plan_modules(load_plan(ctx)))
@@ -1060,19 +1061,23 @@ def cmd_cancel(args) -> int:
 def cmd_status(args) -> int:
     from .planner import progress_pct
     ctx = Ctx(args).load()
-    part = ctx.partition()
-    n_published = sum(ctx.db.published_kind_counts(part["id"]).values())
-    run = ctx.db.active_run(part["id"]) or ctx.db.last_run(part["id"])
+    # r8 #44: status 只读 —— 分区行缺失时不再顺手 INSERT('分支/locale
+    # 打错'的 status 曾静默物化新分区)
+    part = ctx.partition(create=False)
+    _pid = part["id"] if part is not None else -1
+    n_published = sum(ctx.db.published_kind_counts(_pid).values())
+    run = ctx.db.active_run(_pid) or ctx.db.last_run(_pid)
     if args.quiet:
         print(run["state"] if run else "NONE")
         return config.EXIT_OK
     base = {
         "root": ctx.root, "repo": ctx.repo,
-        "branch": part["branch"], "locale": part["locale"],
+        "branch": ctx.branch, "locale": ctx.locale,
         "published": n_published,
-        "baseline": {"snapshot": part["published_snapshot_id"],
-                     "commit": part["baseline_commit"],
-                     "run": part["baseline_run_id"]},
+        "baseline": {"snapshot": part["published_snapshot_id"] if part
+                     else None,
+                     "commit": part["baseline_commit"] if part else None,
+                     "run": part["baseline_run_id"] if part else None},
     }
     if not run:
         base["run"] = None

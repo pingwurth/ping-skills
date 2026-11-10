@@ -340,9 +340,17 @@ class Ctx:
             return c or ""
         return self._commit
 
-    def partition(self):
+    def partition(self, create: bool = True):
+        # r8 #44: create=False 供只读命令(pages/read/search/validate
+        # --content/status)—— P44 当年只做了 load(create=False) 与去
+        # UPDATE, 分区行缺失时仍顺手 INSERT: 只读命令静默写状态, 还抢
+        # 写锁与 finish 的长发布事务竞争 busy_timeout。None 不缓存: 同
+        # 进程后续写路径仍可物化
         if self._partition is None:
-            self._partition = self.db.partition(self.branch, self.locale)
+            self._partition = self.db.partition(self.branch, self.locale,
+                                                create=create)
+            if self._partition is None:
+                return None
         return self._partition
 
     def content_dir(self) -> str:

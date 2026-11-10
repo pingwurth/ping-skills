@@ -24,7 +24,7 @@ from .gates import extract_citations, strip_code_fences
 from .planner import (load_plan, modules_hash, plan_hash, plan_cards,
                       plan_modules, plan_pages, queue_item, validate_plan)
 from .scan import expand_scope
-from .util import as_int, posix, die, info, join_confined
+from .util import as_int, baseline_sha, posix, die, info, join_confined
 
 
 def _as_list(v) -> list:
@@ -63,10 +63,9 @@ def snapshot_hashes(ctx: Ctx, pages: list, modules: list, cards=None,
             try:
                 st = os.stat(full)
                 mtime = int(st.st_mtime * 1000)
-                old = (baseline or {}).get(rel)
-                if old and old.get("size") == st.st_size \
-                        and old.get("mtime") == mtime and old.get("sha256"):
-                    entries[rel] = {"sha256": old["sha256"],
+                old = baseline_sha(baseline, rel, st)
+                if old:
+                    entries[rel] = {"sha256": old,
                                     "size": st.st_size, "mtime": mtime}
                     return
                 sha = ctx.file_sha(full)

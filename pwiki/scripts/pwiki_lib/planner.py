@@ -386,13 +386,10 @@ def validate_plan(ctx: Ctx, plan: dict, profile: str = "standard",
     pages = plan_pages(plan)
     cards = plan_cards(plan) if sv != 1 else []
     modules = plan_modules(plan) if sv != 1 else []
-    # r7 #17/#18: modules 条目形状守卫(P33 家族 —— r6 修了 pages/cards/
-    # aliases 三个集合, 漏了第四个): 标量条目曾让 str(m.get) 直接
-    # AttributeError, 应挡 begin 的门禁自己先死(exit 1 非 2)
-    if any(not isinstance(m, dict) for m in modules):
-        errors.append("modules 条目必须是映射(got "
-                      f"{[m for m in modules if not isinstance(m, dict)][0]!r})")
-        modules = [m for m in modules if isinstance(m, dict)]
+    # r7 #17/#18: modules 条目形状守卫(P33 家族)—— 只过滤, 报错归
+    # entry_shape_errors 单一属主(r8 #48: 内联版曾与之各报一条, 同一
+    # 标量条目出两行近同措辞、措辞演进两处漂移)
+    modules = [m for m in modules if isinstance(m, dict)]
     mod_id_list = [str(m.get("id", "")).strip() for m in modules]
     mod_ids = set(mod_id_list)
     # 重复 module id 检查要在**原始列表**上数(曾数去重后的 set, 恒为 1,

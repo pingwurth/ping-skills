@@ -21,8 +21,8 @@ from . import config, i18n
 from .config import Ctx, now_iso
 from .db import PAGE_META_COLS
 from .planner import module_dir_name
-from .util import (as_int, atomic_write, CJK_RE, json_list, posix, die,
-                   info, join_confined)
+from .util import (as_int, atomic_write, baseline_sha, CJK_RE, json_list,
+                   posix, die, info, join_confined)
 from .yamlite import yaml_dump
 
 NAMESPACE = uuid.UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")  # uuid.NAMESPACE_URL
@@ -44,14 +44,33 @@ def _md_anchor(text: str) -> str:
 
 # r7 #44: 目标段容忍一层嵌套括号 —— safe_filename 保留括号, 标题
 # '支付(核心)' 派生的路径含 '('')', [^)]+ 曾在首 ')' 处截断(链接不
-# 改写不校验, 坏链零警告出厂)
-LINK_RE = re.compile(r"\[([^\]]*)\]\(([^()]*(?:\([^()]*\))*[^()]*)\)")
+# 改写不校验, 坏链零警告出厂)。
+# r8 #45: 形态抽成构造器单一来源 —— gates 的校验器正则曾手抄同款技巧,
+# 仅靠"同口径"注释保持同步, 下次目标形态演进漏一边即发布器改写/校验器
+# 报错两判; cls 是普通字符类(校验器用 [^()#] —— 锚点切分归它自己)
+def paren_tolerant_target(cls: str) -> str:
+    return rf"{cls}*(?:\([^()]*\))*{cls}*"
+
+
+LINK_RE = re.compile(
+    r"\[([^\]]*)\]\((" + paren_tolerant_target(r"[^()]") + r")\)")
 
 # "非导航链接"跳过前缀 —— 内链改写(normalize_links)与校验(validate_content
 # 的 links/internal)共用的单一来源: 两套检测器曾各持一份 lookahead/startswith,
 # 邮箱链接 `(mailto:x@example.md)` 发布器原样保留、校验器报硬错, 同一链接
-# 两个相反判定
-LINK_SKIP_PREFIXES = ("file://", "http", "#", "mailto:")
+# 两个相反判定。
+# r8 #33: http 家族带_scheme 分隔(http:// https://)—— 裸 'http' 前缀曾把
+# http-client.md/http2-guide.md 整族相对 .md 目标挡在断链检查与改写之外
+LINK_SKIP_PREFIXES = ("file://", "http://", "https://", "#", "mailto:")
+
+
+def row_module(m) -> dict:
+    """DB module 行 → 计划模块形态(r8 #41 单一属主): repowiki metadata/
+    optimized_catalog/submit 的 mod_titles 三处手抄曾各自漂移 —— submit
+    版把 path 列映射成 dir, path≠dir 的模块提示标题静默丢失。"""
+    return {"id": m.get("module_id"), "title": m.get("title"),
+            "dir": m.get("dir"), "path": m.get("path", ""),
+            "parent": m.get("parent_id", "")}
 
 
 def normalize_links(content: str, page_path: str, all_paths: set) -> tuple:
@@ -323,7 +342,10 @@ def publish_run(ctx: Ctx, run, plan: dict, style: str, prune=False,
                     item.get("ordinal"),
                     950 if config.is_card_kind(merged.get("kind"))
                     else p["ordinal"])
-                row["title"] = str(item.get("title", p["title"]))
+                # r8 #37: `or` 归一显式空 title: —— str(item.get(..., 默认))
+                # 的默认只在**缺键**时生效, None 值写出字面量 'None', 而
+                # path 侧 safe_filename(None)='untitled', 行成自相矛盾态
+                row["title"] = str(item.get("title") or p["title"])
                 row["module"] = str(item.get("module") or "")
                 row["sheet"] = str(item.get("sheet") or "")
                 row["article_type"] = str(item.get("type")
@@ -584,12 +606,10 @@ def _write_indexes(ctx: Ctx, part, pages: list, modules: list,
                    "key_topics": json_list(p["key_topics"]),
                    "source_files": json_list(p["source_files"])}
                   for p in pages],
-        "modules": [{"id": m.get("module_id"), "title": m.get("title"),
-                     "dir": m.get("dir"), "path": m.get("path", ""),
-                     "parent": m.get("parent_id", ""),
-                     "scope": json_list(m.get("scope")),
-                     "depends_on": json_list(m.get("depends_on")),
-                     "related_to": json_list(m.get("related_to"))}
+        "modules": [dict(row_module(m),
+                         scope=json_list(m.get("scope")),
+                         depends_on=json_list(m.get("depends_on")),
+                         related_to=json_list(m.get("related_to")))
                     for m in modules],
         "knowledge_relations": relations,
     }
@@ -652,10 +672,8 @@ def _write_indexes(ctx: Ctx, part, pages: list, modules: list,
             pass
     try:
         metadata["wiki_repo"]["optimized_catalog"] = render_module_tree({
-            "modules": [{"id": m.get("module_id"), "title": m.get("title"),
-                         "dir": m.get("dir"), "path": m.get("path"),
-                         "parent": m.get("parent_id"),
-                         "notes": m.get("notes") or m.get("title")}
+            "modules": [dict(row_module(m),
+                             notes=m.get("notes") or m.get("title"))
                         for m in modules]})
     except Exception as e:   # noqa: BLE001 —— 元数据尽力而为, 不挡发布
         info(f"note: optimized_catalog 渲染失败({e})")
@@ -778,19 +796,18 @@ def _source_hashes(ctx: Ctx, p, baseline: dict = None) -> dict:
         # c049: 仓外路径不哈希(导出文件不得携带宿主文件指纹)
         full = join_confined(ctx.repo, str(s).rstrip("/"))
         if full and os.path.isfile(full):
-            # r7 #50: (size, mtime) 命中复用上轮哈希(snapshot 侧同款短路)
-            # —— 每 CLI 进程的 ctx.file_sha 缓存从空开始, 零变更 finish 曾
-            # 对全部源文件整读重哈希只为写出与上轮相同的哈希
+            # r7 #50: (size, mtime) 命中复用上轮哈希 —— 每 CLI 进程的
+            # ctx.file_sha 缓存从空开始, 零变更 finish 曾对全部源文件整读
+            # 重哈希只为写出与上轮相同的哈希; r8 #47: 谓词走 util.baseline_sha
+            # 单一属主(与 snapshot 基线化同款, 曾两处内联各自漂移)
             try:
                 st = os.stat(full)
             except OSError:
                 continue
-            old = baseline.get(str(s))
-            if old and old.get("size") == st.st_size                     and old.get("mtime") == int(st.st_mtime * 1000)                     and old.get("sha256"):
-                out[str(s)] = old["sha256"]
-                continue
-            # ctx 级共享缓存: 同一源文件喂多页 + snapshot_run 复用同一份哈希
-            sha = ctx.file_sha(full)
+            sha = baseline_sha(baseline, str(s), st)
+            if not sha:
+                # ctx 级共享缓存: 同一源文件喂多页 + snapshot_run 复用同一份
+                sha = ctx.file_sha(full)
             if sha:
                 out[str(s)] = sha
     return out
@@ -802,7 +819,9 @@ def _source_hashes(ctx: Ctx, p, baseline: dict = None) -> dict:
 
 def cmd_pages(args) -> int:
     ctx = Ctx(args).load(create=False)   # P44: 只读不物化工作区
-    pages = ctx.db.published_pages(ctx.partition()["id"])
+    # r8 #44: 分区行也只读 —— `pages --locale en` 曾静默 INSERT ('-',en)
+    part = ctx.partition(create=False)
+    pages = ctx.db.published_pages(part["id"] if part else -1)
     if args.json:
         print(json.dumps([{"id": p["page_id"], "title": p["title"],
                            "kind": p["kind"], "parent": p["parent_id"],
@@ -832,7 +851,8 @@ def cmd_pages(args) -> int:
 
 def cmd_read(args) -> int:
     ctx = Ctx(args).load(create=False)   # P44: 只读不物化工作区
-    p = ctx.db.published_page(ctx.partition()["id"], args.page_id)
+    part = ctx.partition(create=False)   # r8 #44: 同 cmd_pages
+    p = ctx.db.published_page(part["id"] if part else -1, args.page_id)
     if not p:
         die(f"未发布条目: {args.page_id}", config.EXIT_PRECOND)
     if args.meta:

@@ -20,9 +20,9 @@ from .styles import preset
 from .util import as_int, die, info
 
 RESULT_RE = re.compile(r"(?s)<result>\s*(\{.*?\})\s*</result>")
-# r7 #66: 栅栏体枚举与 gates 的 _FENCE_RE 同规则(P61 单源的 layers 侧
-# 接入 —— 规则演进时同步; 不能直接 import 编译私有名, 保持同款字面)
-_FENCE_BODY_RE = re.compile(r"(?s)```(?:json)?\s*(.*?)\s*```")
+# r7 #66 → r8 #46: 栅栏体枚举改走 gates 的共享属主 fence_bodies ——
+# 手抄副本('保持同款字面')曾让栅栏规则演进(4 反引号配对)须靠注释纪律
+# 同步两处; (?:json)? 的 info 串宽松匹配由调用侧 strip 兜住
 SLUG_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 
 
@@ -80,9 +80,13 @@ def parse_result_block(text: str) -> dict:
     m = RESULT_RE.search(text)
     if m:
         return json.loads(m.group(1))
-    for fm in _FENCE_BODY_RE.finditer(text):
+    from .gates import fence_bodies
+    for body in fence_bodies(text):
+        seg = body.strip()
+        if seg.startswith("json"):
+            seg = seg[4:].strip()
         try:
-            v = json.loads(fm.group(1))
+            v = json.loads(seg)
         except ValueError:
             continue
         if isinstance(v, dict):
@@ -249,7 +253,16 @@ def apply_layer_result(ctx, plan: dict, state: dict, text: str,
         slug = str(a.get("slug") or "").strip()
         title = str(a.get("title") or "").strip()
         atype = str(a.get("type") or "").strip()
-        modules = [str(x).rstrip("/") or "/" for x in (a.get("modules") or [])]
+        # r8 #36: modules 形状门 —— 模型回的裸串("modules": "services")曾
+        # 被逐字符迭代成 ['s','e',…], 顶层又跳过域核验 → 畸形文章零问题
+        # 接受, commit 落出逐字符 scope 目录
+        _mods_raw = a.get("modules")
+        if not isinstance(_mods_raw, list) or not _mods_raw or \
+                any(not isinstance(x, (str, int)) for x in _mods_raw):
+            problems.append(f"article {i}: modules 必须是非空字符串列表"
+                            f"(got {_mods_raw!r})")
+            continue
+        modules = [str(x).rstrip("/") or "/" for x in _mods_raw]
         objective = str(a.get("objective") or "").strip()
         if not SLUG_RE.match(slug):
             problems.append(f"article {i}: bad slug {slug!r}")
@@ -266,7 +279,9 @@ def apply_layer_result(ctx, plan: dict, state: dict, text: str,
         if not modules:
             problems.append(f"article {slug}: empty modules")
             continue
-        if parent_node is not None and not all(m in allowed for m in modules):
+        # r8 #36: 顶层(parent_slug="")也核域成员资格 —— 曾的 `parent_node
+        # is not None` 前置让顶层完全跳过, allowed(全计划模块集)白算
+        if not all(m in allowed for m in modules):
             problems.append(f"article {slug}: modules outside parent's domain")
             continue
         need = bool(a.get("need_further_planning"))

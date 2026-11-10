@@ -281,14 +281,20 @@ class Corpus:
         # 一轮扫 3 遍), (patterns, exclude) 相同直接复用
         self._collect_cache: dict = {}
 
+    def _maybe_cache(self, cache: dict, path: str, value: str) -> str:
+        """r8 #49: 超预算守卫 + 存储 + 记账三元组的单一属主 —— read 与
+        read_lower 各持一份曾文本分叉(守卫条件 _text vs _text_lower),
+        未来策略(逐出/联合记账)须改两遍否则两缓存分叉。"""
+        if self._text_bytes + len(value) > self._text_budget and cache:
+            return value   # 超帽: 供本次使用, 不常驻
+        cache[path] = value
+        self._text_bytes += len(value)
+        return value
+
     def read(self, path: str) -> str:
         if path not in self._text:
-            text = read_text(os.path.join(self.repo, path))
-            if self._text_bytes + len(text) > self._text_budget \
-                    and self._text:
-                return text   # 超帽: 供本次使用, 不常驻
-            self._text[path] = text
-            self._text_bytes += len(text)
+            self._maybe_cache(self._text, path,
+                              read_text(os.path.join(self.repo, path)))
         return self._text[path]
 
     def match(self, patterns: list, exclude: list = None, pool: list = None) -> list:
@@ -305,12 +311,8 @@ class Corpus:
     def read_lower(self, path: str) -> str:
         """read() 的小写视图(P72 记忆化; grep 专用; 受同一预算帽)。"""
         if path not in self._text_lower:
-            low = self.read(path).lower()
-            if self._text_bytes + len(low) > self._text_budget \
-                    and self._text_lower:
-                return low
-            self._text_lower[path] = low
-            self._text_bytes += len(low)
+            self._maybe_cache(self._text_lower, path,
+                              self.read(path).lower())
         return self._text_lower[path]
 
     def grep(self, pool: list, needles: list, limit: int = 300,

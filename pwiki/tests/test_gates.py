@@ -193,7 +193,18 @@ def test_sheet_gates(tmp_path):
     deep_sheet = ("# 概述\n\n模块负责 X。依据 [src/a.py:1-5](file://src/a.py#L1-L5)。\n\n"
                   "**章节来源**\n- [src/a.py:1-5](file://src/a.py#L1-L5)\n")
     errs, _ = gates.gate_item(deep_sheet, item, repo, "deep", phase="lining")
-    assert errs == []
+    # r8 #30: D15 'module' 总量带(60-110)接线 —— 该分支从 gate_item 不可达
+    # 时, 低引用深速查表过 LINING 与 references/validation.md 契约相悖
+    assert any("速查表分档 60-110" in e for e in errs), errs
+    assert not any(e for e in errs
+                   if "速查表分档" not in e), errs   # 其余维度干净
+    # 引用数进带: 无总量带错误
+    in_band = ("# 概述\n\n模块负责 X。依据 "
+               + " ".join(f"[a](file://src/a.py#L{i}-L{i})"
+                          for i in range(1, 61))
+               + "。\n\n**章节来源**\n- [src/a.py:1-5](file://src/a.py#L1-L5)\n")
+    errs, _ = gates.gate_item(in_band, item, repo, "deep", phase="lining")
+    assert not any("速查表分档" in e for e in errs), errs
 
 
 def test_h1_contract_hard_error(tmp_path):
