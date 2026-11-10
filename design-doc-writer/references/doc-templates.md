@@ -5,6 +5,7 @@
 - H1 标题下一行写状态行：`状态: Draft`（confirm 成功时 dd.py 自动同步为 `状态: Confirmed`；勿手改状态行）。
 - 复杂逻辑用 mermaid 表达（选型见 `mermaid-uml.md`）；**禁止整段实现代码**；伪代码仅算法必要处且 ≤10 行并附一句说明。
 - 未决问题显式标注 `[未决:Qxxx]`；延期问题标注 `[延期:Qxxx]`（check 门禁与台账对账）。
+- 标识符命名与码值定义遵循 `coding-standards.md`（目标库规范文档/事实惯例优先于基线）；每个码值字段给全码值表（枚举名+码值+含义）。
 - 不出现任何占位符禁词（枚举见 dd.py `PLACEHOLDERS`，出现即门禁 FAIL）；所有示例省略号 `……` 落笔时必须替换为实质内容。
 
 ## 需求分析文档骨架（requirements-analysis.md）
@@ -131,7 +132,7 @@ stateDiagram-v2
 
 ## 数据库设计
 
-（表结构表格 + erDiagram + 索引与迁移说明）
+（表结构表格 + erDiagram + 索引与迁移说明；码值列给码值表，格式见 coding-standards.md）
 
 **t_export_task**
 

@@ -31,6 +31,7 @@ description: 编写需求分析与详细设计文档。用于：根据用户需�
 6. **未决必须显式标注**：文档中以 `[未决:Qxxx]` / `[延期:Qxxx]` 标注（check 门禁校验与台账对账），不得静默假设。
 7. **中断恢复一切从 `dd.py status` 开始**：有台账即按其 phase 续跑；**绝不重新 init、绝不回滚或删除已落盘内容**。
 8. **ADR 三重门**：只有同时满足"难逆转 / 无上下文会困惑 / 真实权衡"的决策才写 ADR（q-answer --adr）；一个 ADR 可以只有一段。
+9. **命名与码值合规**：文档中的标识符（类/方法/变量/表/列/索引/接口/参数/缓存键）与码值定义遵循 `references/coding-standards.md`——目标库既有规范文档与事实惯例优先于基线；每个码值字段给全码值表（枚举名+码值+含义）。
 
 ## 阶段 0 — 恢复检查（每次会话首先执行）
 
@@ -47,14 +48,14 @@ python3 <skill>/scripts/dd.py status --repo <repo>
 |---|---|
 | LLM 做 | 收集三类输入：①需求描述（文档/口头）②知识库位置 ③目标代码库路径；用户未提供且不可自查的信息**问用户**（包括期望的文档落盘位置——尊重目标库既有文档惯例，含糊时给推荐项再问） |
 | 脚本做 | `dd.py init --feature <slug> [--shape web\|api\|backend\|library] [--analysis-doc ..] [--design-doc ..] [--adrs-dir ..]` 建台账（shape 预置章节清单；台账已存在则进入恢复模式，绝不重置） |
-| 问用户 | 需求来源与目标、期望文档位置、项目形态（web/api/backend/library） |
+| 问用户 | 需求来源与目标、期望文档位置、项目形态（web/api/backend/library）、团队规范文档位置（开发规范/SQL 规约等，可选——有则 `kb-scan --standards` 登记） |
 | 禁止推进 | 需求目标仍空白时不得进入分析 |
 
 ## 阶段 2 — 深度分析与问题识别（analyzing）
 
 | | |
 |---|---|
-| LLM 做 | 先 `dd.py kb-scan`（可带 `--openwiki` 自报 MCP 可用性）；按台账 kb.primary 优先用知识库做事实调研（codegraph→codegraph_explore；repowise→search_codebase/get_answer；pwiki→pwiki 检索；wiki→openwiki MCP 或直读目录内 markdown；graphify→图查询），**primary 只是默认建议，可按问题性质改用任一可用源**；无知识库则降级直接读码。对照 `references/question-dimensions.md` 逐维度识别问题 |
+| LLM 做 | 先 `dd.py kb-scan`（可带 `--openwiki` 自报 MCP 可用性、`--standards <路径>` 登记用户给的规范文档，可多次）；按台账 kb.primary 优先用知识库做事实调研（codegraph→codegraph_explore；repowise→search_codebase/get_answer；pwiki→pwiki 检索；wiki→openwiki MCP 或直读目录内 markdown；graphify→图查询），**primary 只是默认建议，可按问题性质改用任一可用源**；无知识库则降级直接读码。命名与码值惯例按 `references/coding-standards.md` 调研清单自查（已登记规范文档先通读）。对照 `references/question-dimensions.md` 逐维度识别问题 |
 | 脚本做 | 先 `dd.py phase analyzing` 进入分析阶段（intake 唯一解锁命令）；`dd.py q-add --dimension <d> --title <t> --body <b> --recommendation <r> [--depends-on Q001,Q002] [--facts <自查事实>]`（支持 `--batch questions.json` 批量；analyzing 阶段首个 q-add 自动进入 grilling） |
 | 问用户 | 不问——本阶段产出问题，不作答 |
 | 禁止推进 | 未做过任何事实调研就提问（先查再问）；q-add 期间禁止写正式文档 |
@@ -95,7 +96,7 @@ python3 <skill>/scripts/dd.py status --repo <repo>
 
 | | |
 |---|---|
-| LLM 做 | `dd.py phase design-doc`（analysis 未 confirmed 会被拦截）→ 按模板写设计文档：章节以台账 manifest 为准（`dd.py manifest --enable/--disable <id> --reason ".."` 可裁剪）；核心逻辑按子域拆小节、每节一张 mermaid（选型见 `references/mermaid-uml.md`）；接口=表格+一行签名；DB=表结构+erDiagram；TDD 用例表（TC-xxx，Given/When/Then，覆盖核心路径+边界+异常，建议覆盖非功能场景） |
+| LLM 做 | `dd.py phase design-doc`（analysis 未 confirmed 会被拦截）→ 按模板写设计文档：章节以台账 manifest 为准（`dd.py manifest --enable/--disable <id> --reason ".."` 可裁剪）；核心逻辑按子域拆小节、每节一张 mermaid（选型见 `references/mermaid-uml.md`）；接口=表格+一行签名；DB=表结构+erDiagram；命名与码值遵循 `references/coding-standards.md`（目标库规范/惯例优先，码值字段给全码值表）；TDD 用例表（TC-xxx，Given/When/Then，覆盖核心路径+边界+异常，建议覆盖非功能场景） |
 | 脚本做 | `dd.py check --doc design`（含前置：analysis 已确认、台账零 open 零 deferred）迭代到全 PASS |
 | 问用户 | check 全过后请用户审阅确认 |
 | 禁止推进 | 设计文档禁整段实现代码；门禁未过禁 confirm |
@@ -125,7 +126,7 @@ finish 校验双文档 confirmed 后置 phase=done 并打印交付摘要。最�
 
 ```bash
 dd.py init --feature <slug> [--shape web|api|backend|library] [--analysis-doc p] [--design-doc p] [--adrs-dir p]
-dd.py kb-scan [--openwiki]
+dd.py kb-scan [--openwiki] [--standards <路径>]
 dd.py q-add --dimension <d> --title <t> --body <b> --recommendation <r> [--depends-on Q001] [--facts <t>] [--batch questions.json]
 dd.py q-answer <QID> --answer "<决策>" [--adr --adr-slug <ascii>] | <QID> --defer --reason "<原因>"
 dd.py frontier                       # exit 1 = 还有待办

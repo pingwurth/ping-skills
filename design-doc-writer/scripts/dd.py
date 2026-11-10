@@ -89,6 +89,13 @@ KB_SOURCES = [
     ("graphify", "graphify-out", "graphify：图查询（god nodes / query / path）"),
 ]
 
+# 规范文档探测：repo 根与 docs 根下的 .md，命中文件名特征即列为规范文档。
+# 它是通读型输入而非检索引擎——不参与 primary 评选；命名/码值以它优先于
+# references/coding-standards.md 的缺省基线（“部署手册”等运维文档不含
+# 开发规范语素，刻意不命中）
+STANDARDS_NAME_RE = re.compile(r"规范|标准|规约|开发手册|convention|standard|style[-_]?guide", re.I)
+STANDARDS_EXACT_NAMES = {"contributing.md"}
+
 MERMAID_ALLOWED = {"flowchart", "graph", "sequencediagram", "classdiagram",
                    "statediagram", "erdiagram"}  # 图型首词小写并剥 `-v2` 等版本后缀后比对
 MERMAID_ALIAS = {"graph": "flowchart"}  # 归一化报告用
@@ -225,6 +232,14 @@ def validate_ledger(data: object) -> list[str]:
             or not isinstance(kb.get("openwiki_mcp"), bool)
             or not (kb.get("primary") is None or isinstance(kb.get("primary"), str))):
         errs.append("kb 非法（须含 detected 列表 / openwiki_mcp 布尔 / primary 字符串或 null）")
+    # standards_docs 可缺省（init 未填/旧台账）；存在则须为 path/source 对象列表
+    std = kb.get("standards_docs") if isinstance(kb, dict) else None
+    if std is not None and (
+            not isinstance(std, list)
+            or any(not isinstance(e, dict)
+                   or not isinstance(e.get("path"), str) or not e.get("path")
+                   or e.get("source") not in ("auto", "manual") for e in std)):
+        errs.append("kb.standards_docs 非法（须为含 path/source 的对象列表）")
     if not isinstance(data.get("adrs_dir"), str) or not data.get("adrs_dir"):
         errs.append("adrs_dir 缺失")
     hist = data.get("history")
@@ -749,6 +764,20 @@ def _detect_docs_root(repo: Path) -> str:
     return "docs"
 
 
+def detect_standards_docs(repo: Path) -> list[str]:
+    """根目录与 docs 根下按文件名特征探测规范文档（repo 相对 posix 路径，稳定排序）。"""
+    hits: list[str] = []
+    for d in (repo, repo / _detect_docs_root(repo)):
+        if not d.is_dir():
+            continue
+        for p in sorted(d.iterdir()):
+            if not p.is_file() or p.suffix.lower() != ".md":
+                continue
+            if p.name.lower() in STANDARDS_EXACT_NAMES or STANDARDS_NAME_RE.search(p.stem):
+                hits.append(p.relative_to(repo).as_posix())
+    return hits
+
+
 def _agent_ignored(repo: Path) -> bool:
     """目标库 .gitignore 是否已忽略 .agent/（git 语义等价形都算：.agent、/.agent、**/.agent）。"""
     gi = repo / ".gitignore"
@@ -785,7 +814,7 @@ PHASE_GUIDE = {
     "analyzing": "dd.py kb-scan 后按 primary 知识库做事实调研，对照 references/question-dimensions.md 逐维度 dd.py q-add",
     "grilling": "dd.py frontier 取本轮问题，按 grilling 格式一轮全问（编号+推荐答案+---），用户答复后逐条 dd.py q-answer",
     "analysis-doc": "按 references/doc-templates.md 写需求分析文档（状态: Draft），dd.py check --doc analysis 迭代到 PASS，用户明确确认后 dd.py confirm --doc analysis --because \"<原话摘要>\"",
-    "design-doc": "按模板写详细设计文档（接口表格化、复杂逻辑 mermaid、TDD 用例表），dd.py check --doc design 迭代到 PASS",
+    "design-doc": "按模板写详细设计文档（接口表格化、复杂逻辑 mermaid、TDD 用例表；命名与码值遵循 references/coding-standards.md，目标库规范优先），dd.py check --doc design 迭代到 PASS",
     "done": "流程已完成：向用户逐文件汇报两份文档、ADR 清单与台账位置",
 }
 
@@ -855,12 +884,31 @@ def cmd_kb_scan(args, repo: Path) -> tuple[int, str]:
                              "usable": usable})
         if usable and primary is None:
             primary = kind
+    # 规范文档 = 自动探测 + 手动登记合并（--standards 本次新增；重扫保留既有手动项）
+    manual = [e["path"] for e in (ledger["kb"].get("standards_docs") or [])
+              if e.get("source") == "manual" and e.get("path")]
+    for p in args.standards or []:
+        cand = Path(p)
+        if not cand.is_file():
+            cand = repo / p
+        if not cand.is_file():
+            raise DDError(f"--standards 文件不存在：{p}（相对路径按目标库根解析）",
+                          next_="确认规范文档路径后重试（可多次传以登记多份）")
+        rp = cand.resolve()
+        rel = rp.relative_to(repo).as_posix() if rp.is_relative_to(repo) else str(p)
+        if rel not in manual:
+            manual.append(rel)
+    auto = detect_standards_docs(repo)
+    std_docs = ([{"path": p, "source": "auto"} for p in auto]
+                + [{"path": p, "source": "manual"} for p in manual])
     ledger["kb"] = {
         "detected": detected,
         "openwiki_mcp": bool(args.openwiki),
         "primary": primary,
+        "standards_docs": std_docs,
     }
-    add_history(ledger, "kb-scan", f"primary={primary} openwiki={bool(args.openwiki)}")
+    add_history(ledger, "kb-scan", f"primary={primary} openwiki={bool(args.openwiki)}"
+                + (f" standards={len(std_docs)}" if std_docs else ""))
     save_ledger(repo, ledger)
 
     print("== kb-scan ==")
@@ -875,9 +923,19 @@ def cmd_kb_scan(args, repo: Path) -> tuple[int, str]:
         print("  未探测到任何知识库目录（.codegraph/.repowise/.pwiki/.wiki/graphify-out）")
     if args.openwiki:
         print("  [openwiki] MCP 自报可用：openwiki_search / openwiki_read")
+    if std_docs:
+        print(f"规范文档（{len(std_docs)}）：写两份文档前通读；命名/码值以它们为准，"
+              "与 references/coding-standards.md 基线冲突时基线让位")
+        for e in std_docs:
+            print(f"  [{e['source']}] {e['path']}")
+    else:
+        print("规范文档：未探测到（团队有开发规范/SQL 规约时问用户路径，"
+              "dd.py kb-scan --standards <路径> 登记，可多次）")
     print(f"primary：{primary or '（无 → 降级直接读码）'}（默认建议，可按问题性质改用任一可用源）")
     nxt = ("按 primary 做事实调研，对照 references/question-dimensions.md 逐维度 dd.py q-add"
            if primary else "直接读码做事实调研，对照 references/question-dimensions.md 逐维度 dd.py q-add")
+    if std_docs:
+        nxt += "；规范文档先通读，命名与码值按 references/coding-standards.md（规范文档优先）"
     return EXIT_OK, nxt
 
 
@@ -1168,6 +1226,10 @@ def cmd_status(args, repo: Path) -> tuple[int, str]:
     kb = ledger["kb"]
     print(f"知识库：primary={kb.get('primary') or '（无，降级读码）'}"
           + (f"  openwiki_mcp={kb.get('openwiki_mcp')}" if kb.get("openwiki_mcp") else ""))
+    std_docs = kb.get("standards_docs") or []
+    if std_docs:
+        print("规范文档：" + "、".join(e["path"] for e in std_docs)
+              + "（命名/码值以它们为准）")
     for h in ledger["history"][-5:]:
         print(f"  · {h['at']} {h['event']} {h['detail']}")
     print(f"台账：{ledger_path(repo)}")
@@ -1314,8 +1376,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--adrs-dir", default=None, help="ADR 目录（默认 <docs>/adr）")
     s.set_defaults(func=cmd_init)
 
-    s = sub.add_parser("kb-scan", parents=[common], help="探测目标库知识库")
+    s = sub.add_parser("kb-scan", parents=[common], help="探测目标库知识库与规范文档")
     s.add_argument("--openwiki", action="store_true", help="环境有 openwiki MCP 时自报")
+    s.add_argument("--standards", action="append", default=None, metavar="PATH",
+                   help="登记规范文档路径（可多次；相对路径按目标库根解析，重扫保留手动项）")
     s.set_defaults(func=cmd_kb_scan)
 
     s = sub.add_parser("q-add", parents=[common], help="追加问题（LLM 判断，脚本记账）")

@@ -22,6 +22,7 @@ grill-with-docs 原版"一行委托另一个 skill"的架构被其官方文档�
 - **mermaid 只做围栏配平 + 类型白名单 + 复杂度 WARN**：stdlib 无 mermaid 解析器；语法级校验接 mmdc 留待后续（非 stdlib 排除首版）。
 - **kb.primary 是默认建议不是强制**：偏好序 codegraph>repowise>pwiki>wiki>graphify-out 只是缺省，SKILL.md 明示 LLM 可按问题性质改用任一可用源。
 - **增量修订模式未实现但未堵死**：ledger.version、history 事件流、docs.status（可扩 stale）、questions（可扩 superseded_by）均为扩展点；首版只支持全新编写。
+- **命名/码值规范走 references 与调研面而非门禁**：markdown 表格里的标识符无法与目标库惯例可靠机械比对，误报会侵蚀门禁可信度，故 check 不校验命名，三件套代替——references/coding-standards.md 基线（write-time 指引 + SKILL.md 硬约束 9）、kb-scan 规范文档探测/登记（kb.standards_docs 入台账可断点续跑，手动项重扫保留；不参与 primary 评选——规范是通读型输入不是检索引擎）、question-dimensions 把命名惯例定性为"先查的事实"。
 
 ## 已知边界
 
